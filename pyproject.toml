@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling>=1.21,<1.32", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "saprfclib"
+dynamic = ["version"]
+requires-python = ">=3.12"
+description = "Pure Python SAP RFC protocol implementation — zero native dependencies"
+readme = "README.md"
+license = "MPL-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Julian Petersohn", email = "julian@petersohn.it" },
+]
+keywords = ["sap", "rfc", "abap", "nwrfc", "protocol", "pure-python", "erp", "s4hana"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Networking",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+# wsproto + h11 are CORE deps per D-27 (wRFC transport imports them unconditionally).
+# There are NO [ws] / [snc] / [all] optional extras — test_packaging.py enforces this.
+dependencies = [
+    "wsproto>=1.2",
+    "h11>=0.16",
+]
+
+[project.urls]
+Homepage = "https://github.com/randomstr1ng/saprfclib"
+Repository = "https://github.com/randomstr1ng/saprfclib"
+Documentation = "https://randomstr1ng.github.io/saprfclib/"
+Issues = "https://github.com/randomstr1ng/saprfclib/issues"
+Changelog = "https://github.com/randomstr1ng/saprfclib/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6",
+    "mypy>=2.0",
+    "ruff>=0.5",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=1.0",
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/saprfclib/_version.py"
+
+# ---------------------------------------------------------------------------
+# Hatch environment definitions
+# ---------------------------------------------------------------------------
+
+[tool.hatch.envs.default]
+features = ["dev"]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest {args}"
+test-cov = "pytest --cov=saprfclib {args}"
+
+[tool.hatch.envs.lint]
+detached = true
+dependencies = [
+    "mypy>=2.0",
+    "ruff>=0.5",
+]
+
+[tool.hatch.envs.lint.scripts]
+check = ["ruff check src tests", "ruff format --check src tests"]
+fmt = ["ruff check --fix src tests", "ruff format src tests"]
+type = "mypy src"
+
+[tool.hatch.envs.docs]
+features = ["docs"]
+
+[tool.hatch.envs.docs.scripts]
+build = "mkdocs build --strict"
+serve = "mkdocs serve"
+deploy = "mkdocs gh-deploy --force"
+
+# ---------------------------------------------------------------------------
+# Tool configuration
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a live SAP system (set SAPRFC_ASHOST and other SAPRFC_* env vars)",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "T20"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+exclude = ["tests/"]
