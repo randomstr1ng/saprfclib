@@ -1,0 +1,225 @@
+{
+  "_comment": "Golden SAPMS MESSAGE server-list response frame. Source: captures/phase03_msgserver_capture_output.txt, the MS->CLIENT 598-byte frame (server-list response). Captured 2026-06-27 against SAP A4H Rel. 758, sysnr=00. All field offsets are relative to byte 0 = first byte of the NI 4-byte length prefix (i.e. the buffer stored in .bin includes the 4-byte prefix).",
+  "_source": "wire-captured",
+  "fixture_file": "tests/golden/router/sapms_server_list.bin",
+  "total_size_bytes": 598,
+
+  "frame_header": {
+    "_comment": "SAPMS MESSAGE frame header bytes 0..117. wire-captured.",
+    "ni_length_prefix": {
+      "offset": 0,
+      "length": 4,
+      "value_hex": "00000252",
+      "value_dec": 594,
+      "_note": "BE uint32 = total frame size - 4. wire-captured."
+    },
+    "magic": {
+      "offset": 4,
+      "length": 11,
+      "value_ascii": "**MESSAGE**",
+      "value_hex": "2a2a4d45535341474520 2a2a",
+      "_note": "Fixed 11-byte magic string. wire-captured."
+    },
+    "key_byte": {
+      "offset": 15,
+      "length": 1,
+      "value_hex": "00",
+      "_note": "[ASSUMED] purpose unknown. Zero in this frame. wire-captured value."
+    },
+    "version": {
+      "offset": 16,
+      "length": 1,
+      "value_hex": "04",
+      "value_dec": 4,
+      "_note": "Protocol version = 4. wire-captured."
+    },
+    "padding_byte_17": {
+      "offset": 17,
+      "length": 1,
+      "value_hex": "00",
+      "_note": "[ASSUMED] zero padding between version and sender_type. wire-captured value."
+    },
+    "sender_type": {
+      "offset": 18,
+      "length": 1,
+      "value_hex": "2d",
+      "value_ascii": "-",
+      "_note": "[ASSUMED] 0x2D ('-') in server responses. wire-captured value."
+    },
+    "sender_name": {
+      "offset": 19,
+      "length": 40,
+      "value": "39 space chars + 0x00 null byte = 40 bytes total",
+      "_note": "40-byte null-terminated sender name field (space-padded + null). Empty (spaces+null) in server responses. wire-captured."
+    },
+    "zeros_59_to_69": {
+      "offset": 59,
+      "length": 11,
+      "value_hex": "00000000000000000000000000",
+      "_note": "[ASSUMED] 11 zero bytes. wire-captured value."
+    },
+    "msg_type": {
+      "offset": 70,
+      "length": 1,
+      "value_hex": "03",
+      "value_dec": 3,
+      "_note": "[ASSUMED] message type. 0x03 = MSG_SERVER class (server-list response). wire-captured."
+    },
+    "direction": {
+      "offset": 71,
+      "length": 1,
+      "value_hex": "01",
+      "_note": "[ASSUMED] 0x01 = server-to-client response direction. wire-captured value."
+    },
+    "opcode_name": {
+      "offset": 72,
+      "length": 10,
+      "value_ascii": "MSG_SERVER",
+      "value_hex": "4d53475f534552564552",
+      "_note": "10-byte ASCII opcode name, right-space-padded. wire-captured."
+    },
+    "opcode_padding": {
+      "offset": 82,
+      "length": 30,
+      "value": "30 space bytes (0x20)",
+      "_note": "[ASSUMED] space padding after opcode name to fill field. wire-captured pattern."
+    },
+    "unknown_112": {
+      "offset": 112,
+      "length": 2,
+      "value_hex": "0000",
+      "_note": "[ASSUMED] unknown field. wire-captured value."
+    },
+    "opcode_field": {
+      "offset": 114,
+      "length": 2,
+      "value_hex": "0500",
+      "_note": "[ASSUMED] opcode / sub-type field. Value 0x0500 in server-list response. wire-captured value."
+    },
+    "sub_opcode": {
+      "offset": 116,
+      "length": 2,
+      "value_hex": "0403",
+      "_note": "[ASSUMED] sub-opcode or response flags. wire-captured value."
+    }
+  },
+
+  "server_entries_start_offset": 118,
+  "server_entry_size": 160,
+  "_entry_count_note": "[ASSUMED] 3 entries derived from (598 - 118) / 160 = 3.0. No explicit count field identified in header — count is inferred by parsing entries until buffer end. wire-captured byte math.",
+  "server_entry_count": 3,
+
+  "per_server_entry_layout": {
+    "_comment": "Per-server entry field layout (offsets relative to entry start). Entry size = 160 bytes. wire-captured from 3 entries in frame.",
+    "instance_name": {
+      "offset_in_entry": 0,
+      "length": 40,
+      "_note": "40-byte space-padded ASCII instance name (e.g. 'vhcala4hci_A4H_00') or '-' padded. wire-captured."
+    },
+    "hostname_string": {
+      "offset_in_entry": 40,
+      "length": 40,
+      "_note": "40-byte space-padded ASCII hostname or dotted IPv4 string. wire-captured."
+    },
+    "field3_unknown": {
+      "offset_in_entry": 80,
+      "length": 40,
+      "_note": "[ASSUMED] secondary name / FQDN / 'tick-port' string or '-' padding. wire-captured values."
+    },
+    "zeros_120": {
+      "offset_in_entry": 120,
+      "length": 4,
+      "_note": "[ASSUMED] 4 space bytes (0x20) then zero bytes leading to ffff marker. wire-captured pattern."
+    },
+    "load_byte": {
+      "offset_in_entry": 124,
+      "length": 1,
+      "_note": "[ASSUMED] server load score (0 = not participating, 0xBB=187 = active with load). wire-captured for entry2=0xBB. Entry1 and entry3 have 0x00."
+    },
+    "unknown_125_to_134": {
+      "offset_in_entry": 125,
+      "length": 10,
+      "value_hex": "00000000000000000000",
+      "_note": "[ASSUMED] 10 zero bytes. wire-captured."
+    },
+    "ffff_marker": {
+      "offset_in_entry": 135,
+      "length": 2,
+      "value_hex": "ffff",
+      "_note": "[ASSUMED] fixed 0xFFFF marker before binary IP block. wire-captured in all 3 entries."
+    },
+    "ip_addr_primary": {
+      "offset_in_entry": 137,
+      "length": 4,
+      "_note": "4-byte BE IPv4 address. wire-captured: entry0=c0a86306, entry1=c0a85807, entry2=7f000001."
+    },
+    "ip_addr_secondary": {
+      "offset_in_entry": 141,
+      "length": 4,
+      "_note": "[ASSUMED] duplicate/secondary IP — identical to primary in all 3 entries. wire-captured."
+    },
+    "port": {
+      "offset_in_entry": 145,
+      "length": 2,
+      "_note": "2-byte BE port number. 0 = inactive; 0x0C80 = 3200 (active dispatcher). wire-captured."
+    },
+    "trailing_flags": {
+      "offset_in_entry": 147,
+      "length": 13,
+      "_note": "[ASSUMED] trailing bytes: entry1 byte[0]=0x01 (active flag?), rest zeros. wire-captured values."
+    }
+  },
+
+  "server_entries": [
+    {
+      "index": 0,
+      "absolute_offset": 118,
+      "instance_name": "-",
+      "hostname_string": "192.168.99.6",
+      "ip_addr": "192.168.99.6",
+      "ip_hex": "c0a86306",
+      "port": 0,
+      "status": "inactive",
+      "_note": "wire-captured: port 0 = not participating in group logon."
+    },
+    {
+      "index": 1,
+      "absolute_offset": 278,
+      "instance_name": "vhcala4hci_A4H_00",
+      "hostname_string": "vhcala4hci",
+      "ip_addr": "192.168.88.7",
+      "ip_hex": "c0a85807",
+      "port": 3200,
+      "load_byte_hex": "bb",
+      "load_value": 187,
+      "status": "active",
+      "_note": "wire-captured: active server. sysnr = (3200 - 3200) // 100 = 0."
+    },
+    {
+      "index": 2,
+      "absolute_offset": 438,
+      "instance_name": "-",
+      "hostname_string": "127.0.0.1",
+      "ip_addr": "127.0.0.1",
+      "ip_hex": "7f000001",
+      "port": 0,
+      "status": "inactive",
+      "_note": "wire-captured: loopback entry, inactive for external clients."
+    }
+  ],
+
+  "selection_rule": {
+    "_note": "Select first entry with port > 0 (active). For Phase 4 MVP, this selects entry index 1 (192.168.88.7:3200, sysnr=0). Pool selection deferred to Phase 5.",
+    "selected_index": 1,
+    "selected_host": "192.168.88.7",
+    "selected_port": 3200,
+    "sysnr_formula": "sysnr = (port - 3200) // 100",
+    "sysnr": 0
+  },
+
+  "error_code_field": {
+    "_note": "[ASSUMED] No confirmed error code field in this frame. The parser rejects frames with wrong magic or too-short buffer. A SAPMS error response has not been captured — error code location is UNKNOWN. parse_sapms_server_list raises ValueError if magic is wrong; no error-code byte check possible without further RE.",
+    "confirmed": false,
+    "status": "UNKNOWN"
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "message_type": "RFCTYPE_BCD_FIELD",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 1,
+      "name": "bcd_byte_0",
+      "value": "0x00",
+      "type": "fixed",
+      "notes": "Packed BCD byte 0: high nibble=0, low nibble=0 → digits '00' (leading zeros, P15.2 zero-pads to 15 digits)"
+    },
+    {
+      "offset": 1,
+      "length": 1,
+      "name": "bcd_byte_1",
+      "value": "0x00",
+      "type": "fixed",
+      "notes": "Packed BCD byte 1: high nibble=0, low nibble=0 → digits '00' (leading zeros)"
+    },
+    {
+      "offset": 2,
+      "length": 1,
+      "name": "bcd_byte_2",
+      "value": "0x00",
+      "type": "fixed",
+      "notes": "Packed BCD byte 2: high nibble=0, low nibble=0 → digits '00' (leading zeros)"
+    },
+    {
+      "offset": 3,
+      "length": 1,
+      "name": "bcd_byte_3",
+      "value": "0x08",
+      "type": "fixed",
+      "notes": "Packed BCD byte 3: high nibble=0, low nibble=8 → digits '08' (first significant digit '8')"
+    },
+    {
+      "offset": 4,
+      "length": 1,
+      "name": "bcd_byte_4",
+      "value": "0x00",
+      "type": "fixed",
+      "notes": "Packed BCD byte 4: high nibble=0, low nibble=0 → digits '00'"
+    },
+    {
+      "offset": 5,
+      "length": 1,
+      "name": "bcd_byte_5",
+      "value": "0x00",
+      "type": "fixed",
+      "notes": "Packed BCD byte 5: high nibble=0, low nibble=0 → digits '00'"
+    },
+    {
+      "offset": 6,
+      "length": 1,
+      "name": "bcd_byte_6",
+      "value": "0x05",
+      "type": "fixed",
+      "notes": "Packed BCD byte 6: high nibble=0, low nibble=5 → digits '05' (last two integer/decimal digits before final byte)"
+    },
+    {
+      "offset": 7,
+      "length": 1,
+      "name": "bcd_byte_7_digit_and_sign",
+      "value": "0x0C",
+      "type": "fixed",
+      "notes": "Packed BCD byte 7: high nibble=0 (final digit '0'), low nibble=C (0x0C = positive sign). Live-CONFIRMED positive sign nibble 0x0C from SAP A4H capture 2026-06-26. Full digit string '000000080000050' + sign positive, decimals=2 → 800000.50"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_BCD",
+    "rfctype_value": 2,
+    "wire_size_bytes": 8,
+    "precision": 15,
+    "decimals": 2,
+    "value": "800000.50",
+    "sign": "positive",
+    "sign_nibble": "0x0C",
+    "digit_string": "000000080000050"
+  },
+  "capture_source": "live capture 2026-06-26 — BAPI_FLIGHT_GETLIST FLIGHT_LIST.PRICE (BAPISFLIGHT.PRICE, P15.2); SAP A4H sysnr=00; port 3300, reassembled TCP stream offset 0x44D; pattern repeats ~8x across flight rows (same price). Only the BCD payload bytes are recorded — no credentials or logon frame captured (T-02-01 mitigation)",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_BCD_branch [ASSUMED pending BN confirmation — addr 0x8d35f]; wire bytes independently confirmed by live capture",
+  "gap_status": "confirmed — live capture 2026-06-26; packed-BCD encoding (2 digits/byte, sign in low nibble of last byte, 0x0C=positive) confirmed from real SAP wire bytes 00 00 00 08 00 00 05 0C = 800000.50. Negative sign (0x0D) sapucrfc.h-confirmed only; no live negative value reachable in SFLIGHT (positive prices)"
+}

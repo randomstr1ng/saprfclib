@@ -1,0 +1,24 @@
+{
+  "message_type": "RFCTYPE_INT8_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 8,
+      "name": "int8_value",
+      "value": "0x2a00000000000000",
+      "type": "fixed",
+      "notes": "Signed 64-bit integer, value=42; little-endian (struct '<q'); wire bytes 2a 00 00 00 00 00 00 00 [ASSUMED LE like INT4/INT2 — byte order and enum value 31 pending BN confirmation per Assumption A1]"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_INT8",
+    "rfctype_value": 31,
+    "wire_size_bytes": 8,
+    "value": 42
+  },
+  "capture_source": "synthetic value (42) — INT8 layout derived from serialization.md line 413; no live RFM exposing INT8 reachable on SAP A4H 2026-06-26",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch [ASSUMED pending BN confirmation — addr 0x8d35f common dispatch]",
+  "status": "synthetic",
+  "gap_status": "[ASSUMED] — INT8 (enum 31 per Assumption A1) wire byte order LE assumed by analogy to INT4; pending BN confirmation + live capture",
+  "ni_header_length": 0
+}

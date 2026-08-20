@@ -1,0 +1,78 @@
+{
+  "message_type": "RFCTYPE_TABLE_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 8,
+      "name": "row0_rfcchar4_uc",
+      "value": "0x4100420043004400",
+      "type": "fixed",
+      "notes": "TABLE row 0 field 0: CHAR(4)='ABCD' UTF-16-LE (unicode wire). Row layout identical to type_structure (D-11).",
+      "nuc_offset": 0,
+      "nuc_length": 4,
+      "uc_offset": 0,
+      "uc_length": 8
+    },
+    {
+      "offset": 8,
+      "length": 4,
+      "name": "row0_rfcint4_value",
+      "value": "0x00000100",
+      "type": "fixed",
+      "notes": "TABLE row 0 field 1: INT4=65536 LE (00 00 01 00).",
+      "nuc_offset": 4,
+      "nuc_length": 4,
+      "uc_offset": 8,
+      "uc_length": 4
+    },
+    {
+      "offset": 12,
+      "length": 8,
+      "name": "row1_rfcchar4_uc",
+      "value": "0x4100420043004400",
+      "type": "fixed",
+      "notes": "TABLE row 1 field 0: CHAR(4)='ABCD' UTF-16-LE (unicode wire). Identical to row 0 (D-11: 2+ identical rows).",
+      "nuc_offset": 8,
+      "nuc_length": 4,
+      "uc_offset": 12,
+      "uc_length": 8
+    },
+    {
+      "offset": 20,
+      "length": 4,
+      "name": "row1_rfcint4_value",
+      "value": "0x00000100",
+      "type": "fixed",
+      "notes": "TABLE row 1 field 1: INT4=65536 LE (00 00 01 00).",
+      "nuc_offset": 12,
+      "nuc_length": 4,
+      "uc_offset": 20,
+      "uc_length": 4
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_TABLE",
+    "rfctype_value": 5,
+    "row_count": 2,
+    "row_size_bytes_unicode": 12,
+    "row_size_bytes_nonunicode": 8,
+    "wire_size_bytes_unicode": 24,
+    "encoding": "utf-16-le (unicode wire layout in .bin)",
+    "row_layout": "matches type_structure (CHAR(4) + INT4)",
+    "rows": [
+      {
+        "RFCCHAR4": "ABCD",
+        "RFCINT4": 65536
+      },
+      {
+        "RFCCHAR4": "ABCD",
+        "RFCINT4": 65536
+      }
+    ]
+  },
+  "capture_source": "synthetic TABLE (2 identical rows of CHAR(4)='ABCD' + INT4=65536) — row layout matches type_structure; member encodings confirmed via live STFC_STRUCTURE capture 2026-06-26",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_TABLE_branch [ASSUMED row framing + nuc/uc offsets pending Gate C — addr 0x8d35f]",
+  "status": "synthetic",
+  "gap_status": "[ASSUMED] — TABLE per-row framing and nuc/uc offsets depend on Gate C; row member layouts derived from confirmed CHAR/INT4 live captures 2026-06-26",
+  "ni_header_length": 0
+}

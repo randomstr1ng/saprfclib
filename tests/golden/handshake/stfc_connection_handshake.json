@@ -1,0 +1,176 @@
+{
+  "message_type": "RFC_LOGON_REQUEST",
+  "capture_source": "live capture 2026-06-26 frame 14; SAP A4H sysnr=00 port=3300; completes 3-phase handshake",
+  "binja_ref": "libsapnwrfc.so::NiIWrite::0x7a9c59; COM_HEAD EBCDIC signature confirmed",
+  "ni_header_length": 4,
+  "notes": [
+    "RFC logon frame — the RFC-layer credential exchange completing the 3-phase handshake",
+    "Only frame in a session that contains COM_HEAD (EBCDIC 'RFC000000000')",
+    "Contains TLV credentials: client (0x0114), user (0x0111), password-hash (0x0117), language (0x0115)",
+    "Ends with RFCPING call (0x0102) — RFC probe used during logon, not a user function call",
+    "Phase 1 (NI version) and Phase 2 (GW connect) fixtures in the same directory",
+    "Codepage 4103 (UTF-16LE) was negotiated in Phase 1 — all string TLVs below use single-byte ASCII (logon credentials are raw bytes, not UC-encoded)"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_length", "value": "0x00000151",
+      "type": "fixed",
+      "note": "BE uint32 = 337 bytes NI payload length"
+    },
+    {
+      "offset": 4, "length": 76,
+      "name": "gw_header", "value": "06cb0200...",
+      "type": "variable",
+      "note": "76-byte GW/APPC header: type=0x06CB, version=0x0200, flags, connection_handle='75568442' at [36:44]"
+    },
+    {
+      "offset": 80, "length": 4,
+      "name": "rfc_stream_marker", "value": "0xffff0001",
+      "type": "fixed",
+      "note": "Pre-TLV marker: 0xffff0001 = client request"
+    },
+    {
+      "offset": 84, "length": 12,
+      "name": "com_head", "value": "d9c6c3f0f0f0f0f0f0f0f0f0",
+      "type": "fixed",
+      "note": "EBCDIC 'RFC000000000' — present ONLY in logon frame; absent from all subsequent function call frames"
+    },
+    {
+      "offset": 96, "length": 14,
+      "name": "tlv_0101_capability", "value": "variable",
+      "type": "variable",
+      "note": "tag=0x0101 len=8; session capability bits [UNKNOWN layout]"
+    },
+    {
+      "offset": 110, "length": 10,
+      "name": "tlv_0103_version", "value": "variable",
+      "type": "variable",
+      "note": "tag=0x0103 len=4; protocol version bits [UNKNOWN]"
+    },
+    {
+      "offset": 120, "length": 17,
+      "name": "tlv_0106_codepage", "value": "variable",
+      "type": "variable",
+      "note": "tag=0x0106 len=11; codepage negotiation data [UNKNOWN]; result was 4103 (UTF-16LE)"
+    },
+    {
+      "offset": 137, "length": 22,
+      "name": "tlv_0514_session_token", "value": "variable",
+      "type": "variable",
+      "note": "tag=0x0514 len=16; session token (16 bytes binary)"
+    },
+    {
+      "offset": 159, "length": 9,
+      "name": "tlv_0114_client", "value": "303031",
+      "type": "fixed",
+      "note": "tag=0x0114 len=3; SAP client number: ASCII '001'"
+    },
+    {
+      "offset": 168, "length": 15,
+      "name": "tlv_0111_user", "value": "446576656c6f706572",
+      "type": "fixed",
+      "note": "tag=0x0111 len=9; SAP username: ASCII 'Developer'"
+    },
+    {
+      "offset": 183, "length": 23,
+      "name": "tlv_0117_password_hash", "value": "variable",
+      "type": "variable",
+      "note": "tag=0x0117 len=17; password hash (17 bytes binary — format UNKNOWN; may be SAP proprietary hash)"
+    },
+    {
+      "offset": 206, "length": 7,
+      "name": "tlv_0115_language", "value": "45",
+      "type": "fixed",
+      "note": "tag=0x0115 len=1; logon language: ASCII 'E' (English)"
+    },
+    {
+      "offset": 213, "length": 7,
+      "name": "tlv_0501_flag", "value": "01",
+      "type": "variable",
+      "note": "tag=0x0501 len=1; flag byte 0x01 [UNKNOWN]"
+    },
+    {
+      "offset": 220, "length": 15,
+      "name": "tlv_0007_client_ip", "value": "3132372e302e312e31",
+      "type": "fixed",
+      "note": "tag=0x0007 len=9; client IP: ASCII '127.0.1.1'"
+    },
+    {
+      "offset": 235, "length": 7,
+      "name": "tlv_0011_lang", "value": "45",
+      "type": "variable",
+      "note": "tag=0x0011 len=1; language ASCII 'E' [duplicate of 0x0115]"
+    },
+    {
+      "offset": 242, "length": 9,
+      "name": "tlv_0012_rfc_version", "value": "373534",
+      "type": "fixed",
+      "note": "tag=0x0012 len=3; RFC protocol version: ASCII '754'"
+    },
+    {
+      "offset": 251, "length": 9,
+      "name": "tlv_0013_server_version", "value": "373534",
+      "type": "fixed",
+      "note": "tag=0x0013 len=3; server RFC version: ASCII '754' (matches client)"
+    },
+    {
+      "offset": 260, "length": 11,
+      "name": "tlv_0008_hostname", "value": "746974616e",
+      "type": "fixed",
+      "note": "tag=0x0008 len=5; client hostname: ASCII 'titan'"
+    },
+    {
+      "offset": 271, "length": 15,
+      "name": "tlv_0006_program", "value": "3c756e6b6e6f776e3e",
+      "type": "variable",
+      "note": "tag=0x0006 len=9; client transaction: ASCII '<unknown>'"
+    },
+    {
+      "offset": 286, "length": 13,
+      "name": "tlv_0130_program_name", "value": "707974686f6e33",
+      "type": "fixed",
+      "note": "tag=0x0130 len=7; program name: ASCII 'python3'"
+    },
+    {
+      "offset": 299, "length": 6,
+      "name": "tlv_0502_call_start", "value": "050200000502",
+      "type": "fixed",
+      "note": "tag=0x0502 len=0; call-start marker"
+    },
+    {
+      "offset": 305, "length": 9,
+      "name": "tlv_000b_rfc_version", "value": "373534",
+      "type": "fixed",
+      "note": "tag=0x000b len=3; RFC version in call context: ASCII '754'"
+    },
+    {
+      "offset": 314, "length": 13,
+      "name": "tlv_0102_function_name", "value": "52464350494e47",
+      "type": "fixed",
+      "note": "tag=0x0102 len=7; function: ASCII 'RFCPING' — logon probe, not a user function call"
+    },
+    {
+      "offset": 327, "length": 6,
+      "name": "tlv_ffff_terminator", "value": "ffff0000ffff",
+      "type": "fixed",
+      "note": "TLV stream terminator: tag=0xFFFF len=0"
+    },
+    {
+      "offset": 333, "length": 8,
+      "name": "trailing_zeros", "value": "0000000000000000",
+      "type": "variable",
+      "note": "Trailing padding bytes [UNKNOWN]"
+    }
+  ],
+  "expected_parse": {
+    "ni_length": 337,
+    "com_head_present": true,
+    "rfc_client": "001",
+    "rfc_user": "Developer",
+    "rfc_lang": "E",
+    "rfc_version": "754",
+    "client_hostname": "titan",
+    "initial_function": "RFCPING"
+  }
+}

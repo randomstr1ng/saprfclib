@@ -1,0 +1,33 @@
+{
+  "message_type": "RFCTYPE_CHAR_FIELD",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "char_A_utf16le",
+      "value": "0x4100",
+      "type": "fixed",
+      "notes": "Character 'A' encoded as UTF-16-LE: 0x41 0x00"
+    },
+    {
+      "offset": 2,
+      "length": 2,
+      "name": "char_B_utf16le",
+      "value": "0x4200",
+      "type": "fixed",
+      "notes": "Character 'B' encoded as UTF-16-LE: 0x42 0x00"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_CHAR",
+    "rfctype_value": 0,
+    "field_length_chars": 2,
+    "wire_size_bytes": 4,
+    "value": "AB",
+    "encoding": "utf-16-le"
+  },
+  "capture_source": "synthetic AB — UTF-16-LE encoding confirmed via live STFC_STRUCTURE capture 2026-06-26 (RFCCHAR1='A' at offset 8, RFCCHAR4='ABCD' at offset 14)",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_CHAR_branch — addr 0x8d35f",
+  "gap_status": "closed — UTF-16-LE space-padded encoding confirmed from live wire capture 2026-06-26"
+}

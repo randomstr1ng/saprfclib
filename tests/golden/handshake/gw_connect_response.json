@@ -1,0 +1,62 @@
+{
+  "message_type": "GW_CONNECT_RESPONSE",
+  "capture_source": "live capture 2026-06-26 frame 9; SAP A4H sysnr=00; server=10.20.30.15:3300",
+  "binja_ref": "libsapnwrfc.so::GwConnectResponse — GW layer below RFC; BN confirmation PENDING",
+  "ni_header_length": 4,
+  "notes": [
+    "Server response to GW connect request (frame 8)",
+    "KEY: server assigns connection handle '75568442' at offset 44 (8 bytes ASCII decimal)",
+    "Connection handle reused in ALL subsequent GW headers in this session at offset 44",
+    "GW msg_type 0x0601 = connect; same type byte in request and response",
+    "Frame 8 (GW_CONNECT_REQUEST, 457 bytes) not included as fixture — contains PII"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_length", "value": "0x00000050",
+      "type": "fixed",
+      "note": "BE uint32 = 80 bytes (GW body length)"
+    },
+    {
+      "offset": 4, "length": 2,
+      "name": "gw_msg_class", "value": "0x0601",
+      "type": "fixed",
+      "note": "GW connect message class (0x06=data, 0x01=connect)"
+    },
+    {
+      "offset": 6, "length": 2,
+      "name": "gw_protocol_version", "value": "0x0200",
+      "type": "fixed",
+      "note": "GW protocol version 2.0"
+    },
+    {
+      "offset": 8, "length": 36,
+      "name": "gw_session_state", "value": "variable",
+      "type": "variable",
+      "note": "GW session state — layout UNKNOWN; contains version/capability flags"
+    },
+    {
+      "offset": 44, "length": 8,
+      "name": "connection_handle", "value": "3735353638343432",
+      "type": "fixed",
+      "note": "ASCII '75568442' — server-assigned connection handle; used at offset 44 in all subsequent GW headers"
+    },
+    {
+      "offset": 52, "length": 28,
+      "name": "program_area", "value": "variable",
+      "type": "variable",
+      "note": "Program area: 'NWRFC   10.20.30sapdp00 ' padded + flags; GW routing info [UNKNOWN layout]"
+    },
+    {
+      "offset": 80, "length": 4,
+      "name": "tail", "value": "0x00000001",
+      "type": "fixed",
+      "note": "GW frame tail marker 0x00000001"
+    }
+  ],
+  "expected_parse": {
+    "ni_length": 80,
+    "gw_msg_type": "0x0601",
+    "connection_handle": "75568442"
+  }
+}

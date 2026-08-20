@@ -1,0 +1,61 @@
+{
+  "message_type": "GW_DONE_CLIENT",
+  "capture_source": "live capture 2026-06-26 frame 11; SAP A4H sysnr=00",
+  "binja_ref": "libsapnwrfc.so::GwDoneClient — GW layer; BN confirmation PENDING",
+  "ni_header_length": 4,
+  "notes": [
+    "Client GW handshake completion (type 0x0605) — sent after GW connect accept (frame 9)",
+    "Codepage area (offset 52-79) is all zeros from client; server sets codepage in frame 13",
+    "Tail marker is 0xffff0001 (differs from server 0x00000001)"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_length", "value": "0x00000050",
+      "type": "fixed",
+      "note": "BE uint32 = 80 bytes"
+    },
+    {
+      "offset": 4, "length": 2,
+      "name": "gw_msg_class", "value": "0x0605",
+      "type": "fixed",
+      "note": "GW done/complete message type"
+    },
+    {
+      "offset": 6, "length": 2,
+      "name": "gw_protocol_version", "value": "0x0200",
+      "type": "fixed",
+      "note": "GW protocol version 2.0"
+    },
+    {
+      "offset": 8, "length": 36,
+      "name": "gw_session_state", "value": "variable",
+      "type": "variable",
+      "note": "GW session state [UNKNOWN layout]"
+    },
+    {
+      "offset": 44, "length": 8,
+      "name": "connection_handle", "value": "3735353638343432",
+      "type": "fixed",
+      "note": "ASCII '75568442' — connection handle from frame 9"
+    },
+    {
+      "offset": 52, "length": 28,
+      "name": "zeros_pad", "value": "0x00...",
+      "type": "fixed",
+      "note": "All zeros — client does not set codepage here; server sets '4103' in frame 13 response"
+    },
+    {
+      "offset": 80, "length": 4,
+      "name": "tail", "value": "0xffff0001",
+      "type": "fixed",
+      "note": "GW client done marker 0xffff0001 (differs from server tail 0x00000001)"
+    }
+  ],
+  "expected_parse": {
+    "ni_length": 80,
+    "gw_msg_type": "0x0605",
+    "connection_handle": "75568442",
+    "codepage_set_by_client": false
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "message_type": "NI_VERSION_RESPONSE",
+  "capture_source": "live capture 2026-06-26 frame 6; SAP A4H sysnr=00; server=10.20.30.15:3300",
+  "binja_ref": "libsapnwrfc.so::NiVersionExchange — NI layer; BN confirmation PENDING",
+  "ni_header_length": 4,
+  "notes": [
+    "Server response to NI version negotiation (frame 4)",
+    "KEY: server overrides codepage to '4103' (UTF-16LE) at offset 24 — this selects Unicode mode",
+    "All subsequent string data (RFC logon, function params) will use UTF-16LE encoding",
+    "version_flags changes from 0x0006 (client) to 0x000f (server) — meaning unknown",
+    "rfc_version_hint changes from 0x06cb to 0x06fb — meaning unknown"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_length", "value": "0x00000040",
+      "type": "fixed",
+      "note": "BE uint32 = 64 bytes"
+    },
+    {
+      "offset": 4, "length": 2,
+      "name": "msg_type", "value": "0x0203",
+      "type": "fixed",
+      "note": "NI version negotiation response"
+    },
+    {
+      "offset": 6, "length": 4,
+      "name": "client_ip", "value": "0x0a141e41",
+      "type": "fixed",
+      "note": "Client IPv4 echoed back: 10.20.30.65"
+    },
+    {
+      "offset": 10, "length": 4,
+      "name": "zeros_a", "value": "0x00000000",
+      "type": "fixed",
+      "note": "Reserved zeros"
+    },
+    {
+      "offset": 14, "length": 8,
+      "name": "program_name", "value": "python3\\x00",
+      "type": "fixed",
+      "note": "Program name echoed back"
+    },
+    {
+      "offset": 22, "length": 2,
+      "name": "zeros_b", "value": "0x0000",
+      "type": "fixed",
+      "note": "Padding"
+    },
+    {
+      "offset": 24, "length": 4,
+      "name": "selected_codepage", "value": "34313033",
+      "type": "fixed",
+      "note": "ASCII '4103' = server-selected codepage: UTF-16LE (Unicode mode); overrides client's proposed '1100'"
+    },
+    {
+      "offset": 28, "length": 4,
+      "name": "zeros_c", "value": "0x00000000",
+      "type": "fixed",
+      "note": "Reserved zeros"
+    },
+    {
+      "offset": 32, "length": 2,
+      "name": "version_flags", "value": "0x000f",
+      "type": "fixed",
+      "note": "Server version flags (0x000f vs 0x0006 in client request) [UNKNOWN]"
+    },
+    {
+      "offset": 34, "length": 10,
+      "name": "hostname", "value": "titan     ",
+      "type": "fixed",
+      "note": "Client hostname echoed back, space-padded"
+    },
+    {
+      "offset": 44, "length": 10,
+      "name": "program_padded", "value": "python3   ",
+      "type": "fixed",
+      "note": "Program name echoed back, space-padded"
+    },
+    {
+      "offset": 54, "length": 2,
+      "name": "rfc_version_hint", "value": "0x06fb",
+      "type": "fixed",
+      "note": "Server RFC version marker 06fb (differs from client 06cb) [UNKNOWN]"
+    },
+    {
+      "offset": 56, "length": 2,
+      "name": "unicode_marker", "value": "0xffff",
+      "type": "fixed",
+      "note": "0xffff = Unicode capable confirmed"
+    },
+    {
+      "offset": 58, "length": 10,
+      "name": "zeros_tail", "value": "0x00000000...",
+      "type": "fixed",
+      "note": "Trailing zeros / reserved"
+    }
+  ],
+  "expected_parse": {
+    "msg_type": "0x0203",
+    "ni_length": 64,
+    "selected_codepage": "4103",
+    "unicode_mode": true,
+    "program": "python3",
+    "hostname": "titan"
+  }
+}

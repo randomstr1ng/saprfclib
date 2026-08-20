@@ -1,0 +1,24 @@
+{
+  "message_type": "RFCTYPE_UTCMINUTE_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 8,
+      "name": "utcminute_value",
+      "value": "0x2a00000000000000",
+      "type": "fixed",
+      "notes": "Signed 64-bit integer, value=42; little-endian (struct '<q') [ASSUMED — RFCTYPE_UTCMINUTE (enum 34 per Assumption A1) wire format and byte order pending BN confirmation, serialization.md line 441]"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_UTCMINUTE",
+    "rfctype_value": 34,
+    "wire_size_bytes": 8,
+    "value": 42
+  },
+  "capture_source": "synthetic value (42) — RFCTYPE_UTCMINUTE layout derived from serialization.md line 441; no live RFM exposing this temporal reachable on SAP A4H 2026-06-26",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch [ASSUMED pending BN confirmation — addr 0x8d35f common dispatch]",
+  "status": "synthetic",
+  "gap_status": "[ASSUMED] — RFCTYPE_UTCMINUTE (enum 34 per Assumption A1) wire byte order/format assumed by analogy to INT types; pending BN confirmation + live capture",
+  "ni_header_length": 0
+}

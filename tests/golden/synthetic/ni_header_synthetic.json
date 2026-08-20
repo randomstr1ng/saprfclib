@@ -1,0 +1,28 @@
+{
+  "message_type": "NI_HEADER_SYNTHETIC",
+  "ni_header_length": 4,
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "payload_length",
+      "value": "0x00000004",
+      "type": "fixed",
+      "note": "Big-endian uint32; confirmed by NiIWrite bswap at BN 0x7a9c59"
+    },
+    {
+      "offset": 4,
+      "length": 4,
+      "name": "rfc_eyecatcher_partial",
+      "value": "0xD9C6C3F0",
+      "type": "fixed",
+      "note": "First 4 bytes of COM_HEAD: EBCDIC RFC + 0xF0"
+    }
+  ],
+  "expected_parse": {
+    "payload_length": 4,
+    "payload_hex": "d9c6c3f0"
+  },
+  "capture_source": "synthetic \u2014 no live capture; confirms 4-byte NI header per BN decompilation",
+  "binja_ref": "libsapnwrfc.so::NiIWrite::0x7a9c59 (bswap confirms BE), NiIRead::0x7aa34d (header=4)"
+}

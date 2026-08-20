@@ -1,0 +1,107 @@
+{
+  "message_type": "NI_VERSION_REQUEST",
+  "capture_source": "live capture 2026-06-26 frame 4; SAP A4H sysnr=00 port=3300; client=10.20.30.65",
+  "binja_ref": "libsapnwrfc.so::NiVersionExchange — NI layer; BN confirmation PENDING",
+  "ni_header_length": 4,
+  "notes": [
+    "NI version negotiation — first TCP payload sent by client",
+    "Client proposes codepage '1100' (Latin-1); server overrides to '4103' (UTF-16LE) in response",
+    "msg_type 0x0203 = NI version frame (not a GW or RFC data frame)",
+    "Codepage at offset 24 is the gate for Unicode vs non-Unicode mode",
+    "Connection handle not yet assigned — only established after GW connect (frame 9)"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_length", "value": "0x00000040",
+      "type": "fixed",
+      "note": "BE uint32 = 64 bytes (excludes 4-byte NI header itself)"
+    },
+    {
+      "offset": 4, "length": 2,
+      "name": "msg_type", "value": "0x0203",
+      "type": "fixed",
+      "note": "NI version negotiation message type (0x0203); NOT a gateway or RFC data frame"
+    },
+    {
+      "offset": 2, "length": 4,
+      "name": "client_ip", "value": "0x0a141e41",
+      "type": "variable",
+      "note": "Client IPv4: machine-specific (10.20.30.65 in capture); payload offset 2 (= raw frame offset 6 − 4 NI header), variable because taken from getsockname()"
+    },
+    {
+      "offset": 10, "length": 4,
+      "name": "zeros_a", "value": "0x00000000",
+      "type": "fixed",
+      "note": "Reserved zeros [UNKNOWN]"
+    },
+    {
+      "offset": 14, "length": 8,
+      "name": "program_name", "value": "python3\\x00",
+      "type": "fixed",
+      "note": "NUL-terminated ASCII program/library name (8 bytes including NUL) — pyrfc reports 'python3'"
+    },
+    {
+      "offset": 22, "length": 2,
+      "name": "zeros_b", "value": "0x0000",
+      "type": "fixed",
+      "note": "Padding [UNKNOWN]"
+    },
+    {
+      "offset": 24, "length": 4,
+      "name": "client_codepage", "value": "31313030",
+      "type": "fixed",
+      "note": "ASCII '1100' = client's proposed codepage (1100 = Latin-1/non-Unicode); server overrides to '4103' (UTF-16LE)"
+    },
+    {
+      "offset": 28, "length": 4,
+      "name": "zeros_c", "value": "0x00000000",
+      "type": "fixed",
+      "note": "Reserved zeros [UNKNOWN]"
+    },
+    {
+      "offset": 32, "length": 2,
+      "name": "version_flags", "value": "0x0006",
+      "type": "fixed",
+      "note": "NI protocol version flags [UNKNOWN] — 0x0006 in request, 0x000f in server response"
+    },
+    {
+      "offset": 34, "length": 10,
+      "name": "hostname", "value": "titan     ",
+      "type": "fixed",
+      "note": "Client hostname space-padded to 10 bytes: 'titan'"
+    },
+    {
+      "offset": 44, "length": 10,
+      "name": "program_padded", "value": "python3   ",
+      "type": "fixed",
+      "note": "Program name space-padded to 10 bytes: 'python3'"
+    },
+    {
+      "offset": 54, "length": 2,
+      "name": "rfc_version_hint", "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC version marker 06cb; matches GW header msg_type in data frames"
+    },
+    {
+      "offset": 56, "length": 2,
+      "name": "unicode_marker", "value": "0xffff",
+      "type": "fixed",
+      "note": "0xffff = Unicode capable flag [ASSUMED]"
+    },
+    {
+      "offset": 58, "length": 10,
+      "name": "zeros_tail", "value": "0x00000000...",
+      "type": "fixed",
+      "note": "Trailing zeros / reserved"
+    }
+  ],
+  "expected_parse": {
+    "msg_type": "0x0203",
+    "ni_length": 64,
+    "client_ip": "10.20.30.65",
+    "proposed_codepage": "1100",
+    "program": "python3",
+    "hostname": "titan"
+  }
+}

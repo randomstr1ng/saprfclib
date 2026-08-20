@@ -1,0 +1,50 @@
+{
+  "message_type": "RFCTYPE_NUM_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "num_char_0",
+      "value": "0x3000",
+      "type": "fixed",
+      "notes": "NUM digit '0' (leading-zero pad) as UTF-16-LE: 30 00"
+    },
+    {
+      "offset": 2,
+      "length": 2,
+      "name": "num_char_1",
+      "value": "0x3000",
+      "type": "fixed",
+      "notes": "NUM digit '0' (leading-zero pad) as UTF-16-LE: 30 00"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "num_char_2",
+      "value": "0x3400",
+      "type": "fixed",
+      "notes": "NUM digit '4' as UTF-16-LE: 34 00"
+    },
+    {
+      "offset": 6,
+      "length": 2,
+      "name": "num_char_3",
+      "value": "0x3200",
+      "type": "fixed",
+      "notes": "NUM digit '2' as UTF-16-LE: 32 00"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_NUM",
+    "rfctype_value": 6,
+    "field_length_chars": 4,
+    "wire_size_bytes": 8,
+    "value": "0042",
+    "encoding": "utf-16-le"
+  },
+  "capture_source": "synthetic value (42 as NUM(4)='0042') — UTF-16-LE zero-padded numeric string per serialization.md line 204; same UTF-16 encoding confirmed via live CHAR capture 2026-06-26",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch — addr 0x8d35f (byte layout derived from docs/protocol/serialization.md)",
+  "status": "synthetic",
+  "gap_status": "closed — NUM uses the same UTF-16-LE encoding as CHAR (confirmed live 2026-06-26); only the leading-zero padding differs",
+  "ni_header_length": 0
+}

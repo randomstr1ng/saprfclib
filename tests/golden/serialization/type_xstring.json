@@ -1,0 +1,34 @@
+{
+  "message_type": "RFCTYPE_XSTRING_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "byte_length",
+      "value": "0x04000000",
+      "type": "fixed",
+      "notes": "Byte count prefix = 4 (uint32 LE) = 04 00 00 00 [ASSUMED LE per OQ-2; byte order of the length prefix pending BN confirmation, serialization.md line 400]"
+    },
+    {
+      "offset": 4,
+      "length": 4,
+      "name": "raw_data",
+      "value": "0xdeadbeef",
+      "type": "fixed",
+      "notes": "Raw binary payload DE AD BE EF (byte_length=4 bytes, no UC factor)"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_XSTRING",
+    "rfctype_value": 30,
+    "wire_size_bytes": 8,
+    "byte_length": 4,
+    "value": "deadbeef",
+    "length_prefix_format": "uint32-le [ASSUMED]"
+  },
+  "capture_source": "synthetic value (XSTRING=DEADBEEF, len=4) — length-prefix + raw payload layout per serialization.md line 400",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch [ASSUMED pending BN confirmation — addr 0x8d35f common dispatch]",
+  "status": "synthetic",
+  "gap_status": "[ASSUMED] — XSTRING 4-byte length-prefix byte order (LE assumed) and char-vs-byte count pending BN confirmation per OQ-2 (serialization.md line 409)",
+  "ni_header_length": 0
+}

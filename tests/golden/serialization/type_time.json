@@ -1,0 +1,65 @@
+{
+  "message_type": "RFCTYPE_TIME_FIELD",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "char_1_utf16le",
+      "value": "0x3100",
+      "type": "fixed",
+      "notes": "'1' (U+0031) in UTF-16-LE — hour tens"
+    },
+    {
+      "offset": 2,
+      "length": 2,
+      "name": "char_2_utf16le",
+      "value": "0x3200",
+      "type": "fixed",
+      "notes": "'2' (U+0032) in UTF-16-LE — hour units"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "char_0_min_tens_utf16le",
+      "value": "0x3000",
+      "type": "fixed",
+      "notes": "'0' (U+0030) in UTF-16-LE — minute tens"
+    },
+    {
+      "offset": 6,
+      "length": 2,
+      "name": "char_0_min_units_utf16le",
+      "value": "0x3000",
+      "type": "fixed",
+      "notes": "'0' (U+0030) in UTF-16-LE — minute units"
+    },
+    {
+      "offset": 8,
+      "length": 2,
+      "name": "char_0_sec_tens_utf16le",
+      "value": "0x3000",
+      "type": "fixed",
+      "notes": "'0' (U+0030) in UTF-16-LE — second tens"
+    },
+    {
+      "offset": 10,
+      "length": 2,
+      "name": "char_0_sec_units_utf16le",
+      "value": "0x3000",
+      "type": "fixed",
+      "notes": "'0' (U+0030) in UTF-16-LE — second units"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_TIME",
+    "rfctype_value": 3,
+    "wire_size_bytes": 12,
+    "value": "120000",
+    "encoding": "utf-16-le",
+    "format": "HHMMSS"
+  },
+  "capture_source": "live capture 2026-06-26 — STFC_STRUCTURE IMPORTSTRUCT offset 36; SAP A4H sysnr=00; RFCTIME='120000'",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke — RFCTYPE_TIME same encoding as RFCTYPE_CHAR (6 UC chars = 12 bytes)",
+  "gap_status": "closed — UTF-16-LE HHMMSS confirmed from live wire capture 2026-06-26"
+}

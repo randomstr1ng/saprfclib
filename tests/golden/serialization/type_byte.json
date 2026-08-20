@@ -1,0 +1,25 @@
+{
+  "message_type": "RFCTYPE_BYTE_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "byte_data",
+      "value": "0xdeadbeef",
+      "type": "fixed",
+      "notes": "Raw binary BYTE(4) = DE AD BE EF; fixed length N from descriptor, no UTF-16 factor, zero-padded if shorter (serialization.md line 194)"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_BYTE",
+    "rfctype_value": 4,
+    "wire_size_bytes": 4,
+    "value": "deadbeef",
+    "field_length_bytes": 4
+  },
+  "capture_source": "synthetic value (BYTE(4)=DEADBEEF) — raw binary layout per serialization.md line 194",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch — addr 0x8d35f (byte layout derived from docs/protocol/serialization.md)",
+  "status": "synthetic",
+  "gap_status": "closed — BYTE is raw fixed-length binary; no encoding ambiguity (serialization.md line 194)",
+  "ni_header_length": 0
+}

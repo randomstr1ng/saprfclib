@@ -1,0 +1,152 @@
+{
+  "message_type": "STFC_CONNECTION_RESPONSE",
+  "capture_source": "live capture 2026-06-26 via Wireshark on enp111s0; SAP A4H sysnr=00 port=3300",
+  "binja_ref": "libsapnwrfc.so::NiIRead::0x7aa34d (4B NI header confirmed); GW header structure pending BN decompilation",
+  "ni_header_length": 4,
+  "notes": [
+    "Server response to STFC_CONNECTION call",
+    "Wire = NI(4B) + GW_HEADER(76B) + RFC_MARKER(4B: 00000001) + TLV_STREAM",
+    "RFC_MARKER 00000001 = server response (vs ffff0001 for client request)",
+    "GW header bytes 14-75 differ from client: contain session info, client number, codepage",
+    "Tag 0x0420 = return code (00000000 = success)",
+    "Tag 0x0514 = 16B session token (includes client MAC + session data)",
+    "Tag 0x0667 = 8B float64 LE = 74.0 (timeout in seconds?)",
+    "CHAR params are fixed-width 255 chars (510 bytes UTF-16LE), space-padded"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_payload_length", "value": "0x0000054c",
+      "type": "fixed",
+      "note": "BE uint32 = 1356; confirmed NiIRead BN 0x7aa34d"
+    },
+    {
+      "offset": 4, "length": 4,
+      "name": "gw_msg_type", "value": "0x06cb0200",
+      "type": "fixed",
+      "note": "SAP Gateway message type: 0x06=data, 0xCB=RFC_DATA, 0x0200=protocol version [ASSUMED]"
+    },
+    {
+      "offset": 8, "length": 2,
+      "name": "gw_flags", "value": "0xffff",
+      "type": "variable",
+      "note": "[UNKNOWN] same magic bytes as client frame"
+    },
+    {
+      "offset": 10, "length": 22,
+      "name": "gw_header_session_info", "value": "variable",
+      "type": "variable",
+      "note": "[UNKNOWN] server fills session info here; includes CPIC return code, codepage etc."
+    },
+    {
+      "offset": 32, "length": 8,
+      "name": "gw_connection_handle", "value": "0x3735353638343432",
+      "type": "variable",
+      "note": "ASCII decimal '75568442' — same connection handle as request"
+    },
+    {
+      "offset": 40, "length": 36,
+      "name": "gw_unknown_b", "value": "variable",
+      "type": "variable",
+      "note": "[UNKNOWN] server fills more session/state info here"
+    },
+    {
+      "offset": 76, "length": 4,
+      "name": "rfc_stream_marker", "value": "0x00000001",
+      "type": "fixed",
+      "note": "Pre-TLV marker: 00000001=server response (vs ffff0001 for client request)"
+    },
+    {
+      "offset": 80, "length": 6,
+      "name": "tlv_0500_response_ok", "value": "05000000 0500",
+      "type": "fixed",
+      "note": "TLV tag=0x0500 len=0; RFC response OK marker [ASSUMED]"
+    },
+    {
+      "offset": 86, "length": 6,
+      "name": "tlv_0503_response_flag", "value": "05030000 0503",
+      "type": "fixed",
+      "note": "TLV tag=0x0503 len=0; response flag [UNKNOWN]"
+    },
+    {
+      "offset": 92, "length": 22,
+      "name": "tlv_0514_session_token", "value": "0514 0010 ...16B binary... 0514",
+      "type": "variable",
+      "note": "TLV tag=0x0514 len=16; session token binary: 00012ea9581f1fe19caa03b58666279d"
+    },
+    {
+      "offset": 114, "length": 10,
+      "name": "tlv_0420_return_code", "value": "0420 0004 00000000 0420",
+      "type": "fixed",
+      "note": "TLV tag=0x0420 len=4; RFC return code uint32 BE = 0 (success)"
+    },
+    {
+      "offset": 124, "length": 6,
+      "name": "tlv_0512_param_section", "value": "05120000 0512",
+      "type": "fixed",
+      "note": "TLV tag=0x0512 len=0; parameter section start [ASSUMED]"
+    },
+    {
+      "offset": 130, "length": 22,
+      "name": "tlv_0205_export_echotext", "value": "0205 0010 ...ECHOTEXT...",
+      "type": "fixed",
+      "note": "TLV tag=0x0205 len=16; 'ECHOTEXT' UTF-16LE"
+    },
+    {
+      "offset": 152, "length": 22,
+      "name": "tlv_0205_export_resptext", "value": "0205 0010 ...RESPTEXT...",
+      "type": "fixed",
+      "note": "TLV tag=0x0205 len=16; 'RESPTEXT' UTF-16LE"
+    },
+    {
+      "offset": 174, "length": 22,
+      "name": "tlv_0201_name_echotext", "value": "0201 0010 ...ECHOTEXT...",
+      "type": "fixed",
+      "note": "TLV tag=0x0201 len=16; parameter name 'ECHOTEXT' UTF-16LE"
+    },
+    {
+      "offset": 196, "length": 518,
+      "name": "tlv_0203_value_echotext", "value": "0203 extended 510B ...saprfc_capture_test padded...",
+      "type": "variable",
+      "note": "TLV tag=0x0203 len=510; ECHOTEXT echo of REQUTEXT, CHAR(255) space-padded UTF-16LE"
+    },
+    {
+      "offset": 714, "length": 22,
+      "name": "tlv_0201_name_resptext", "value": "0201 0010 ...RESPTEXT...",
+      "type": "fixed",
+      "note": "TLV tag=0x0201 len=16; parameter name 'RESPTEXT' UTF-16LE"
+    },
+    {
+      "offset": 736, "length": 518,
+      "name": "tlv_0203_value_resptext", "value": "0203 extended 510B ...SAP R/3 Rel. 758...",
+      "type": "variable",
+      "note": "TLV tag=0x0203 len=510; RESPTEXT server info string, CHAR(255) space-padded UTF-16LE"
+    },
+    {
+      "offset": 1254, "length": 96,
+      "name": "tlv_0130_program_name", "value": "0130 0050 ...SAPLSTFC padded...",
+      "type": "variable",
+      "note": "TLV tag=0x0130 len=80; calling program name 'SAPLSTFC' space-padded UTF-16LE"
+    },
+    {
+      "offset": 1350, "length": 14,
+      "name": "tlv_0667_float_field", "value": "0667 0008 0000000000805240",
+      "type": "variable",
+      "note": "TLV tag=0x0667 len=8; float64 LE = 74.0 (RFC timeout or similar) [ASSUMED]"
+    },
+    {
+      "offset": 1364, "length": 6,
+      "name": "tlv_ffff_end", "value": "ffff0000 ffff",
+      "type": "fixed",
+      "note": "TLV stream terminator: tag=0xFFFF len=0"
+    }
+  ],
+  "expected_parse": {
+    "ni_payload_length": 1356,
+    "rfc_return_code": 0,
+    "params": {
+      "ECHOTEXT": "saprfc_capture_test",
+      "RESPTEXT": "SAP R/3 Rel. 758   Sysid: A4H      Date: 20260626   Time: 111317   Logon_Data: 001/DEVELOPER/E"
+    }
+  }
+}

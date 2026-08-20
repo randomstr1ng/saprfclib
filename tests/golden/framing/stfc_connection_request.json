@@ -1,0 +1,121 @@
+{
+  "message_type": "STFC_CONNECTION_REQUEST",
+  "capture_source": "live capture 2026-06-26 via Wireshark on enp111s0; SAP A4H sysnr=00 port=3300",
+  "binja_ref": "libsapnwrfc.so::NiIWrite::0x7a9c59 (4B NI header confirmed); GW header structure pending BN decompilation of GwWrite/GwSend",
+  "ni_header_length": 4,
+  "notes": [
+    "Connection to port 3300 (SAP Gateway, 3300+sysnr), NOT port 3200 (dispatcher)",
+    "Wire = NI(4B) + GW_HEADER(76B) + RFC_MARKER(4B) + TLV_STREAM",
+    "COM_HEAD (D9C6C3F0x9) appears ONLY in logon frame, not in function call frames",
+    "RFC_MARKER ffff0001 = client request; 00000001 = server response",
+    "All strings in TLV are UTF-16LE (SAP_UC); CHAR params are fixed-width padded with U+0020",
+    "Tag 0xFFFF len=0 closes the TLV stream"
+  ],
+  "field_annotations": [
+    {
+      "offset": 0, "length": 4,
+      "name": "ni_payload_length", "value": "0x000002e0",
+      "type": "fixed",
+      "note": "BE uint32 = 736; confirmed NiIWrite BN 0x7a9c59"
+    },
+    {
+      "offset": 4, "length": 4,
+      "name": "gw_msg_type", "value": "0x06cb0200",
+      "type": "fixed",
+      "note": "SAP Gateway message type: 0x06=data, 0xCB=RFC_DATA, 0x0200=protocol version [ASSUMED, BN pending]"
+    },
+    {
+      "offset": 8, "length": 2,
+      "name": "gw_flags", "value": "0xffff",
+      "type": "fixed",
+      "note": "[UNKNOWN] appears constant in all client frames"
+    },
+    {
+      "offset": 10, "length": 22,
+      "name": "gw_unknown_a", "value": "zeros",
+      "type": "variable",
+      "note": "[UNKNOWN] zeros in all client request frames; varies in server responses"
+    },
+    {
+      "offset": 32, "length": 8,
+      "name": "gw_connection_handle", "value": "0x3735353638343432",
+      "type": "variable",
+      "note": "ASCII decimal '75568442' — SAP Gateway connection handle, session-specific"
+    },
+    {
+      "offset": 40, "length": 36,
+      "name": "gw_unknown_b", "value": "zeros",
+      "type": "variable",
+      "note": "[UNKNOWN] zeros in all client request frames; varies in server responses"
+    },
+    {
+      "offset": 76, "length": 4,
+      "name": "rfc_stream_marker", "value": "0xffff0001",
+      "type": "fixed",
+      "note": "Pre-TLV marker: ffff0001=client request, 00000001=server response [ASSUMED; function TBD via BN]"
+    },
+    {
+      "offset": 80, "length": 6,
+      "name": "tlv_0502_call_start", "value": "05020000 0502",
+      "type": "fixed",
+      "note": "TLV tag=0x0502 len=0 close=0x0502; RFC call-start marker [ASSUMED tag meaning]"
+    },
+    {
+      "offset": 86, "length": 12,
+      "name": "tlv_000b_rfc_version", "value": "000b0006 37003500 340000 0b",
+      "type": "fixed",
+      "note": "TLV tag=0x000b len=6 value='754' UTF-16LE (RFC version)"
+    },
+    {
+      "offset": 98, "length": 36,
+      "name": "tlv_0102_func_name", "value": "0102001e ...STFC_CONNECTION... 0102",
+      "type": "fixed",
+      "note": "TLV tag=0x0102 len=30 value='STFC_CONNECTION' UTF-16LE"
+    },
+    {
+      "offset": 134, "length": 6,
+      "name": "tlv_0512_param_section", "value": "05120000 0512",
+      "type": "fixed",
+      "note": "TLV tag=0x0512 len=0; parameter section start [ASSUMED]"
+    },
+    {
+      "offset": 140, "length": 22,
+      "name": "tlv_0205_export_echotext", "value": "0205 0010 ...ECHOTEXT... 0205",
+      "type": "fixed",
+      "note": "TLV tag=0x0205 len=16; export parameter declaration 'ECHOTEXT' UTF-16LE"
+    },
+    {
+      "offset": 162, "length": 22,
+      "name": "tlv_0205_export_resptext", "value": "0205 0010 ...RESPTEXT... 0205",
+      "type": "fixed",
+      "note": "TLV tag=0x0205 len=16; export parameter declaration 'RESPTEXT' UTF-16LE"
+    },
+    {
+      "offset": 184, "length": 22,
+      "name": "tlv_0201_param_name_requtext", "value": "0201 0010 ...REQUTEXT... 0201",
+      "type": "fixed",
+      "note": "TLV tag=0x0201 len=16; import parameter name 'REQUTEXT' UTF-16LE"
+    },
+    {
+      "offset": 206, "length": 518,
+      "name": "tlv_0203_param_value_requtext", "value": "0203 ffff 000001fe ...saprfc_capture_test padded...",
+      "type": "variable",
+      "note": "TLV tag=0x0203 extended-len=510; REQUTEXT value CHAR(255) in UTF-16LE, space-padded"
+    },
+    {
+      "offset": 724, "length": 6,
+      "name": "tlv_ffff_end", "value": "ffff0000 ffff",
+      "type": "fixed",
+      "note": "TLV stream terminator: tag=0xFFFF len=0"
+    }
+  ],
+  "expected_parse": {
+    "ni_payload_length": 736,
+    "gw_port": 3300,
+    "rfc_func_name": "STFC_CONNECTION",
+    "rfc_version": "754",
+    "params": {
+      "REQUTEXT": "saprfc_capture_test"
+    }
+  }
+}

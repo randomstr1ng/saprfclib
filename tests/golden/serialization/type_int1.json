@@ -1,0 +1,24 @@
+{
+  "message_type": "RFCTYPE_INT1_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 1,
+      "name": "int1_value",
+      "value": "0x2a",
+      "type": "fixed",
+      "notes": "Unsigned 8-bit integer, value=42; single byte 0x2a; no byte-order issue (1 byte). Obsolete ABAP/4 type per serialization.md"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_INT1",
+    "rfctype_value": 10,
+    "wire_size_bytes": 1,
+    "value": 42
+  },
+  "capture_source": "synthetic value (42) — INT1 single-byte unsigned, no byte-order ambiguity (serialization.md line 279)",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch — addr 0x8d35f (byte layout derived from docs/protocol/serialization.md)",
+  "status": "synthetic",
+  "gap_status": "closed — INT1 is a single unsigned byte; no byte-order ambiguity to confirm",
+  "ni_header_length": 0
+}

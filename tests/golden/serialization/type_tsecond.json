@@ -1,0 +1,24 @@
+{
+  "message_type": "RFCTYPE_TSECOND_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "tsecond_value",
+      "value": "0x2a000000",
+      "type": "fixed",
+      "notes": "Signed 32-bit integer, value=42; little-endian (struct '<i') [ASSUMED — RFCTYPE_TSECOND (enum 38 per Assumption A1) wire format and byte order pending BN confirmation, serialization.md line 473]"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_TSECOND",
+    "rfctype_value": 38,
+    "wire_size_bytes": 4,
+    "value": 42
+  },
+  "capture_source": "synthetic value (42) — RFCTYPE_TSECOND layout derived from serialization.md line 473; no live RFM exposing this temporal reachable on SAP A4H 2026-06-26",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch [ASSUMED pending BN confirmation — addr 0x8d35f common dispatch]",
+  "status": "synthetic",
+  "gap_status": "[ASSUMED] — RFCTYPE_TSECOND (enum 38 per Assumption A1) wire byte order/format assumed by analogy to INT types; pending BN confirmation + live capture",
+  "ni_header_length": 0
+}

@@ -1,0 +1,66 @@
+{
+  "message_type": "RFCTYPE_STRING_FIELD",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "string_char_count",
+      "value": "0x00000005",
+      "type": "fixed",
+      "notes": "String character count = 5 ('Hello'); byte order: [ASSUMED] little-endian uint32 pending BN confirmation"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "char_H_utf16le",
+      "value": "0x4800",
+      "type": "fixed",
+      "notes": "'H' (U+0048) in UTF-16-LE"
+    },
+    {
+      "offset": 6,
+      "length": 2,
+      "name": "char_e_utf16le",
+      "value": "0x6500",
+      "type": "fixed",
+      "notes": "'e' (U+0065) in UTF-16-LE"
+    },
+    {
+      "offset": 8,
+      "length": 2,
+      "name": "char_l1_utf16le",
+      "value": "0x6C00",
+      "type": "fixed",
+      "notes": "'l' (U+006C) in UTF-16-LE — first 'l'"
+    },
+    {
+      "offset": 10,
+      "length": 2,
+      "name": "char_l2_utf16le",
+      "value": "0x6C00",
+      "type": "fixed",
+      "notes": "'l' (U+006C) in UTF-16-LE — second 'l'"
+    },
+    {
+      "offset": 12,
+      "length": 2,
+      "name": "char_o_utf16le",
+      "value": "0x6F00",
+      "type": "fixed",
+      "notes": "'o' (U+006F) in UTF-16-LE"
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_STRING",
+    "rfctype_value": 29,
+    "wire_size_bytes": 14,
+    "char_count": 5,
+    "value": "Hello",
+    "encoding": "utf-16-le",
+    "length_prefix_format": "[ASSUMED] uint32-LE character count"
+  },
+  "capture_source": "synthetic — BN-derived; no live capture available",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_STRING_branch [ASSUMED pending BN confirmation — addr 0x8d35f]",
+  "gap_status": "partial — STRING is variable-length UTF-16; length prefix format (uint32 LE char count) [ASSUMED]; BN call-site MISSING"
+}

@@ -1,0 +1,61 @@
+{
+  "message_type": "RFCTYPE_STRUCTURE_FIELD",
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 8,
+      "name": "rfcchar4_uc",
+      "value": "0x4100420043004400",
+      "type": "fixed",
+      "notes": "STRUCTURE field 0: CHAR(4)='ABCD' UTF-16-LE. UNICODE wire layout (this .bin). nuc/uc offsets recorded per D-11 for both codec modes (serialization.md line 301).",
+      "nuc_offset": 0,
+      "nuc_length": 4,
+      "uc_offset": 0,
+      "uc_length": 8
+    },
+    {
+      "offset": 8,
+      "length": 4,
+      "name": "rfcint4_value",
+      "value": "0x00000100",
+      "type": "fixed",
+      "notes": "STRUCTURE field 1: INT4=65536 little-endian (00 00 01 00). Width is 4 bytes in BOTH unicode and non-unicode modes (scalar int unaffected by UC factor); nuc/uc offsets differ because the preceding CHAR field is half-width in nuc mode (D-11).",
+      "nuc_offset": 4,
+      "nuc_length": 4,
+      "uc_offset": 8,
+      "uc_length": 4
+    }
+  ],
+  "expected_parse": {
+    "rfctype": "RFCTYPE_STRUCTURE",
+    "rfctype_value": 17,
+    "wire_size_bytes_unicode": 12,
+    "wire_size_bytes_nonunicode": 8,
+    "encoding": "utf-16-le (unicode wire layout in .bin)",
+    "fields": [
+      {
+        "name": "RFCCHAR4",
+        "rfctype": "RFCTYPE_CHAR",
+        "value": "ABCD",
+        "nuc_offset": 0,
+        "nuc_length": 4,
+        "uc_offset": 0,
+        "uc_length": 8
+      },
+      {
+        "name": "RFCINT4",
+        "rfctype": "RFCTYPE_INT",
+        "value": 65536,
+        "nuc_offset": 4,
+        "nuc_length": 4,
+        "uc_offset": 8,
+        "uc_length": 4
+      }
+    ]
+  },
+  "capture_source": "synthetic STRUCTURE (CHAR(4)='ABCD' + INT4=65536) — descriptor-driven layout per serialization.md line 301; member encodings (UTF-16-LE CHAR, LE INT4) confirmed via live STFC_STRUCTURE capture 2026-06-26",
+  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_STRUCTURE_branch [ASSUMED nuc/uc offset negotiation pending Gate C — addr 0x8d35f]",
+  "status": "synthetic",
+  "gap_status": "[ASSUMED] — nuc/uc offset selection is Gate C (handshake byte-order negotiation, serialization.md line 305); member byte layouts derived from confirmed CHAR/INT4 live captures 2026-06-26",
+  "ni_header_length": 0
+}
