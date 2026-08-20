@@ -16,7 +16,7 @@ class Fixture:
     field_annotations: list[dict]
     expected_parse: dict
     capture_source: str
-    binja_ref: str
+    evidence: str
     raw_bytes: bytes  # full NI-framed bytes
     payload_bytes: bytes  # stripped payload (NI/CPIC header removed)
 
@@ -47,13 +47,13 @@ def load_fixture(fixture_dir: Path, name: str) -> Fixture:
         "field_annotations",
         "expected_parse",
         "capture_source",
-        "binja_ref",
+        "evidence",
     }
     missing = required_keys - meta.keys()
     if missing:
         raise ValueError(f"Fixture JSON {json_path} missing required keys: {missing}")
 
-    # NI header = 4 bytes (confirmed by BN decompilation of NiIWrite/NiIRead)
+    # NI header = 4 bytes (confirmed by protocol analysis of NiIWrite/NiIRead)
     NI_HEADER_LEN = meta.get("ni_header_length", 4)
     payload = raw[NI_HEADER_LEN:]
 
@@ -62,7 +62,7 @@ def load_fixture(fixture_dir: Path, name: str) -> Fixture:
         field_annotations=meta["field_annotations"],
         expected_parse=meta["expected_parse"],
         capture_source=meta["capture_source"],
-        binja_ref=meta["binja_ref"],
+        evidence=meta["evidence"],
         raw_bytes=raw,
         payload_bytes=payload,
     )

@@ -12,17 +12,17 @@
 #
 # Protocol citations: docs/protocol/trfc.md §"Server-Side Dispatch",
 #   §"RFC_ON_CHECK_TRANSACTION callback contract"
-# SDK refs: sapnwrfc.h:729 (RFC_ON_CHECK_TRANSACTION), h:151 (RFC_EXECUTED = 16),
+# SDK refs: SDK type definitions (RFC_ON_CHECK_TRANSACTION), h:151 (RFC_EXECUTED = 16),
 #   h:2436-2452 (callback order), h:737-741 (bgRFC unit callbacks)
 
 from __future__ import annotations
 
 import pytest
 
-# RFC_EXECUTED = 16 per sapnwrfc.h:151
+# RFC_EXECUTED = 16 per SDK type definitions
 _RFC_EXECUTED = 16
 
-# A valid 24-char TID (alphabet subset: A-Z0-9/_=@-, BN 0x4b5a33)
+# A valid 24-char TID (alphabet subset: A-Z0-9/_=@-)
 _KNOWN_TID = "TESTTIDABCDE012345678901"
 assert len(_KNOWN_TID) == 24, f"Test TID must be 24 chars, got {len(_KNOWN_TID)}"
 
@@ -42,7 +42,7 @@ def test_duplicate_tid_short_circuits() -> None:
     1. Pre-load a TID into InMemoryTidStore as "executed".
     2. Deliver an inbound ARFC_DEST_SHIP frame carrying that TID.
     3. Assert: handler is NOT called (dedup short-circuit).
-    4. Assert: response frame encodes RFC_EXECUTED (0x10 = 16) per sapnwrfc.h:151.
+    4. Assert: response frame encodes RFC_EXECUTED (0x10 = 16) per SDK type definitions.
 
     The handler must persist the TID *before* execution (crash-safety per
     Pattern 2 in docs/protocol/trfc.md §"Server-Side Dispatch").
@@ -134,7 +134,7 @@ def test_unit_callback_flow() -> None:
 
     GREEN: Plan 06-05 — install_unit_handlers + bgRFC dispatch implemented.
 
-    Callback order per sapnwrfc.h:2478-2500 and docs/protocol/trfc.md
+    Callback order per SDK type definitions-2500 and docs/protocol/trfc.md
     §"RFC_ON_CHECK_TRANSACTION callback contract":
       1. check_unit(uid, unit_type) → RFC_OK (0, new unit) or RFC_EXECUTED (16, known)
       2. [persist uid]              → BEFORE handler execute (crash-safety, T-06-U01)

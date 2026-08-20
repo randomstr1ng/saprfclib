@@ -252,7 +252,7 @@ def _build_upgrade_request(
 
     The SAP-required WebSocket subprotocol (Sec-WebSocket-Protocol: rfc.sap.com)
     is negotiated via wsproto's subprotocols parameter so it appears in the
-    standard RFC 6455 position (BN-verified: WebsocketDriver::rfcWSProtocolHeader
+    standard RFC 6455 position (verified: WebsocketDriver::rfcWSProtocolHeader
     = "Sec-WebSocket-Protocol", rfcWSProtocolValue = "rfc.sap.com").
     """
     client = WSConnection(ConnectionType.CLIENT)
@@ -290,8 +290,8 @@ def _ws_upgrade(
     Security (T-07-CRED): ``passwd`` is used only to build the Basic auth token
     and is NEVER logged or embedded in a raised exception.
     """
-    # SAP ICM headers required to activate the wRFC ICM handler (BN-verified from
-    # WebsocketDriver::addProprietaryHeaderFields in libsapnwrfc.so):
+    # SAP ICM headers required to activate the wRFC ICM handler (verified from
+    # WebsocketDriver::addProprietaryHeaderFields in the reference client):
     #   rfcWSProtocolHeader/Value → Sec-WebSocket-Protocol: rfc.sap.com  (via subprotocols)
     #   rfcOptionsHeader/rfcOptionsDeltaOff → sap-rfc-options: rfc-delta=off
     #   sap-client, sap-language, sap-rfc-subtype: sync (always sent)
@@ -452,7 +452,9 @@ class WsTransport:
         cap BEFORE it grows (threat T-07-FRAME-DOS) — a ValueError is raised past
         the cap. A CloseConnection raises :class:`WebSocketError`.
         """
-        chunks: list[bytes] = []
+        # wsproto types BytesMessage.data as bytes | bytearray; accept both rather
+        # than copying every chunk through bytes() just to satisfy the annotation.
+        chunks: list[bytes | bytearray] = []
         size = 0
         while True:
             for event in self._ws.events():

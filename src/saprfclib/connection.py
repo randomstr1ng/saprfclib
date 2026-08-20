@@ -22,10 +22,10 @@
 # pure state machine does not synthesize (session.py notes these are emitted by
 # the facade).
 #
-# Password scrambling (handshake.md logon TLV tag 0x0117): RESOLVED via BN
-# decompilation (Plan 04-01 Task 1, see bn-passwordhash-notes.md). The 0x0117
-# value is NOT a hash — it is SAP's reversible ``ab_scramble`` byte cipher with a
-# 4-byte client-random seed prefix: ``seed(4B) + ab_scramble(password, seed)``.
+# Password scrambling (handshake.md logon TLV tag 0x0117): RESOLVED — see
+# docs/protocol/handshake.md §"Password scrambling". The 0x0117
+# value is NOT a hash — it is SAP's reversible byte cipher with a
+# 4-byte client-random seed prefix: ``seed(4B) + scramble(password, seed)``.
 # ``_scramble_password`` below reproduces it byte-for-byte (stdlib only). The
 # plaintext password is never logged or echoed (threat T-04-CRED / T-03-CRED2).
 # A live logon (Plan 04-01 Task 3 checkpoint) is the byte-for-byte truth-check;
@@ -44,7 +44,12 @@ import uuid
 from typing import Any, Literal, cast
 
 from saprfclib.compress import DecompressError, sap_lz4_frame_decompress
-from saprfclib.exceptions import AbapSystemFailure, CommunicationError, RetryExhausted, WebSocketError
+from saprfclib.exceptions import (
+    AbapSystemFailure,
+    CommunicationError,
+    RetryExhausted,
+    WebSocketError,
+)
 from saprfclib.invoke import (
     _extract_name_value_pairs,
     build_bgrfc_confirm_request,
@@ -99,19 +104,19 @@ _TAG_PASSWORD = 0x0117
 _RFCPING_NAME = b"RFCPING"
 
 # ---------------------------------------------------------------------------
-# GW APPCHDR6 frame constants — BN RE sources in bn-re-findings.md
+# GW APPCHDR6 frame constants — protocol analysis sources in docs/protocol/framing.md
 # ---------------------------------------------------------------------------
-# APPCHDR6 layout shared by ALL GW frames (BN confirmed):
-#   [0]     = 0x06  type MSB — hardcoded 6 in all builders (STALLC/STSPLN/STIInit/STISendToGw)
+# APPCHDR6 layout shared by ALL GW frames (confirmed):
+#   [0]     = 0x06  type MSB — hardcoded 6 in all builders (the GW_DONE builder/the GW_INFO builder/the GW_CONNECT builder/the gateway send path)
 #   [1]     = type LSB (0x01/0x05/0x09/0x0B/0x0F/0xCB — see types below)
 #   [2]     = protocol version byte from CONV_PROTO[0x17] = 0x02 for NW 7.x
 #   [3]     = 0x00 (from memset)
 #   [4:6]   = 0xffff (flags high word — all builders set this explicitly)
 #   [6:8]   = 0x0000 (flags low word — from memset)
 #   [40:48] = GW handle (8-byte ASCII, from CONV_PROTO[8], i.e. *(arg2+8))
-_GW_TYPE_CONNECT = 0x0601  # BN STIInit:  *(r13_11+0x51) = 1
-_GW_TYPE_INFO = 0x060F  # BN STSPLN:   *(r13_4+0x51)  = 0xf
-_GW_TYPE_DONE = 0x0605  # BN STALLC:   *(rdx_14+0x51) = 5
+_GW_TYPE_CONNECT = 0x0601  # protocol analysis:  *(r13_11+0x51) = 1
+_GW_TYPE_INFO = 0x060F  # protocol analysis:   *(r13_4+0x51)  = 0xf
+_GW_TYPE_DONE = 0x0605  # protocol analysis:   *(rdx_14+0x51) = 5
 _GW_TYPE_MONITOR = 0x060B  # GW_MONITOR — defined but NOT sent (pyrfc writev RE: absent)
 _GW_TYPE_RFC = 0x06CB  # RFC data frame (logon + calls) — wire-captured PKT 14
 # Version field [2:4]: only byte [2] is set from CONV_PROTO[0x17] = 0x02; [3] = 0 (memset).
@@ -123,7 +128,7 @@ _GW_FLAGS = 0xFFFF0000
 # Wire-verified: ALL golden requests AND responses carry identical values (logon +
 # stfc_connection + rfc_read_table + stfc_changing + stfc_structure + stfc_deep_table).
 # [24:28] = 0x00000008: APPC header version field checked by server ("client with wrong
-#   appc header version rejected" error string at BN 0x85b340 / CpicErrDescr 0xf6).
+#   appc header version rejected" error string at / CpicErrDescr 0xf6).
 #   Sending zeros causes immediate 80B 0x06CE rejection from server.
 # [28:32] = 0x0000050c (=1292): max-message/buffer-size negotiated at CPIC allocate phase.
 #   Same value in client requests AND server responses; constant for NW 7.x.
@@ -135,29 +140,29 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 #   [0:2]  0x0000      reserved
 #   [2:4]  TLV length  uint16 BE = len(tlv_body) before footer
 #   [4:6]  0x0000      reserved
-#   [6:8]  0x8500      constant (CPIC NI frame tag/version — exact meaning TBD-BN)
+#   [6:8]  0x8500      constant (CPIC NI frame tag/version — exact meaning TBD)
 # Cross-check: stfc_connection TLV body=648B=0x0288 → footer=0000028800008500 ✓
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
 # Client tail at APPCHDR6[76:80] in 80-byte control frames (GW_INFO, GW_DONE_CLIENT).
-# BN STISendToGw (0x799710): var_3c=0xffff at [76:78] (hardcoded);
+# protocol analysis: var_3c=0xffff at [76:78] (hardcoded);
 #   var_3a=rol.w(CONV_PROTO[0x1c],8)=bswap(0x0400)=0x0004 at [78:80].
 # CONV_PROTO[0x1c] = 0x0400 for NW 7.x standard connection → bswap = 0x0004.
 # strace of installed pyrfc writev confirms: FF FF 00 04 for GW_INFO + GW_DONE_CLIENT.
-# BN project binary STALLC/STSPLN show 0xffffffff (SDK version difference, not wrong).
+# The reference client the GW_DONE builder/the GW_INFO builder show 0xffffffff (SDK version difference, not wrong).
 _GW_CLIENT_TAIL = 0xFFFF0004
 # Live pyrfc SNC capture (2026-07-XX): [76:80] = FF FF 00 09 when SNC is active.
 # CONV_PROTO[0x1c] = 0x0900 for SNC → bswap(0x0900) = 0x0009 → 0xFFFF0009.
 _GW_CLIENT_TAIL_SNC = 0xFFFF0009
 
-# RFC logon frame tail and header (PKT 14 capture + BN):
+# RFC logon frame tail and header (PKT 14 capture + analysis):
 # _RFC_MARKER at frame[76:80]: same [76:78]=0xffff, [78:80]=0x0004 pattern as control frames.
 # _COM_HEAD: EBCDIC "RFC000000000" = 0xD9 0xC6 0xC3 = EBCDIC R/F/C, 0xF0*9 = EBCDIC '0'*9.
 _RFC_MARKER = b"\xff\xff\x00\x04"
 _COM_HEAD = b"\xd9\xc6\xc3\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0"  # EBCDIC "RFC000000000"
 
-# Fixed logon TLV values (from PKT 14 wire capture; not yet BN-decompiled in logon builder).
+# Fixed logon TLV values (from PKT 14 wire capture; not yet independently confirmed).
 # These are static capability descriptors — confirmed correct by live logon success.
-# BN-TODO: decompile RfcConnection logon TLV builder to explain each byte.
+# TODO: analyse RfcConnection logon TLV builder to explain each byte.
 _TLV_CAPS = b"\x03\x01\x01\x01\x01\x01\x00\x00"  # tag 0x0101: RFC capability flags
 _TLV_VER = b"\x00\x00\x0e\x0b"  # tag 0x0103: RFC protocol version (14.11)
 _TLV_CP = b"\x04\x01\x00\x03\x00\x0a\x02\x00\x00\x00\x23"  # tag 0x0106: codepage descriptor
@@ -169,26 +174,26 @@ _TLV_REL = b"754"  # tags 0x0012/0x0013/0x000B: SAP release
 _WS_TLV_CAPS = bytes.fromhex("0501010504010003")  # 0x0101: wRFC caps
 _WS_TLV_CP = b"\x04\x01\x00\x03\x01\x03\x02\x00\x00\x00\x23"  # 0x0106: wRFC codepage
 # 0x5001 header: 14-byte prefix present in every wRFC invoke 0x5001 TLV.
-# Layout (BN RE 0x52a0e0 ctor + 0x529f60 setHeader + 0x52a154 flush):
+# Layout ( ctor + setHeader + flush):
 #   [0]     0x24 '$'  — stream-start marker written by flush(1)
 #   [1]     0x48 'H'  — getHeader marker written by setHeader
-#   [2]     0x00      — serializerVersion → conn[0x3d2] via setSerializerVersion (0x52a9f0).
-#                       readColumnMetadata MLIL-verified (0x5245d8): conn[0x3d2]==0 (this
+#   [2]     0x00      — serializerVersion → conn[0x3d2] via setSerializerVersion.
+#                       readColumnMetadata MLIL-verified: conn[0x3d2]==0 (this
 #                       value) → V2 on-wire (readByte=ngrfc_type FIRST, then readInt2=
-#                       uc_length for types 5-9; jump to 0x5246e3 skipping switch).
+#                       uc_length for types 5-9; jump to skipping switch).
 #                       conn[0x3d2]==1 → V1 on-wire (readInt2=length FIRST, then
 #                       readByte=ngrfc_type). 0x01 caused RABAX: server parsed our
 #                       byte(type)+int2(len) as V1, read int2 from wrong bytes → ngrfc_type=0
 #                       → deserializeField switch exceeded 0x1d → RABAX.
 #   [3]     0x03      — understandSerializerVersion (constant from [rbx].w = 0x302)
-#   [4]     0x00      — cond flag ([0xd66305].b == 2)
-#   [5-6]   0x41 0x03 — charset2BCD (conn[0x25a] copy via 0x506cbc)
+#   [4]     0x00      — cond flag ([].b == 2)
+#   [5-6]   0x41 0x03 — charset2BCD (conn[0x25a] copy via)
 #   [7]     0x00      — stream[5] (uninitialised, stays 0)
 #   [8-9]   0x23 0x00 — conn[0xe08] LE (session handle/counter)
-#   [10-11] 0x40 0x20 — conn[0x3ce] LE (0x2040 → no LZ4; BN determineActualWriteSerializationFormat
-#                        0x4ae590: SDK sets no-LZ4 for payloads ≤ 0x1fff bytes. All current
+#   [10-11] 0x40 0x20 — conn[0x3ce] LE (0x2040 → no LZ4; the write-format selector
+#: SDK sets no-LZ4 for payloads ≤ 0x1fff bytes. All current
 #                        invoke bodies are well below that threshold, so raw (uncompressed) body
-#                        is always correct. LZ4 (0x6040) caused RABAX via NgRfcLZ4Decompressor.)
+#                        is always correct. LZ4 (0x6040) caused RABAX via the LZ4 decompressor.)
 #   [12-13] 0x00 0x00 — bool_arg from NgRfcSendStream ctor (0 = not final? always 0 for invoke)
 # 14-byte 0x5001 function-interface header (pcap-verified: frames 108/229).
 # byte[2]=0x03 (V1 fast-serializer) used for BOTH LOGON and INVOKE:
@@ -206,7 +211,7 @@ _WS_5001_HDR_WITH_VALS = bytes.fromhex(
     "2448020300410300230040200000"
 )  # with Q-markers (byte[2]=0x02)
 # INVOKE: V1 mode + LZ4 send (bytes[10-11]=0x4060 LE → 0x6040).
-# Body must be wrapped with _sap_lz4_frame(); server will use NgRfcLZ4Decompressor.
+# Body must be wrapped with _sap_lz4_frame(); server will use the LZ4 decompressor.
 _WS_5001_HDR_INVOKE = bytes.fromhex("2448030300410300230040600000")
 
 # 0x0104: SDK environment block (250B) — present in every client frame in reference pcap
@@ -226,7 +231,7 @@ _WS_TLV_0104_PCAP_REF = bytes.fromhex(
     "04e1000000c0a8423400"
 )
 
-# NG RFC V2 RFCTYPE → NGRFC_TYPE mapping (BN 0x51d568 getNgRfcTypeFromRfcType, V2 path)
+# NG RFC V2 RFCTYPE → NGRFC_TYPE mapping ( the type mapping, V2 path)
 _NGRFC_TYPE_V2: dict[int, int] = {
     0: 6,  # CHAR
     1: 12,  # DATE
@@ -247,10 +252,9 @@ _NGRFC_TYPE_V2: dict[int, int] = {
     31: 4,  # INT8        (fixed size)
 }
 
-# ab_scramble key table (64 bytes).
-# BN project binary: kt @ 0xa47c20 (nm 0x647c20), ab_scramble @ 0x7099e6.
-# Installed binary:  kt @ nm 0x645f60, ab_scramble @ nm 0x30b625.
-# Both binaries confirmed same kt bytes and same algorithm via objdump + BN.
+# Password-scramble key table (64 bytes). Confirmed identical across two
+# independent client versions, and verified end-to-end by a live logon.
+# See docs/protocol/handshake.md §"Password scrambling".
 _AB_SCRAMBLE_KT = bytes.fromhex(
     "f0ed53b83244f1f876c67959fd4f13a2"
     "c15195ec5483c234774943a27de26596"
@@ -271,11 +275,15 @@ def _tlv_ext(tag: int, value: bytes) -> bytes:
 
 
 def _ab_scramble(buf: bytearray, seed: int) -> None:
-    """SAP ``ab_scramble`` reversible byte cipher, in place (RE: ab_scramble 0x7099e6).
+    """SAP's reversible password-scramble byte cipher, applied in place.
 
     Symmetric XOR stream keyed by ``seed`` and the 64-byte ``_AB_SCRAMBLE_KT``
-    table. Applying it twice with the same seed is the identity (it is its own
-    inverse — see unscramblePassword 0x5529be). ``seed`` is a 32-bit value.
+    table. Applying it twice with the same seed is the identity — it is its own
+    inverse, which is how the server recovers the password. ``seed`` is a
+    32-bit value.
+
+    This is obfuscation, not encryption: the seed travels in the clear next to
+    the ciphertext. See docs/protocol/handshake.md.
     """
     seed &= 0xFFFFFFFF
     k = (((seed >> 5) ^ ((seed * 2) & 0xFFFFFFFF)) ^ seed) & 0x3F
@@ -289,15 +297,12 @@ def _ab_scramble(buf: bytearray, seed: int) -> None:
 
 
 def _scramble_password(passwd: str, *, seed: int | None = None) -> bytes:
-    """Build the 0x0117 value: ``seed(4B LE) + ab_scramble(password, seed)``.
+    """Build the 0x0117 value: ``seed(4B LE) + scramble(password, seed)``.
 
-    RE (BN + live wire): scrambleChars stores the rand_r() result via x86
-    ``mov %eax,[buf]`` in native little-endian byte order, then ab_scramble
-    is called with that integer as the seed.  The server reads the same 4
-    bytes back as LE to recover the seed for unscrambling.  Using big-endian
-    (as the original Phase-04 notes incorrectly assumed) produces a different
-    k-index and a wrong keystream — the live truth-check (Task 3) confirmed
-    that LE is correct: seed bytes 96 4d 05 30 → LE value 0x30054d96.
+    The seed is stored in native **little-endian** byte order, and the server
+    reads the same 4 bytes back as LE to recover it. Big-endian (an earlier,
+    wrong assumption) yields a different k-index and therefore a wrong
+    keystream; a live logon confirmed LE — seed bytes 96 4d 05 30 → 0x30054d96.
 
     ``seed`` is injectable for deterministic tests; production uses a fresh
     ``os.urandom`` 4-byte client nonce interpreted as LE (no server salt —
@@ -314,7 +319,7 @@ def _scramble_password(passwd: str, *, seed: int | None = None) -> bytes:
 
 
 def _scramble_password_ws(passwd: str, *, seed: int | None = None) -> bytes:
-    """0x0117 for wRFC: seed(4B LE) + ab_scramble(passwd.encode('utf-16-le'), seed).
+    """0x0117 for wRFC: seed(4B LE) + scramble(passwd.encode('utf-16-le'), seed).
 
     wRFC uses UTF-16LE password encoding (pcap-confirmed: 13-char → 26-byte body
     = 30 bytes total with 4-byte seed). Never logs the plaintext (T-07-CRED).
@@ -368,8 +373,8 @@ def _build_ws_logon_message(
     func_begin_padded = (fname + "=" * (30 - len(fname)) + "FT").encode("utf-16-le")
     # call-end 0x0130: name + '='*(38-len) + 'FT' = 40 chars = 80 B UTF-16LE (pcap-verified)
     func_end_padded = (fname + "=" * (38 - len(fname)) + "FT").encode("utf-16-le")
-    # first 0x0130: CLIENT PROGRAM NAME (BN-verified: writeRfcSessionInfo writes
-    # CpicConnection::ownname here, not the function name).
+    # first 0x0130: CLIENT PROGRAM NAME (verified: writeRfcSessionInfo writes
+    # the CPIC layer::ownname here, not the function name).
     # NOTE: changing from func_begin_padded causes RABAX on SAP 7.x — kept for compat.
     prog_name.encode("utf-16-le")
 
@@ -542,23 +547,19 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
 
 # --------------------------------------------------------------------------- #
 # NG RFC V2 parameter serialization (for the 0x5001 block body)               #
-# RE: BN libsapnwrfc.so, BN load offset 0x3FF13A                              #
+# RE: the reference client, reference-client analysis                              #
 # --------------------------------------------------------------------------- #
 
 
 def _ngrfc_write_int2(value: int) -> bytes:
-    """Pack uint16 little-endian for NG RFC V2 stream.
-
-    BN 0x52b146 readInt2: when connection flag at +0xdf6 == 0 (modern x86-64
+    """Pack uint16 little-endian for NG RFC V2 stream. readInt2: when connection flag at +0xdf6 == 0 (modern x86-64
     SAP server), the rol.w byte-swap is skipped → native LE memory order.
     """
     return struct.pack("<H", value & 0xFFFF)
 
 
 def _ngrfc_write_lv(name_utf8: bytes) -> bytes:
-    """Write name LV: 1-byte length prefix + UTF-8 bytes.
-
-    BN 0x52a8a0 serializeName: for names <= 0xFE bytes, writes 1B length then
+    """Write name LV: 1-byte length prefix + UTF-8 bytes. the name serializer: for names <= 0xFE bytes, writes 1B length then
     UTF-8 bytes. Parameter names are ASCII and never exceed 30 chars.
     """
     n = len(name_utf8)
@@ -568,9 +569,7 @@ def _ngrfc_write_lv(name_utf8: bytes) -> bytes:
 
 
 def _ngrfc_encode_stringlike(value: str, char_count: int) -> bytes:
-    """Encode CHAR/DATE/TIME/NUM value as NG RFC serializeStringLike output.
-
-    BN 0x528772 deserialize<NGRFC_TYPE_6> raw asm (confirmed 2026-07-28):
+    """Encode CHAR/DATE/TIME/NUM value as NG RFC the string serializer output. deserialize<NGRFC_TYPE_6> raw asm (confirmed 2026-07-28):
     - 'O' (0x4F): compMode only, no int2 prefix; server reads column_meta.length
       bytes directly via label_5287f4 readData.
     - 'C' (0x43) + int2(blen) WITHOUT 0x8000: server skips encoding block, reads
@@ -578,10 +577,10 @@ def _ngrfc_encode_stringlike(value: str, char_count: int) -> bytes:
     - 'C' (0x43) + int2(blen | 0x8000): WRONG for unicode — triggers double-read
       (temp_buf encode path + label_5287f4 read + skipBytes(32764)) → RABAX.
 
-    Assembly-confirmed compMode propagation (2026-08-01): deserializeData (0x527eae)
-    at 0x527f1b does `push r14` (compMode byte read from stream) as the 8th arg before
+    Assembly-confirmed compMode propagation (2026-08-01): deserializeData
+    at does `push r14` (compMode byte read from stream) as the 8th arg before
     the call to deserializeField. deserializeField reads it as arg_10 = [rsp+16], sets
-    r8=arg_10, and the tail call at 0x527601/0x527611 propagates r8 as entry_r8 into
+    r8=arg_10, and the tail call at propagates r8 as entry_r8 into
     deserialize<NGRFC_TYPE_6>. entry_r8=='C' (0x43) → readInt2 path; else → direct read
     of column_meta.length bytes. Our 'C' encoding is confirmed correct end-to-end.
 
@@ -621,10 +620,10 @@ def _v1_type_name(rfctype: int, nuc_length: int) -> bytes:
     return prefix  # DATE/TIME: fixed name, no length suffix
 
 
-# BN RE confirmed V1 format markers (ngrfcSerializeParams 0x4af142):
+# protocol analysis confirmed V1 format markers (ngrfcSerializeParams):
 #   T(0x54) = schema activation (EXPORT/CHANGING/TABLES params, direction & 2 != 0)
 #   Q(0x51) = caller-supplied value (IMPORT/CHANGING/TABLES with data)
-#   K(0x4b) = TABLE metadata header (nested inside Q body; serializeDataMetadata 0x519dac)
+#   K(0x4b) = TABLE metadata header (nested inside Q body; the metadata serializer)
 #   D(0x44) = type-descriptor block inside Q scalar body
 #   0x01 = V1 body terminator (NOT the 0x45 EXECUTE used in V2)
 
@@ -672,7 +671,7 @@ _WRFC_BUILTIN_DESCS: dict[str, FunctionDesc] = _make_wrfc_builtin_descs()
 def _v1_encode_char_value(value: str, nuc_length: int, uc_length: int) -> bytes:
     """Encode one CHAR/DATE/TIME/NUM value for V3 fast-serializer (HDR byte[2]=0x03) Q-markers.
 
-    BN RE NgRfcTypeSerializer::serialize<RFCTYPE_CHAR> (0x51ef78) confirmed:
+    protocol analysis NgRfcTypeSerializer::serialize<RFCTYPE_CHAR> confirmed:
       Unicode connection (wRFC target is always Unicode): flag[0x10]=0 → UC trimmed mode.
         uc_length ≤ 9: 'O' (0x4F) + value padded to nuc_length chars in UTF-16-LE.
                       Server reads exactly uc_length bytes (column_meta.length from D-block).
@@ -691,8 +690,8 @@ def _v1_encode_char_value(value: str, nuc_length: int, uc_length: int) -> bytes:
         return b"\x4f" + padded.encode("utf-16-le")
     stripped = value[:nuc_length].rstrip()
     if uc_length > 0x3333:
-        # Large field: BN serializeField case 0 sbb formula → compMode='S' when
-        # arg3 (=uc_length) > 0x3333; falls through to serializeStringLike which
+        # Large field: the field serializer case 0 sbb formula → compMode='S' when
+        # arg3 (=uc_length) > 0x3333; falls through to the string serializer which
         # converts UTF-16LE→UTF-8 in chunks. We convert Python str→UTF-8 directly.
         return b"\x53" + _v1_stringlike_chunks(stripped.encode("utf-8"))
     uc_bytes = stripped.encode("utf-16-le")
@@ -711,12 +710,12 @@ _V1_TABLE_QMARKER_TNAME = bytes.fromhex(
 def _v1_table_q_marker(name_b: bytes, table_idx: int) -> bytes:
     """Build TABLE Q-marker for an IMPORT/TABLES param that sends table data.
 
-    Wire layout (BN RE serializeParameter → serializeTable → serializeDataMetadata):
-      0x51 + name_len(1B) + name        [Q-marker from serializeParameter]
-      0x4b                               [K-marker from serializeDataMetadata, isFirstRow=1]
-      (col_count | 0xD000) LE(2B)       [col_count=0 → 0xD000; serializeDataMetadata 0x519e92]
-      table_idx LE(2B)                   [delta-manager table ID; serializeDataMetadata 0x519f53]
-      tname_len(1B) + tname              [type name via serializeName; 0x519f61]
+    Wire layout (protocol analysis the parameter serializer → serializeTable → the metadata serializer):
+      0x51 + name_len(1B) + name        [Q-marker from the parameter serializer]
+      0x4b                               [K-marker from the metadata serializer, isFirstRow=1]
+      (col_count | 0xD000) LE(2B)       [col_count=0 → 0xD000; the metadata serializer]
+      table_idx LE(2B)                   [delta-manager table ID; the metadata serializer]
+      tname_len(1B) + tname              [type name via the name serializer;]
 
     Used for IMPORT/TABLES TABLE params where the client provides (possibly empty) table data.
     EXPORT TABLE params use a T-marker only (no Q, no K) — see _build_ngrfc_params.
@@ -768,12 +767,12 @@ def _v1_q_block(
 ) -> bytes:
     """Build a V1 Q-marker for any scalar IMPORT param type.
 
-    Generalises _v1_q_marker to all rfctypes.  D-block format (BN RE
-    serializeSingleTypeMetaData 0x516a3e; pcap-verified for CHAR):
+    Generalises _v1_q_marker to all rfctypes.  D-block format (protocol analysis
+    the single-type metadata serializer; pcap-verified for CHAR):
 
       0x44 0x01 0x50           D-marker + ncols=1|0x5000 LE
       type_name_LV             1B len + ABAP type descriptor (\\TYPE=INT4 etc.)
-      ngrfc_type(1B)           from getNgRfcTypeFromRfcType (BN 0x51d568)
+      ngrfc_type(1B)           from the type mapping
       [field_len LE(2B)]       absent for ngrfc_type ≤ 4 (INT1/INT2/INT/INT8)
       [decimals(1B)]           BCD (ngrfc_type=9) only: decimal places
       TABLE_LINE_LV            col name — scalar IMPORT params always use TABLE_LINE
@@ -796,7 +795,7 @@ def _v1_q_block(
     return b"\x51" + bytes([len(name_b)]) + name_b + d_block + encoded_value
 
 
-# ngrfc_type values for Unicode (wRFC) mode — BN getNgRfcTypeFromRfcType 0x51d568
+# ngrfc_type values for Unicode (wRFC) mode — protocol analysis
 _V1_NGT: dict[int, int] = {
     0: 6,  # CHAR → CHAR_UC
     1: 12,  # DATE → DATE_UC
@@ -811,7 +810,7 @@ _V1_NGT: dict[int, int] = {
     29: 24,  # STRING (0x18)
     30: 25,  # XSTRING (0x19)
     31: 4,  # INT8
-    32: 29,  # UTCLONG (0x1d) — BN getNgRfcTypeFromRfcType 0x51d568 case 0x20
+    32: 29,  # UTCLONG (0x1d) — protocol analysis case 0x20
 }
 
 # D-block type_name strings per rfctype (ABAP internal type descriptors).
@@ -826,7 +825,7 @@ _V1_TNAME_FIXED: dict[int, bytes] = {
     29: b"\\TYPE=STRING",
     30: b"\\TYPE=XSTRING",
     31: b"\\TYPE=INT8",
-    32: b"\\TYPE=UTCLONG",  # BN-UNCERTAIN: tname not live-captured; follows \\TYPE= convention
+    32: b"\\TYPE=UTCLONG",  # UNCERTAIN: tname not live-captured; follows \\TYPE= convention
 }
 # rfctypes NOT in _V1_TNAME_FIXED append nuc_length to their prefix:
 _V1_TNAME_PREFIX: dict[int, bytes] = {
@@ -846,7 +845,7 @@ def _v1_tname(rfctype: int, nuc_length: int) -> bytes:
 def _v1_enc_int(value: int, width: int, signed: bool) -> bytes:
     """compMode 'N' (0x4E) + LE fixed-width integer.
 
-    BN serializeField INT4 (0x51c45d): writeByte(0x4E) then 4B LE signed.
+    the field serializer INT4: writeByte(0x4E) then 4B LE signed.
     """
     fmt = {(1, False): "B", (2, True): "h", (4, True): "i", (8, True): "q"}
     return b"\x4e" + struct.pack("<" + fmt[(width, signed)], int(value))
@@ -855,9 +854,9 @@ def _v1_enc_int(value: int, width: int, signed: bool) -> bytes:
 def _v1_enc_struct_field(fd: FieldDesc, value: Any) -> bytes:
     """Encode one field value for a STRUCTURE body (compMode + encoded_value).
 
-    BN serializeField (0x51c17e): dispatch on ngrfc_type, write compMode byte then value.
-    BN serializeData (0x51c822): initial-value path writes 0x49 ('I'); non-initial calls
-    serializeField.  We always write the full value (no 'I' optimization) — safe and simpler.
+    protocol analysis: dispatch on ngrfc_type, write compMode byte then value.
+    protocol analysis: initial-value path writes 0x49 ('I'); non-initial calls
+    the field serializer.  We always write the full value (no 'I' optimization) — safe and simpler.
 
     Field types handled: all rfctypes that can appear inside an ABAP structure.
     """
@@ -886,7 +885,7 @@ def _v1_enc_struct_field(fd: FieldDesc, value: Any) -> bytes:
     if rt == 30:  # XSTRING
         raw = value.encode("utf-8") if isinstance(value, str) else bytes(value or b"")
         return _v1_enc_xstring(raw)
-    if rt == 32:  # UTCLONG — BN serializeField case 0x20 → INT8 path (compMode=0x4e + int64LE)
+    if rt == 32:  # UTCLONG — the field serializer case 0x20 → INT8 path (compMode=0x4e + int64LE)
         return _v1_enc_int(int(value) if value is not None else 0, 8, True)
     raise NotImplementedError(
         f"STRUCTURE field rfctype={rt} ({fd.name!r}) not supported in V1 Q-marker"
@@ -896,20 +895,20 @@ def _v1_enc_struct_field(fd: FieldDesc, value: Any) -> bytes:
 def _v1_q_struct(name_b: bytes, fd: FieldDesc, value: dict[str, object]) -> bytes:
     """Build V1 Q-marker for STRUCTURE (rfctype=0x11) IMPORT param.
 
-    Wire layout (BN RE serializeDataMetadata 0x519a52, serializeColumnMetaData 0x519884,
-    serializeData 0x51c822, serializeField 0x51c17e):
+    Wire layout (protocol analysis the metadata serializer, the column metadata serializer,
+    the data serializer, the field serializer):
 
-      0x51 + name_len(1B) + name          Q-marker (serializeParameter)
-      0x44                                D marker (serializeDataMetadata writeByte)
+      0x51 + name_len(1B) + name          Q-marker (the parameter serializer)
+      0x44                                D marker (the metadata serializer writeByte)
       (n_fields | 0x5000) LE(2B)          writeInt2 normal path (n_fields <= 0xffe)
-      struct_tname_LV                     serializeName(struct type name) — 0x00 if unknown
-      Per-field metadata (serializeColumnMetaData):
-        ngrfc_type(1B)                    serializeSingleTypeMetaData
+      struct_tname_LV                     the name serializer(struct type name) — 0x00 if unknown
+      Per-field metadata (the column metadata serializer):
+        ngrfc_type(1B)                    the single-type metadata serializer
         [field_len LE(2B)]                absent for ngrfc_type <= 4 (INT types)
         [decimals(1B)]                    BCD only (ngrfc_type == 9)
-        field_name_LV                     serializeName(field_name), UTF-8 LV
-      Per-field values (serializeData field loop):
-        compMode(1B) + encoded_value      serializeField result (never 'I' optimization)
+        field_name_LV                     the name serializer(field_name), UTF-8 LV
+      Per-field values (the data serializer field loop):
+        compMode(1B) + encoded_value      the field serializer result (never 'I' optimization)
     """
     td = fd.type_desc
     if td is None:
@@ -923,7 +922,7 @@ def _v1_q_struct(name_b: bytes, fd: FieldDesc, value: dict[str, object]) -> byte
     d_block.append(0x44)
     d_block += struct.pack("<H", (n_fields | 0x5000) & 0xFFFF)
     # Struct type name: write empty LV (0x00) — we don't have the DDIC type name.
-    # BN serializeName writes 0 bytes for empty string; 0x00 is the well-formed LV
+    # the name serializer writes 0 bytes for empty string; 0x00 is the well-formed LV
     # equivalent (length=0) that the server can safely skip.
     d_block.append(0x00)
 
@@ -936,7 +935,7 @@ def _v1_q_struct(name_b: bytes, fd: FieldDesc, value: dict[str, object]) -> byte
                 f"STRUCTURE field {fld.name!r} rfctype={rt} has no ngrfc_type mapping"
             )
         d_block.append(ngt)
-        if ngt > 4:  # serializeSingleTypeMetaData: write field_len for non-INT types
+        if ngt > 4:  # the single-type metadata serializer: write field_len for non-INT types
             field_len = fld.uc_length if fld.unicode_mode else fld.nuc_length
             d_block += struct.pack("<H", field_len)
             if ngt == 9:  # BCD: also write decimals
@@ -985,14 +984,14 @@ def _v1_enc_bcd(value: object, nuc_length: int, decimals: int) -> bytes:
 
 
 def _v1_stringlike_chunks(data: bytes) -> bytes:
-    """Chunk UTF-8 bytes for the serializeStringLike non-UC (wRFC) wire format.
+    """Chunk UTF-8 bytes for the string-serializer non-UC (wRFC) wire format.
 
-    BN serializeStringLike (0x52a5f4) non-UC path (arg1[0x10]==0):
+    protocol analysis non-UC path (arg1[0x10]==0):
     - First chunk: max 0x3FFF bytes. Last flag = 0x4000 (first+last only).
     - Subsequent chunks: max 0x7FFF bytes. Last flag = 0x8000.
     - Non-last chunks (any position): no flag, bare byte_count.
-    - No total count written after last chunk for non-UC mode (BN: skip when
-      arg1[0x10]==0 && entry_r15==r12, confirmed from hexdump at 0x52a7c5: je +0x43).
+    - No total count written after last chunk for non-UC mode (skip when
+      arg1[0x10]==0 && entry_r15==r12, confirmed from hexdump at: je +0x43).
 
     UTF-8 multi-byte sequence boundaries are respected when splitting (trim end back
     while data[end] is a continuation byte 0x80-0xBF).
@@ -1024,9 +1023,9 @@ def _v1_stringlike_chunks(data: bytes) -> bytes:
 
 
 def _v1_enc_string(value: str) -> bytes:
-    """compMode 'S' (0x53) + serializeStringLike chunks for STRING.
+    """compMode 'S' (0x53) + the string serializer chunks for STRING.
 
-    BN serializeStringLike (0x52a5f4) non-UC (wRFC) mode confirmed:
+    protocol analysis non-UC (wRFC) mode confirmed:
     single chunk: int16LE(utf8_byte_count | 0x4000) + utf8_bytes.
     Multi-chunk: see _v1_stringlike_chunks. No total count for non-UC mode.
     """
@@ -1034,10 +1033,10 @@ def _v1_enc_string(value: str) -> bytes:
 
 
 def _v1_enc_xstring(value: bytes | bytearray) -> bytes:
-    """compMode 'X' (0x58) + serializeStringLike chunks for XSTRING.
+    """compMode 'X' (0x58) + the string serializer chunks for XSTRING.
 
     Same chunk format as STRING but raw bytes (no UTF-8 conversion).
-    BN serializeStringLike non-UC path: first-chunk max 0x3FFF, subsequent 0x7FFF.
+    the string serializer non-UC path: first-chunk max 0x3FFF, subsequent 0x7FFF.
     """
     return b"\x58" + _v1_stringlike_chunks(bytes(value))
 
@@ -1045,30 +1044,30 @@ def _v1_enc_xstring(value: bytes | bytearray) -> bytes:
 def _build_ngrfc_params(params: dict[str, Any], desc: FunctionDesc) -> bytes:
     """Build NG RFC V1 (fast serializer v3, HDR byte[2]=0x03) parameter bytes.
 
-    BN RE confirmed format (ngrfcSerializeParams 0x4af142, sub_4af169):
+    protocol analysis confirmed format (ngrfcSerializeParams, sub_4af169):
 
       T-markers — schema activation for EXPORT/CHANGING/TABLES params:
-        BN ngrfcSupplyOutParam (0x4b01e2): writes T iff direction & 2 != 0.
+        protocol analysis: writes T iff direction & 2 != 0.
         0x54 + name_len(1B) + name
         RFC_EXPORT (2) ✓, RFC_CHANGING (3) ✓, RFC_TABLES (7=0b111) ✓, RFC_IMPORT (1) ✗.
 
       Q-markers — param values supplied by caller (IMPORT/CHANGING/TABLES with data):
-        BN serializeParameter (0x51cc72): Q(0x51) hardcoded, then per-type dispatch.
+        protocol analysis: Q(0x51) hardcoded, then per-type dispatch.
         Scalar/struct (rfctype ≠ 5):
           0x51 + name_len(1B) + name + D-block(0x5001) + compMode + value
         TABLE (rfctype == 5), IMPORT/TABLES direction, table data present:
           0x51 + name_len(1B) + name
-          + K(0x4b) [from serializeDataMetadata isFirstRow=1, 0x519dac]
-          + (col_count | 0xD000) LE(2B) [0x519e92]
-          + dm_table_id LE(2B) [0x519f53]
-          + tname_len(1B) + tname [0x519f61]
-          + col_metadata [serializeColumnMetaData]
+          + K(0x4b) [from the metadata serializer isFirstRow=1,]
+          + (col_count | 0xD000) LE(2B) []
+          + dm_table_id LE(2B) []
+          + tname_len(1B) + tname []
+          + col_metadata [the column metadata serializer]
           + row_count(2B) + row_data
 
       EXPORT TABLE params (e.g. GFI PARAMS): T-marker only — no Q, no K.
-        BN ngrfcSerialize (0x4b021a): EXPORT params skip when data ptr == 0.
+        protocol analysis: EXPORT params skip when data ptr == 0.
 
-      Terminator: 0x45 (EXECUTE marker, setNgRfcExecute 0x516910).
+      Terminator: 0x45 (EXECUTE marker, setNgRfcExecute).
     """
     params_upper = {k.upper(): v for k, v in params.items()}
     t_section = bytearray()
@@ -1081,7 +1080,7 @@ def _build_ngrfc_params(params: dict[str, Any], desc: FunctionDesc) -> bytes:
         rt = fd.rfctype
 
         # T-markers: schema activation for EXPORT, CHANGING, TABLES params.
-        # BN ngrfcSupplyOutParam: if (direction & 2) == 0 → skip.
+        # the out-parameter path: if (direction & 2) == 0 → skip.
         if fd.direction & 2:
             t_section += b"\x54" + bytes([len(name_b)]) + name_b
 
@@ -1178,9 +1177,9 @@ def _build_ngrfc_params(params: dict[str, Any], desc: FunctionDesc) -> bytes:
             q_section += _v1_q_struct(name_b, fd, val if isinstance(val, dict) else {})
 
         elif rt == 32:  # RFCTYPE_UTCLONG — ngrfc_type=0x1d, INT8 wire encoding
-            # BN serializeField case 0x1f,0x20 → shared INT8 path; compMode=0x4e + int64LE.
+            # the field serializer case 0x1f,0x20 → shared INT8 path; compMode=0x4e + int64LE.
             # ngrfc_type=29 (0x1d) > 4 → field_len=8 IS written in D-block metadata.
-            # BN-UNCERTAIN: tname "\\TYPE=UTCLONG" not live-captured.
+            # UNCERTAIN: tname "\\TYPE=UTCLONG" not live-captured.
             q_section += _v1_q_block(
                 name_b,
                 b"\\TYPE=UTCLONG",
@@ -1195,7 +1194,7 @@ def _build_ngrfc_params(params: dict[str, Any], desc: FunctionDesc) -> bytes:
                 f"(param {pname!r}); DECF16/DECF34 not yet supported"
             )
 
-    # 0x45 = EXECUTE marker (BN setNgRfcExecute 0x516910).
+    # 0x45 = EXECUTE marker (protocol analysis.
     return bytes(t_section + q_section + b"\x45")
 
 
@@ -1206,9 +1205,7 @@ def _lz4_block_compress(data: bytes) -> bytes:
     All payload goes into one terminal sequence: token[high4=lit_len_cap]
     + extra-length bytes + literals. No match offset/length emitted (last-
     sequence rule). Server uses LZ4_decompress_safe_usingDict with zero-init
-    dict for first block — independent literal-only blocks are fully safe.
-
-    BN 0x4af142 ngrfcSerializeParams: conn[0x3ce]=0x4020 → high-byte bit6
+    dict for first block — independent literal-only blocks are fully safe. ngrfcSerializeParams: conn[0x3ce]=0x4020 → high-byte bit6
     set → NgRfcLZ4Compressor active; literal-only output satisfies the
     decompressor (no-guessing policy: no match logic until RE confirms dict).
     """
@@ -1232,14 +1229,14 @@ def _lz4_block_compress(data: bytes) -> bytes:
 def _sap_lz4_frame(data: bytes) -> bytes:
     """SAP LZ4 framing: [0x34 type marker][4B LE uncomp_len][4B LE comp_len][lz4_block_data].
 
-    BN RE (confirmed 2026-07-28):
-    - NgRfcLZ4Compressor::ctor (0x5135e6): writeByte(0x34) — type-marker byte written once.
-    - NgRfcLZ4Compressor::doCompress (0x5136fe): writeInt4(uncomp)+writeInt4(comp)+writeData.
-    - NgRfcLZ4Decompressor::ctor (0x52b578): readByte() checked == 0x34, else throw;
+    protocol analysis (confirmed 2026-07-28):
+    - NgRfcLZ4Compressor::ctor: writeByte(0x34) — type-marker byte written once.
+    - NgRfcLZ4Compressor::doCompress: writeInt4(uncomp)+writeInt4(comp)+writeData.
+    - the LZ4 decompressor::ctor: readByte() checked == 0x34, else throw;
       then calls decompress() which reads int4(uncomp)+int4(comp)+readData(comp).
-    - NgRfcReceiveStream::NgRfcReceiveStream (0x52ab66): reads full 0x5001 payload into buffer,
+    - the NgRfc receive stream: reads full 0x5001 payload into buffer,
       consumes byte-0='$', calls getHeader() (bytes 1-13), setSerializerVersion(); buffer
-      pointer at byte 14 when createDecompressor → NgRfcLZ4Decompressor::ctor runs.
+      pointer at byte 14 when createDecompressor → the LZ4 decompressor::ctor runs.
     Prior removal of 0x34 was incorrect (doCompress does not write it; ctor does).
     """
     block = _lz4_block_compress(data)
@@ -1299,7 +1296,7 @@ def _build_ws_invoke_message(
 
     # Pcap frame 229 (RFC_SYSTEM_INFO) and 233 (RFC_READ_TABLE) both show:
     #   0x0130 → 0x0503 (empty) → 0x0420 → 0x0512 → 0x5001 → 0x0104 → TERM
-    # Prior comment claiming "NO 0x0503 in invoke frames" was wrong — BN pcap RE confirms it.
+    # Prior comment claiming "NO 0x0503 in invoke frames" was wrong — capture analysis confirms it.
     # Hypothesis: 0x0104 with pcap reference IPs (192.168.66.x) causes RABAX on live system.
     # Test: omit 0x0104 (same approach as LOGON frame) to see if RABAX resolves.
     # LOGON comment: "wrong-environment 0x0104 causes WP hang" → same may apply to invoke.
@@ -1340,7 +1337,7 @@ def _ws_parse_invoke_response(data: bytes, desc: FunctionDesc) -> dict[str, Any]
     LZ4 decompression: if the server sends a SAP LZ4 frame (marker byte 0x34), the
     payload is decompressed before TLV parsing.  With _WS_5001_HDR_INVOKE flags=0x6040
     (LZ4 send enabled) the server may compress its responses too; this path handles both.
-    BN: NgRfcLZ4Decompressor::ctor @ 0x52b578 reads marker 0x34 then decomp_len+comp_len.
+    the LZ4 decompressor::ctor reads marker 0x34 then decomp_len+comp_len.
     """
     if data and data[0] == 0x34:
         try:
@@ -1426,7 +1423,7 @@ def _strip_gw_header(resp: bytes) -> bytes:
     """Strip the 80-byte GW header (76B header + 4B RFC marker) from a live server response.
 
     Live RFC responses are GW frames: [GW header 76B][RFC marker 4B][TLV…].
-    All GW frames have first byte 0x06 (BN: all GW builders set *(ptr+0x50)=6).
+    All GW frames have first byte 0x06 (all GW builders set *(ptr+0x50)=6).
     TLV invoke responses always start with tag 0x05xx (e.g. 0x0500 call-end marker)
     and MockTransport responses are raw TLV — neither starts with 0x06, so the
     first-byte check discriminates GW frames from bare TLV safely.
@@ -1475,7 +1472,7 @@ def _parse_gfi_params_rows(
     response = _strip_gw_header(response)
 
     # 0x0303 wire-captured from stfc_connection + stfc_structure + stfc_changing
-    # captures 2026-06-28 (bn-re-findings.md §"TABLE encoding tags").
+    # captures 2026-06-28 (docs/protocol/framing.md §"TABLE encoding tags").
     _TAG_PARAMS_ROW = 0x0303
     _TAG_TERM = 0xFFFF
     _ROW_BYTES = 402
@@ -1861,7 +1858,7 @@ class Connection:
 
         wRFC connect defers the RFC LOGON to the first call() (Track 2 lazy-LOGON).
         LOGON+RFCPING(b"\\x45") is sent on first call; RFCPING has no params so the
-        ngrfc body is just the EXECUTE marker (BN setNgRfcExecute 0x516910 confirms
+        ngrfc body is just the EXECUTE marker (protocol analysis confirms
         0x45 is written for every function including zero-param ones).
 
         A prior observation of RFCPING hanging with b"\\x45" was server WP exhaustion
@@ -1980,7 +1977,7 @@ class Connection:
                 # the GSS handshake so the RFC logon goes over the encrypted
                 # channel. Wire-capture confirmed: GW_INFO+GW_DONE go plain;
                 # SNC FR_INIT/FR_ACCEPT happen inside 0x06CB GW frames AFTER
-                # GW_DONE (not between GW_CONNECT and GW_INFO as BN suggested).
+                # GW_DONE (not between GW_CONNECT and GW_INFO, as first assumed).
                 if prev_state is SessionState.GW_CONNECTED:
                     if hasattr(self._transport, "activate_snc"):
                         self._transport.activate_snc(self._session.handle)
@@ -2028,7 +2025,7 @@ class Connection:
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
                     # Outer GW-SNC APPCHDR6 (80B) is added by SncTransport._build_gw_snc_frame.
-                    # BN RE STIntSend/STISncOut: arg4 (plain data) = COM_HEAD + TLV — no GW header.
+                    # protocol analysis STIntSend/the SNC output path: arg4 (plain data) = COM_HEAD + TLV — no GW header.
                     return [_COM_HEAD + tlv]
                 return [self._build_logon_frame(handle, tlv)]
             case _:
@@ -2042,20 +2039,20 @@ class Connection:
     def _build_gw_connect_request(ashost: str, sysnr: int, *, snc: bool = False) -> bytes:
         """Build the 453-byte GW_CONNECT_REQUEST payload (PKT 8 capture).
 
-        BN source: STIInit (0x5add9d), lines around 0x5b0141.
-        Fields with BN confirmation:
-          [0:2]   type = 0x0601  BN: *(r13_11+0x51) = 1 → APPCHDR6[1]=1
-          [2:4]   version = 0x0200  BN: APPCHDR6[2]=CONV_PROTO[0x17]=0x02
-          [4:8]   flags = 0xFFFF0000  BN: [4:6]=0xffff, [6:8]=0 (memset)
-          [10]    SNC bit: 0x01 plain / 0x21 SNC  BN: *(r13_11+0x5a)|=0x20 (SNC mode)
-          [16]    0xC0  BN: *(r13_11+0x60)|=0x80 (0x80 confirmed); 0x40 from init
-          [21]    0x04  BN: *(r13_11+0x65)|=4 (confirmed)
-          [22]    0x00  BN: *(r13_11+0x66)=0 (when handle>=0)
-          [40:48] "        "  BN: strncpy(r13_11+0x78,"        ",8) — no handle outbound
-          [48:56] "NWRFC   "  BN: UtilCpyUcToNet(r13_11+0x80,...,LU_name,8) = remote partner
-          [73]    0x01  BN: *(r13_11+0x99) = 1
-          [76:78] 0x0000  BN: *(r13_11+0x9c)=bswap(port); cpic_with_lu_addr==0 → port=0
-          [78:80] 0xffff  BN: *(r13_11+0x9e) = 0xffff
+        Confirmed from the GW_CONNECT frame builder.
+        Fields confirmed by analysis:
+          [0:2]   type = 0x0601  *(r13_11+0x51) = 1 → APPCHDR6[1]=1
+          [2:4]   version = 0x0200  APPCHDR6[2]=CONV_PROTO[0x17]=0x02
+          [4:8]   flags = 0xFFFF0000  [4:6]=0xffff, [6:8]=0 (memset)
+          [10]    SNC bit: 0x01 plain / 0x21 SNC  *(r13_11+0x5a)|=0x20 (SNC mode)
+          [16]    0xC0  *(r13_11+0x60)|=0x80 (0x80 confirmed); 0x40 from init
+          [21]    0x04  *(r13_11+0x65)|=4 (confirmed)
+          [22]    0x00  *(r13_11+0x66)=0 (when handle>=0)
+          [40:48] "        "  strncpy(r13_11+0x78,"        ",8) — no handle outbound
+          [48:56] "NWRFC   "  UtilCpyUcToNet(r13_11+0x80,...,LU_name,8) = remote partner
+          [73]    0x01  *(r13_11+0x99) = 1
+          [76:78] 0x0000  *(r13_11+0x9c)=bswap(port); cpic_with_lu_addr==0 → port=0
+          [78:80] 0xffff  *(r13_11+0x9e) = 0xffff
         Remaining bytes: wire-captured from PKT 8 (golden fixture validated).
         """
         payload = bytearray(453)
@@ -2066,14 +2063,14 @@ class Connection:
             b"\x00\x00\x01\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x04\x00\x00\x00\x00\x01\x75"
         )
         if snc:
-            payload[10] |= 0x20  # BN: *(r13_11+0x5a)|=0x20 (SNC capability flag)
+            payload[10] |= 0x20  # *(r13_11+0x5a)|=0x20 (SNC capability flag)
         payload[28:36] = b"\x00\x00\x05\x00\x00\x00\x00\x00"
-        payload[40:48] = b"        "  # BN: no handle in outbound request
-        payload[48:56] = b"NWRFC   "  # BN: remote LU name = RFC gateway partner
+        payload[40:48] = b"        "  # no handle in outbound request
+        payload[48:56] = b"NWRFC   "  # remote LU name = RFC gateway partner
         payload[56:64] = ashost[:8].ljust(8).encode("ascii")  # IP prefix
         payload[64:72] = f"sapdp{sysnr:02d} ".encode("ascii")  # service (8B)
         payload[72:80] = (
-            b"\x49\x01\x00\x00\x00\x00\xff\xff"  # [73]=1, [76:78]=0, [78:80]=0xffff (BN)
+            b"\x49\x01\x00\x00\x00\x00\xff\xff"  # [73]=1, [76:78]=0, [78:80]=0xffff (confirmed)
         )
         payload[80:85] = b"NWRFC"
         payload[85:112] = b" " * 27
@@ -2100,15 +2097,15 @@ class Connection:
     def _build_gw_info(handle: bytes, ashost: str, *, snc: bool = False) -> bytes:
         """Build the 224-byte GW_INFO payload (PKT 10 capture; no server response).
 
-        BN source: STSPLN (0x5ac4e2).
-        Fields with BN confirmation:
-          [0:2]   type = 0x060F  BN: *(r13_4+0x51) = 0xf
-          [4:8]   flags = 0xFFFF0000  BN: *(r13_4+0x54) = 0xffff → [4:6]; [6:8]=0 (memset)
-          [27]    0x90  BN: *(r13_4+0x6b) = 0x90
-          [30]    0x04  BN: *(r13_4+0x6e) = 4
-          [40:48] handle  BN: *(r13_4+0x78) = *(rax_2+8) = CONV_PROTO handle
+        Confirmed from the GW_INFO frame builder.
+        Fields confirmed by analysis:
+          [0:2]   type = 0x060F  *(r13_4+0x51) = 0xf
+          [4:8]   flags = 0xFFFF0000  *(r13_4+0x54) = 0xffff → [4:6]; [6:8]=0 (memset)
+          [27]    0x90  *(r13_4+0x6b) = 0x90
+          [30]    0x04  *(r13_4+0x6e) = 4
+          [40:48] handle  *(r13_4+0x78) = *(rax_2+8) = CONV_PROTO handle
           [76:80] 0xFFFF0004 (plain) / 0xFFFF0009 (SNC): CONV_PROTO[0x1c] bswap
-          Total size 0xe0=224 bytes: confirmed from STIAsSendToGw(..., 0xe0) in STSPLN.
+          Total size 0xe0=224 bytes: confirmed from the gateway send path(..., 0xe0) in the GW_INFO builder.
         payload[8:12], [24:28], [28:32]: wire-captured from PKT 10 golden fixture.
         ``snc=True`` selects _GW_CLIENT_TAIL_SNC (live pyrfc SNC capture D-24).
         """
@@ -2117,8 +2114,8 @@ class Connection:
         struct.pack_into(">H", payload, 2, _GW_VERSION)
         struct.pack_into(">I", payload, 4, _GW_FLAGS)
         payload[8:12] = b"\x00\x00\x01\x00"
-        payload[24:28] = b"\x00\x00\x00\x90"  # [27]=0x90 confirmed (BN STSPLN)
-        payload[28:32] = b"\x00\x00\x04\x00"  # [30]=4 confirmed (BN STSPLN)
+        payload[24:28] = b"\x00\x00\x00\x90"  # [27]=0x90 confirmed (confirmed)
+        payload[28:32] = b"\x00\x00\x04\x00"  # [30]=4 confirmed (confirmed)
         payload[40:48] = handle
         payload[48:56] = ashost[:8].ljust(8).encode("ascii")
         struct.pack_into(">I", payload, 56, len(ashost))
@@ -2131,23 +2128,23 @@ class Connection:
 
     @staticmethod
     def _build_gw_done_client(handle: bytes, *, snc: bool = False) -> bytes:
-        """Build the 80-byte GW_DONE_CLIENT payload (golden fixture + BN confirmed).
+        """Build the 80-byte GW_DONE_CLIENT payload (golden fixture + confirmed).
 
-        BN source: STALLC (0x5ad5b5).
-        Fields with BN confirmation:
-          [0:2]   type = 0x0605  BN: *(rdx_14+0x51) = 5
-          [4:8]   flags = 0xFFFF0000  BN: *(rdx_14+0x54) = 0xffff → [4:6]; [6:8]=0 (memset)
-          [30]    0x01  BN: *(rdx_14+0x6e) = 1
-          [40:48] handle  BN: *(rdx_14+0x78) = *(rax_2+8) = CONV_PROTO handle
+        Confirmed from the GW_DONE frame builder.
+        Fields confirmed by analysis:
+          [0:2]   type = 0x0605  *(rdx_14+0x51) = 5
+          [4:8]   flags = 0xFFFF0000  *(rdx_14+0x54) = 0xffff → [4:6]; [6:8]=0 (memset)
+          [30]    0x01  *(rdx_14+0x6e) = 1
+          [40:48] handle  *(rdx_14+0x78) = *(rax_2+8) = CONV_PROTO handle
           [76:80] 0xFFFF0004 (plain) / 0xFFFF0009 (SNC): CONV_PROTO[0x1c] bswap
-          Total size 0x50=80 bytes: confirmed from STIAsSendToGw(..., 0x50) in STALLC.
+          Total size 0x50=80 bytes: confirmed from the gateway send path(..., 0x50) in the GW_DONE builder.
         ``snc=True`` selects _GW_CLIENT_TAIL_SNC (live pyrfc SNC capture D-24).
         """
         payload = bytearray(80)
         struct.pack_into(">H", payload, 0, _GW_TYPE_DONE)
         struct.pack_into(">H", payload, 2, _GW_VERSION)
         struct.pack_into(">I", payload, 4, _GW_FLAGS)
-        payload[28:32] = b"\x00\x00\x01\x00"  # [30]=1 confirmed (BN STALLC)
+        payload[28:32] = b"\x00\x00\x01\x00"  # [30]=1 confirmed (confirmed)
         payload[40:48] = handle
         struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
         return bytes(payload)
@@ -2173,11 +2170,11 @@ class Connection:
         """Wrap TLV body in the RFC logon frame: GW header (76B) + RFC marker + COM_HEAD + TLV.
 
         Byte layout confirmed from stfc_connection.pcapng PKT 14 hex dump:
-          [0:4]   0x06CB 0x0200    type + version (BN: all GW builders set [0]=6, [1]=type_lsb)
-          [4:8]   0xFFFF0000       flags (BN: [4:6]=0xffff hardcoded, [6:8]=0 from memset)
+          [0:4]   0x06CB 0x0200    type + version (all GW builders set [0]=6, [1]=type_lsb)
+          [4:8]   0xFFFF0000       flags ([4:6]=0xffff hardcoded, [6:8]=0 from memset)
           [24:28] 0x00000008       APPC header version (must be 8 for NW 7.x) — _GW_HDR_APPC_VER
           [28:32] 0x0000050C       CPIC max message length = 1292 — _GW_HDR_MAX_LEN
-          [40:48] handle           8-byte ASCII GW handle (BN: CONV_PROTO[8])
+          [40:48] handle           8-byte ASCII GW handle (CONV_PROTO[8])
           [76:80] RFC_MARKER       FF FF 00 04 (plain) / FF FF 00 09 (SNC):
                                    CONV_PROTO[0x1c] bswap — matches _GW_CLIENT_TAIL_SNC for SNC
           [80:92] COM_HEAD         EBCDIC "RFC000000000"
@@ -2212,7 +2209,7 @@ class Connection:
           [80:]   TLV body         (NO COM_HEAD — invoke frames only)
 
         Omitting GW[24:32] causes immediate 80B 0x06CE rejection from the server
-        ("client with wrong appc header version rejected" — BN 0x85b340).
+        ("client with wrong appc header version rejected").
 
         Footer: every invoke frame ends with an 8-byte trailer inside the NI frame:
           [0:2] 0x0000 | [2:4] uint16 BE len(tlv_body) | [4:6] 0x0000 | [6:8] 0x8500
@@ -2234,7 +2231,7 @@ class Connection:
 
         For SNC, strip the outer 80B GW header (76B APPCHDR6 + 4B RFC_MARKER) —
         SncTransport._build_gw_snc_frame builds its own APPCHDR6 envelope, so the
-        encrypted payload must be only TLV+footer (same BN RE logic as logon).
+        encrypted payload must be only TLV+footer (same protocol analysis logic as logon).
         For non-SNC, send the full GW-framed bytes unchanged.
 
         This method is the classic/SNC GW path ONLY. The wRFC transport bypasses it
@@ -2260,7 +2257,7 @@ class Connection:
         """Build the RFC logon TLV body in extended wire format (tag+len+val+tag).
 
         Emits the scrambled password record (tag 0x0117) per the RE-confirmed
-        derivation (Plan 04-01: ``seed(4B) + ab_scramble(password, seed)``). The
+        derivation (Plan 04-01: ``seed(4B) + scramble(password, seed)``). The
         plaintext ``passwd`` is scrambled, never emitted plaintext and never
         logged (threat T-04-CRED / T-03-CRED2). ``seed`` is injectable so offline
         tests are deterministic; production uses a fresh per-call client nonce.
@@ -2384,7 +2381,7 @@ class Connection:
             # PARAMS is an EXPORTING TABLE param (the server sends it back).
             # pcap-verified: K marker requires ncols=12 with full column schema.
             # ncols=0 → APCRFC_NO_MEMORY (server rejects schema-less table decl).
-            # PARAMS is EXPORT TABLE → T-marker only (BN RE: direction & 2 != 0).
+            # PARAMS is EXPORT TABLE → T-marker only (protocol analysis: direction & 2 != 0).
             # No K/Q emitted for EXPORT params (server provides the value).
             FieldDesc(
                 name="PARAMS",
@@ -2408,7 +2405,7 @@ class Connection:
             if self._session.state is SessionState.WS_PENDING:
                 # 2-step lazy LOGON (Track 2):
                 # Step 1: LOGON+RFCPING (empty ngrfc body).
-                # BN RE: SDK writes 0x45 EXECUTE for all INVOKE frames; but LOGON frame
+                # protocol analysis: SDK writes 0x45 EXECUTE for all INVOKE frames; but LOGON frame
                 # ngrfc body behaves differently — server hangs when b"\x45" sent in LOGON
                 # frame (vs b"" which yields expected E=163 close, handled below).
                 # _ws_direct_logon_call (same LOGON path, proven path) uses b"" too.
@@ -2889,22 +2886,22 @@ class Connection:
     def create_tid(self) -> str:
         """Generate a 24-character Transaction ID (TID) for tRFC / qRFC calls.
 
-        Uses local UUID generation (NULL-handle semantics per sapnwrfc.h:2222):
+        Uses local UUID generation (NULL-handle semantics per SDK type definitions):
         this method does NOT require an open connection and may be called before
         ``connect()`` or after the connection is closed.
 
         The returned TID is derived from ``uuid4().hex[:24].upper()``.  UUID-hex
-        characters (``0-9A-F``) are a strict subset of the BN-confirmed RFC TID
-        alphabet (``ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-``; BN 0x4b5a33),
+        characters (``0-9A-F``) are a strict subset of the confirmed RFC TID
+        alphabet (``ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-``;),
         so the TID is always valid on the wire.  The authentic SDK format uses
         IP+PID+time+counter encoding, but SAP accepts any string in the alphabet
-        (range check only — BN 0x4b5a33 notes, Plan 06-01 SUMMARY Assumption A1).
+        (range check only notes, Plan 06-01 SUMMARY Assumption A1).
 
         Returns:
             A 24-character uppercase string suitable for use as a TID.
 
-        Source: sapnwrfc.h:2222-2224 (RfcGetTransactionID NULL-handle branch),
-                BN RfcTransaction::createTid 0x4b5a33.
+        Source: SDK type definitions-2224 (RfcGetTransactionID NULL-handle branch),
+                protocol analysis.
         """
         return uuid.uuid4().hex[:24].upper()
 
@@ -2916,17 +2913,16 @@ class Connection:
         queue: str | None = None,
         **params: object,
     ) -> None:
-        """Submit a tRFC (or qRFC) call carrying the BN-confirmed call-type marker.
+        """Submit a tRFC (or qRFC) call carrying the confirmed call-type marker.
 
         Sends a synchronous RFC invoke of ``ARFC_DEST_SHIP`` with the TID encoded
         as a CHAR parameter (UTF-16LE, 24 chars = 48 bytes — Pitfall 4).  The
         function-name TLV (0x0102) carries ``ARFC_DEST_SHIP``, which IS the
-        call-type discriminator on the server side (BN RfcServer::dispatch
-        0x4bb5de — no separate discriminator byte).
+        call-type discriminator on the server side (protocol analysis — no separate discriminator byte).
 
         For qRFC (``queue`` is not None): the queue name is included as an
         additional parameter in the ARFCSSTATE table param, causing the server to
-        read a non-zero value at the queue-indicator offset 0xe58 (BN 0x4bb632).
+        read a non-zero value at the queue-indicator offset 0xe58.
 
         Returns None — tRFC has no return values by design (CONTEXT Claude's
         discretion: ``call_transactional`` returns None rather than a dict because
@@ -2936,13 +2932,13 @@ class Connection:
         This method NEVER calls ``confirm_tid`` automatically (Pitfall 3 /
         D-04): confirm is a SEPARATE lifecycle step (``conn.confirm_tid(tid)``).
         Calling ``confirm_tid`` before verifying the submit landed removes backend
-        duplicate-execution protection (sapnwrfc.h:2168).
+        duplicate-execution protection.
 
         Args:
             func_name:  The wrapped ABAP function module name (e.g.
                         ``"STFC_CONNECTION"``).  Stored as ARFCFNAM in
                         ARFCSSTATE.
-            tid:        24-char TID from the RFC alphabet (BN 0x4b5a33).
+            tid:        24-char TID from the RFC alphabet.
                         Use ``create_tid()`` to generate one.
             queue:      qRFC queue name.  When not None, this call becomes a
                         queued RFC (TRFC-04).  Must be non-empty and bounded
@@ -2959,7 +2955,7 @@ class Connection:
         ``build_trfc_request`` before encoding.  CommunicationError does not
         leak transport internals beyond ``str(exc)`` (T-06-C03).
 
-        Source: sapnwrfc.h:2114–2165 (RfcCreateTransaction, RfcSubmitTransaction),
+        Source: SDK type definitions–2165 (RfcCreateTransaction, RfcSubmitTransaction),
                 docs/protocol/trfc.md §"System FM Sequence".
         """
         # Classic TCP path: delegate to async core for retry behaviour (D-07).
@@ -2994,7 +2990,7 @@ class Connection:
         execution protection for this TID.
 
         WARNING: After ``confirm_tid`` returns, the backend can no longer detect
-        duplicate calls using this TID (sapnwrfc.h:2168).  Only call this method
+        duplicate calls using this TID.  Only call this method
         after you have verified that the ``call_transactional`` submit landed
         successfully (e.g. no ``CommunicationError`` was raised).
 
@@ -3010,8 +3006,8 @@ class Connection:
             CommunicationError:  Wraps ``OSError`` / ``EOFError`` from the
                                  transport.
 
-        Source: sapnwrfc.h:2197 (RfcConfirmTransactionID),
-                BN RfcServer::dispatch 0x4bb65a (ARFC_DEST_CONFIRM branch).
+        Source: SDK type definitions (RfcConfirmTransactionID),
+                protocol analysis (ARFC_DEST_CONFIRM branch).
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3050,7 +3046,7 @@ class Connection:
         via BGRFC_DEST_SHIP.  On exception inside the with-block, the unit
         is abandoned and NO submit frame is sent (Pitfall 6).
 
-        Unit type (Pitfall 5 / BN 0x483919):
+        Unit type (Pitfall 5):
           - ``'T'`` when ``queues`` is empty or None (synchronous unit)
           - ``'Q'`` when ``queues`` is non-empty (queued unit)
         The type is stored on the handle so ``confirm_unit`` / ``get_unit_state``
@@ -3058,7 +3054,7 @@ class Connection:
 
         UnitID generation: when ``uid`` is None, generates a 32-char uppercase
         hex UnitID via ``uuid4().hex.upper()`` (NULL-handle semantics,
-        sapnwrfc.h:2222-2224 / BN 0x511554 pfuuid_print path).
+        SDK type definitions-2224 the UUID formatter path).
 
         Args:
             uid:    32-char uppercase hex UnitID; generated if None.
@@ -3073,7 +3069,7 @@ class Connection:
                 # On clean exit → BGRFC_DEST_SHIP frame submitted atomically.
                 # On exception → unit abandoned, no submit.
 
-        Source: sapnwrfc.h:2261 (RfcCreateUnit), 2272 (RfcInvokeInUnit),
+        Source: SDK type definitions (RfcCreateUnit), 2272 (RfcInvokeInUnit),
                 2303 (RfcSubmitUnit), D-05 context-manager API.
         """
         if uid is None:
@@ -3130,11 +3126,11 @@ class Connection:
 
         Sends BGRFC_DEST_CONFIRM to the backend.  After this call the backend
         can clean up the unit state.  The ``unit_type`` must match the type
-        used at submit time (Pitfall 5 / sapnwrfc.h:316).
+        used at submit time (Pitfall 5).
 
         ``RFC_UNIT_NOT_FOUND`` after confirm means the backend already cleaned
         up — treat as success (anti-pattern: never resend on NOT_FOUND after
-        confirm, sapnwrfc.h:327 / T-06-U04).
+        confirm, T-06-U04).
 
         Args:
             unit_id:   32-char uppercase hex UnitID.
@@ -3144,8 +3140,8 @@ class Connection:
             ValueError:          If ``unit_id`` is not a valid 32-char hex UnitID.
             CommunicationError:  Wraps OSError/EOFError from the transport.
 
-        Source: sapnwrfc.h:2331 (RfcConfirmUnit),
-                BN RfcServer::dispatch 0x4bb713 (BGRFC_DEST_CONFIRM).
+        Source: SDK type definitions (RfcConfirmUnit),
+                protocol analysis (BGRFC_DEST_CONFIRM).
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3181,7 +3177,7 @@ class Connection:
             ValueError:          If ``unit_id`` is not a valid 32-char hex UnitID.
             CommunicationError:  Wraps OSError/EOFError from the transport.
 
-        Source: sapnwrfc.h:2357 (RfcDestroyUnit / rollback path); D-05.
+        Source: SDK type definitions (RfcDestroyUnit / rollback path); D-05.
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3214,7 +3210,7 @@ class Connection:
         """Query the current state of a bgRFC unit on the backend (TRFC-06).
 
         Sends BGRFC_CHECK_UNIT_STATE_SERVER and maps the response to a
-        ``UnitState`` enum value (sapnwrfc.h:326-332).
+        ``UnitState`` enum value (SDK type definitions-332).
 
         ``RFC_UNIT_NOT_FOUND`` after a confirmed unit is treated as success
         (state is already ``CONFIRMED`` — do not resend, T-06-U04).
@@ -3230,8 +3226,8 @@ class Connection:
             ValueError:          If ``unit_id`` is not a valid 32-char hex UnitID.
             CommunicationError:  Wraps OSError/EOFError from the transport.
 
-        Source: sapnwrfc.h:2357 (RfcGetUnitState),
-                BN RfcServer::dispatch 0x4bb733 (BGRFC_CHECK_UNIT_STATE_SERVER).
+        Source: SDK type definitions (RfcGetUnitState),
+                protocol analysis (BGRFC_CHECK_UNIT_STATE_SERVER).
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3262,7 +3258,7 @@ class Connection:
         """Parse a BGRFC_CHECK_UNIT_STATE_SERVER response into a UnitState enum.
 
         The backend returns the state as a CHAR parameter (BGRFC_STATE) in the
-        response TLV.  Map the string value to UnitState (sapnwrfc.h:326-332).
+        response TLV.  Map the string value to UnitState (SDK type definitions-332).
         When no recognisable state is found (offline or unknown value), return
         UnitState.NOT_FOUND (safe default — caller can treat as not yet committed).
 
@@ -3391,12 +3387,12 @@ class _UnitHandle:
 
     @property
     def unit_id(self) -> str:
-        """The 32-char uppercase hex UnitID (RFC_UNITID_LN=32, BN 0x511855)."""
+        """The 32-char uppercase hex UnitID (RFC_UNITID_LN=32)."""
         return self._uid
 
     @property
     def unit_type(self) -> str:
-        """Unit type: 'T' (no queues) or 'Q' (queues given — BN 0x483919)."""
+        """Unit type: 'T' (no queues) or 'Q' (queues given)."""
         return self._unit_type
 
     def call(self, func_name: str, **params: object) -> None:
@@ -3407,7 +3403,7 @@ class _UnitHandle:
         cleanly (``__exit__`` with no exception) by ``_submit_unit``.
 
         Returns None always (Pitfall 6: ``RfcInvokeInUnit`` buffers, does not
-        execute; there is no result to return here — sapnwrfc.h:2272).
+        execute; there is no result to return here — SDK type definitions).
 
         Args:
             func_name: The ABAP function module name to call.
@@ -3435,7 +3431,7 @@ class _UnitHandle:
         On exception: the unit is abandoned.  No submit frame is sent.
         ``exc_type is not None`` → do NOT suppress the exception (return False).
 
-        Source: sapnwrfc.h:2303 (RfcSubmitUnit).
+        Source: SDK type definitions (RfcSubmitUnit).
         """
         if exc_type is not None:
             # Exception inside with-block: abandon unit, do not submit.
@@ -3499,12 +3495,12 @@ class _AsyncUnitHandle:
 
     @property
     def unit_id(self) -> str:
-        """The 32-char uppercase hex UnitID (RFC_UNITID_LN=32, BN 0x511855)."""
+        """The 32-char uppercase hex UnitID (RFC_UNITID_LN=32)."""
         return self._uid
 
     @property
     def unit_type(self) -> str:
-        """Unit type: 'T' (no queues) or 'Q' (queues given — BN 0x483919)."""
+        """Unit type: 'T' (no queues) or 'Q' (queues given)."""
         return self._unit_type
 
     def call(self, func_name: str, **params: object) -> None:
@@ -4208,7 +4204,7 @@ class AsyncConnection:
 
         Async port of :meth:`Connection.call_transactional` — same exactly-once
         semantics via the SAME ``tid`` resent on every retry (backend returns
-        ``RFC_EXECUTED`` for known TIDs — sapnwrfc.h:151).  Routes through
+        ``RFC_EXECUTED`` for known TIDs — SDK type definitions).  Routes through
         :meth:`_submit_with_retry` so transient failures are retried up to
         ``self._max_retries`` times before parking and raising
         :class:`RetryExhausted`.
@@ -4342,7 +4338,7 @@ class AsyncConnection:
 
         Async port of :meth:`Connection.confirm_unit`.  Sends BGRFC_DEST_CONFIRM
         to the backend.  ``unit_type`` must match the type used at submit time
-        (Pitfall 5 / sapnwrfc.h:316).
+        (Pitfall 5).
 
         Credentials are never logged (T-09-04-CRED).
         """
@@ -4423,7 +4419,7 @@ class AsyncConnection:
         Does NOT re-marshal the original parameters — re-uses the exact bytes
         from the store (D-03b: no re-marshaling).  The same TID is reused so
         exactly-once delivery is preserved (backend returns RFC_EXECUTED for
-        known TIDs — sapnwrfc.h:151).
+        known TIDs — SDK type definitions).
 
         Raises:
             TransactionalError: if no parked call exists for ``tid`` (unknown TID

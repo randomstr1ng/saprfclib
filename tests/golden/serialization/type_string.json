@@ -6,9 +6,9 @@
       "offset": 0,
       "length": 4,
       "name": "string_char_count",
-      "value": "0x00000005",
+      "value": "",
       "type": "fixed",
-      "notes": "String character count = 5 ('Hello'); byte order: [ASSUMED] little-endian uint32 pending BN confirmation"
+      "notes": "String character count = 5 ('Hello'); byte order: [ASSUMED] little-endian uint32 pending independent confirmation"
     },
     {
       "offset": 4,
@@ -60,7 +60,7 @@
     "encoding": "utf-16-le",
     "length_prefix_format": "[ASSUMED] uint32-LE character count"
   },
-  "capture_source": "synthetic — BN-derived; no live capture available",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_STRING_branch [ASSUMED pending BN confirmation — addr 0x8d35f]",
-  "gap_status": "partial — STRING is variable-length UTF-16; length prefix format (uint32 LE char count) [ASSUMED]; BN call-site MISSING"
+  "capture_source": "synthetic — protocol analysis-derived; no live capture available",
+  "evidence": "RFCTYPE_STRING serialization [ASSUMED pending independent confirmation]",
+  "gap_status": "partial — STRING is variable-length UTF-16; length prefix format (uint32 LE char count) [ASSUMED]; protocol analysis call-site MISSING"
 }

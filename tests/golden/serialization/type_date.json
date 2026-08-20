@@ -76,6 +76,6 @@
     "format": "YYYYMMDD"
   },
   "capture_source": "live capture 2026-06-26 — STFC_STRUCTURE IMPORTSTRUCT offset 48; SAP A4H sysnr=00; RFCDATE='20260626'",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_DATE_branch — addr 0x8d35f",
+  "evidence": "RFCTYPE_DATE serialization",
   "gap_status": "closed — UTF-16-LE YYYYMMDD encoding confirmed from live wire capture 2026-06-26"
 }

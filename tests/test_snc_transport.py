@@ -272,7 +272,7 @@ def test_qop3_privacy_send_emits_type9_wrapped():
     ftype, _ctx, _qop, tok, app = parse_snc_frame(inner.sent[0])
     assert ftype == int(SncFrameType.PRIVACY)  # type 9
     # PRIVACY: encrypted data goes in gss_token (token_len), data_len=0 —
-    # confirmed from proxy capture and STISncOut BN RE.
+    # confirmed from proxy capture and STISncOut protocol analysis.
     assert tok == b"WRP" + bytes(b ^ 0x5A for b in b"hello")
     assert app == b""
     assert mock.wrapped == [b"hello"]

@@ -1,6 +1,6 @@
 # Tests for src/saprfclib/exceptions.py — the saprfclib-native typed exception hierarchy.
 #
-# Field set mirrors RFC_ERROR_INFO from sapnwrfc.h (key, message, abapMsgClass,
+# Field set mirrors RFC_ERROR_INFO from SDK type definitions (key, message, abapMsgClass,
 # abapMsgType, abapMsgNumber, abapMsgV1..V4). See plan 04-04 decisions D-14..D-19.
 import pytest
 

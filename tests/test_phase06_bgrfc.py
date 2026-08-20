@@ -12,7 +12,7 @@
 #
 # Protocol citations: docs/protocol/trfc.md §"bgRFC Wire Format: BGRFC_DEST_SHIP",
 #   §"The 32-Character UnitID Format", §"bgRFC Submit + Confirm"
-# SDK refs: sapnwrfc.h:2261 (RfcCreateUnit), 2272 (RfcInvokeInUnit — nothing executes
+# SDK refs: SDK type definitions (unit creation), 2272 (RfcInvokeInUnit — nothing executes
 #   yet), 2303 (RfcSubmitUnit), 2331 (RfcConfirmUnit), 2357 (RfcGetUnitState)
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ import pytest
 # UnitID format validation (offline — no production symbol needed)
 # --------------------------------------------------------------------------- #
 
-_UNITID_LN = 32  # RFC_UNITID_LN from sapnwrfc.h:80
+_UNITID_LN = 32  # RFC_UNITID_LN from SDK type definitions
 _UNITID_CHARSET: frozenset[str] = frozenset("0123456789ABCDEF")
 
 
 def _is_valid_unitid(uid: object) -> bool:
-    """Return True iff uid is a 32-char uppercase hex string (BN 0x511855)."""
+    """Return True iff uid is a 32-char uppercase hex string."""
     return (
         isinstance(uid, str) and len(uid) == _UNITID_LN and all(c in _UNITID_CHARSET for c in uid)
     )
@@ -38,7 +38,7 @@ def test_unitid_format_from_uuid() -> None:
     """uuid4().hex.upper() produces a valid 32-char UnitID.
 
     Validates the format constant. No production symbols needed.
-    BN source: BgRfcUnit::createUnitId 0x511554 → pfuuid_print → 32 uppercase hex.
+    Source: UnitID generation → pfuuid_print → 32 uppercase hex.
     """
     import uuid
 
@@ -90,7 +90,7 @@ def test_unit_buffer_submit() -> None:
     GREEN: Plan 06-05 — Connection.create_unit implemented.
 
     Validates:
-    1. Unit type 'T' when queues=[] (BN 0x483919: 0x54 = 'T').
+    1. Unit type 'T' when queues=[] (: 0x54 = 'T').
     2. unit.call() returns None (RfcInvokeInUnit buffers — h:2272 'nothing executes yet').
     3. __exit__ triggers BGRFC_DEST_SHIP to the backend (docs/protocol/trfc.md
        §"bgRFC Submit + Confirm").
@@ -117,12 +117,12 @@ def test_unit_buffer_submit() -> None:
 
     bgrfc_utf16 = "BGRFC_DEST_SHIP".encode("utf-16-le")
     assert bgrfc_utf16 in frame, (
-        "BGRFC_DEST_SHIP (UTF-16LE) must appear in submit frame (BN RfcServer::dispatch 0x4bb6b1)"
+        "BGRFC_DEST_SHIP (UTF-16LE) must appear in submit frame (the server dispatch)"
     )
 
 
 def test_unit_type_t_when_no_queues() -> None:
-    """create_unit(queues=[]) must create unit type 'T' (0x54, BN 0x483919).
+    """create_unit(queues=[]) must create unit type 'T' (0x54).
 
     GREEN: Plan 06-05.
     """
@@ -133,13 +133,11 @@ def test_unit_type_t_when_no_queues() -> None:
     uid = uuid.uuid4().hex.upper()
     unit_ctx = conn.create_unit(uid=uid, queues=[])
     unit_type = getattr(unit_ctx, "unit_type", None) or getattr(unit_ctx, "_unit_type", None)
-    assert unit_type == "T", (
-        f"Unit type must be 'T' (0x54) when queues=[] (BN 0x483919); got {unit_type!r}"
-    )
+    assert unit_type == "T", f"Unit type must be 'T' (0x54) when queues=[]; got {unit_type!r}"
 
 
 def test_unit_type_q_when_queues_given() -> None:
-    """create_unit(queues=['Q1']) must create unit type 'Q' (0x51, BN 0x483919).
+    """create_unit(queues=['Q1']) must create unit type 'Q' (0x51).
 
     GREEN: Plan 06-05.
     """
@@ -151,7 +149,7 @@ def test_unit_type_q_when_queues_given() -> None:
     unit_ctx = conn.create_unit(uid=uid, queues=["Q1"])
     unit_type = getattr(unit_ctx, "unit_type", None) or getattr(unit_ctx, "_unit_type", None)
     assert unit_type == "Q", (
-        f"Unit type must be 'Q' (0x51) when queues non-empty (BN 0x483919); got {unit_type!r}"
+        f"Unit type must be 'Q' (0x51) when queues non-empty; got {unit_type!r}"
     )
 
 
@@ -190,14 +188,14 @@ def test_unit_lifecycle() -> None:
 
     GREEN: Plan 06-05 — Connection.confirm_unit / rollback_unit / get_unit_state implemented.
 
-    Validates UnitState enum values mirror RFC_UNIT_STATE (sapnwrfc.h:326-332):
+    Validates UnitState enum values mirror RFC_UNIT_STATE (SDK type definitions-332):
       NOT_FOUND=0, IN_PROCESS=1, COMMITTED=2, ROLLED_BACK=3, CONFIRMED=4
     """
     import uuid
 
     from saprfclib.stores import UnitState
 
-    # Verify enum members exist with the right names (sapnwrfc.h:326-332)
+    # Verify enum members exist with the right names (SDK type definitions-332)
     assert hasattr(UnitState, "NOT_FOUND"), "UnitState.NOT_FOUND missing"
     assert hasattr(UnitState, "IN_PROCESS"), "UnitState.IN_PROCESS missing"
     assert hasattr(UnitState, "COMMITTED"), "UnitState.COMMITTED missing"
@@ -213,8 +211,7 @@ def test_unit_lifecycle() -> None:
     frame = conn._transport.sent[0]  # type: ignore[attr-defined]
     bgrfc_confirm_utf16 = "BGRFC_DEST_CONFIRM".encode("utf-16-le")
     assert bgrfc_confirm_utf16 in frame, (
-        "BGRFC_DEST_CONFIRM (UTF-16LE) must appear in confirm_unit frame "
-        "(BN RfcServer::dispatch 0x4bb713)"
+        "BGRFC_DEST_CONFIRM (UTF-16LE) must appear in confirm_unit frame (the server dispatch)"
     )
 
     # get_unit_state — empty response → NOT_FOUND (offline default)

@@ -160,7 +160,7 @@ _PARAMCLASS_TO_DIRECTION: dict[str, int] = {
     "T": RFC_TABLES,
 }
 
-# EXID single-char code → RFCTYPE integer (sapnwrfc.h / confirmed by live capture).
+# EXID single-char code → RFCTYPE integer (SDK type definitions / confirmed by live capture).
 _EXID_TO_RFCTYPE: dict[str, int] = {
     "C": RFCTYPE_CHAR,
     "D": RFCTYPE_DATE,

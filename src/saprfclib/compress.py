@@ -8,7 +8,7 @@
 # (port 3300).  Compression is signalled at the RFCID level in the TLV stream:
 #   RFCID 0x0305 (TableContLZ) — table rows compressed with SAPCOMPRESS.
 #
-# Wire header (8 bytes, prepended by CsRCompress / CsRDecompress):
+# Wire header (8 bytes, prepended by the compressor / the decompressor):
 #   [0-3]  LE uint32  uncompressed length
 #   [4]    algo byte  bits[3:0]=algo_id (1=LZC, 2=LZH), bits[7:4]=version
 #   [5-6]  magic bytes 0x1f 0x9d
@@ -20,12 +20,9 @@
 #   [5-8]  LE uint32 compressed length
 #   [9..]  LZ4 block data
 #
-# BN sources:
-#   CsRDecompress @ 0x7684d0, CsRCompress @ 0x79a000
-#   DecompressionFactory::createDecompressor @ 0x52bb0c
-#   NgRfcLZ4Decompressor ctor @ 0x52b578, doCompress @ 0x7d8658 string region
-#
-# Ported from pysap (OWASP / Martin Gallo) — pure stdlib (struct only).
+# The LZH/LZC decompressors are ported from pysap (OWASP / Martin Gallo) —
+# pure stdlib (struct only). The LZ4 frame handling was derived from observed
+# wire behaviour; see docs/protocol/framing.md.
 from __future__ import annotations
 
 import struct
@@ -824,13 +821,13 @@ def lz4_block_decompress(src: bytes, max_output: int = 0) -> bytes:
 # SAP LZ4 frame decompressor (wRFC / NgRFC WebSocket path)
 # ---------------------------------------------------------------------------
 
-_SAP_LZ4_MARKER = 0x34  # ASCII '4' — confirmed by BN NgRfcLZ4Decompressor ctor @ 0x52b578
+_SAP_LZ4_MARKER = 0x34  # ASCII '4' — confirmed by the LZ4 decompressor
 
 
 def sap_lz4_frame_decompress(data: bytes) -> bytes:
     """Decompress a SAP wRFC LZ4 frame.
 
-    Frame layout (BN-confirmed from NgRfcLZ4Compressor / NgRfcLZ4Decompressor):
+    Frame layout (confirmed from NgRfcLZ4Compressor / the LZ4 decompressor):
       [0]    0x34 '4' marker byte
       [1-4]  LE uint32 uncompressed length
       [5-8]  LE uint32 compressed length

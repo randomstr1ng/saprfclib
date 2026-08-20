@@ -247,21 +247,24 @@ def test_out_of_scope_types_raise_valueerror(rfctype):
 
 
 @pytest.mark.parametrize("rfctype", [DECF16, DECF34])
-def test_decfloat_raises_gap_b01_notimplemented(rfctype):
-    """DecFloat16/34 ship a documented NotImplementedError gap (GAP-B-01).
+def test_decfloat_raises_notimplemented(rfctype):
+    """DecFloat16/34 ship a documented NotImplementedError gap.
 
-    No reachable DECFLOAT-typed RFM existed on the SAP A4H test system, so the
-    wire form is unconfirmed. Per the no-guessing constraint (PROJECT.md
-    D-04/D-05) the codec raises rather than guessing a DPD implementation. This
-    is an intended outcome, not a failure — see type_decf16_GAP.json.
+    No reachable DECFLOAT-typed function module existed on the test system, so
+    the wire form is unconfirmed. Per the no-guessing constraint the codec
+    raises rather than guessing a DPD implementation. This is an intended
+    outcome, not a failure — see type_decf16_GAP.json.
+
+    The message must name the type and say it is unimplemented: a user hitting
+    this needs to know why, not an internal tracker id.
     """
     f = _scalar_field(rfctype)
     with pytest.raises(NotImplementedError) as dec_exc:
         decode(rfctype, b"\x00" * 8, f)
-    assert "GAP-B-01" in str(dec_exc.value)
+    assert "DECF" in str(dec_exc.value) and "not implemented" in str(dec_exc.value)
     with pytest.raises(NotImplementedError) as enc_exc:
         encode(rfctype, None, f)
-    assert "GAP-B-01" in str(enc_exc.value)
+    assert "DECF" in str(enc_exc.value) and "not implemented" in str(enc_exc.value)
 
 
 def test_decfloat_gap_marker_fixture_documents_intentional_gap():

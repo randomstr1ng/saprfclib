@@ -7,7 +7,7 @@
       "name": "cday_value",
       "value": "0x2a00",
       "type": "fixed",
-      "notes": "Signed 16-bit integer, value=42; little-endian (struct '<h') [ASSUMED — RFCTYPE_CDAY (enum 40 per Assumption A1) wire format and byte order pending BN confirmation, serialization.md line 489]"
+      "notes": "Signed 16-bit integer, value=42; little-endian (struct '<h') [ASSUMED — RFCTYPE_CDAY (enum 40 per Assumption A1) wire format and byte order pending independent confirmation, serialization.md line 489]"
     }
   ],
   "expected_parse": {
@@ -17,8 +17,8 @@
     "value": 42
   },
   "capture_source": "synthetic value (42) — RFCTYPE_CDAY layout derived from serialization.md line 489; no live RFM exposing this temporal reachable on SAP A4H 2026-06-26",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch [ASSUMED pending BN confirmation — addr 0x8d35f common dispatch]",
+  "evidence": "the type dispatch [ASSUMED pending independent confirmation]",
   "status": "synthetic",
-  "gap_status": "[ASSUMED] — RFCTYPE_CDAY (enum 40 per Assumption A1) wire byte order/format assumed by analogy to INT types; pending BN confirmation + live capture",
+  "gap_status": "[ASSUMED] — RFCTYPE_CDAY (enum 40 per Assumption A1) wire byte order/format assumed by analogy to INT types; pending independent confirmation + live capture",
   "ni_header_length": 0
 }

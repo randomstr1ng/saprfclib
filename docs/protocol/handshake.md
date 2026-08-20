@@ -2,9 +2,10 @@
 
 ## Status
 
-**CONFIRMED — live Wireshark capture 2026-06-26 (SAP A4H, sysnr=00, port=3300)**
+**CONFIRMED — live capture 2026-06-26 (SAP NetWeaver 7.58, sysnr=00, port=3300).**
 
-Gate C: CLOSED. Full logon sequence documented from frames 4-15.
+The full logon sequence is documented below, frame by frame, and replayed from golden
+fixtures in CI.
 
 ---
 
@@ -64,9 +65,14 @@ The critical field is **offset 24 (4B ASCII):**
 - Client proposes `"1100"` — Latin-1 / non-Unicode
 - Server responds with `"4103"` — **UTF-16LE Unicode mode**
 
-After codepage `4103` is selected, all string data in all subsequent RFC frames uses **UTF-16LE** encoding. This is the `SAP_UC = char16_t` wire encoding documented in `sapucrfc.h`.
+After codepage `4103` is selected, all string data in every subsequent RFC frame is **UTF-16LE**.
+This is SAP's wide-character wire encoding: one character is two bytes, and every length in a
+character-typed field is a count of characters, not bytes.
 
-**Implementation note:** Parse the server's NI_VERSION response and store the negotiated codepage. If codepage is `4103`, use `utf-16-le` for all SAP_UC field encoding. Other known codepages (e.g. `1100` = Latin-1) would use single-byte encoding — but in practice SAP systems enforce Unicode mode for NW RFC SDK connections.
+**Implementation note:** parse the server's NI_VERSION response and store the negotiated
+codepage. If it is `4103`, use `utf-16-le` — explicitly little-endian, never bare `utf-16`,
+which would prepend a BOM the wire format does not have. Codepage `1100` (Latin-1) would imply
+single-byte encoding, but in practice every system tested enforces Unicode mode.
 
 ### Fixture
 
@@ -166,7 +172,7 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 | 0x0514 | 16 | binary | Session token (16 bytes) |
 | 0x0114 | 3 | ASCII "001" | SAP client number |
 | 0x0111 | 9 | ASCII "Developer" | SAP username |
-| 0x0117 | 17 | binary | Scrambled password: `seed(4B rand_r) + ab_scramble(pw, seed)` — see OQ-C01 (RESOLVED) |
+| 0x0117 | 17 | binary | Scrambled password: `seed(4B) + scramble(pw, seed)` — see "Password scrambling" below |
 | 0x0115 | 1 | ASCII "E" | Logon language |
 | 0x0501 | 1 | 0x01 | Flag [UNKNOWN] |
 | 0x0007 | 9 | ASCII "127.0.1.1" | Client IP address |
@@ -181,7 +187,9 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 | 0x0102 | 7 | ASCII "RFCPING" | Initial "function" — logon probe |
 | 0xFFFF | 0 | — | TLV stream terminator |
 
-**Note on RFCPING:** The logon TLV ends with a call to `RFCPING`. This is NOT an application function call — it is the SAP RFC SDK's logon probe. The server processes the credentials and returns the logon response (frame 15). `RFCPING` means "validate this connection" at the protocol level.
+**Note on RFCPING:** the logon TLV ends with a call to `RFCPING`. This is not an application
+function call — it is the protocol-level logon probe. The server processes the credentials and
+returns the logon response (frame 15). `RFCPING` means "validate this connection".
 
 **Note on COM_HEAD:** Only present in this logon frame. All subsequent RFC call frames (STFC_CONNECTION, STFC_STRUCTURE, etc.) have NO COM_HEAD — the TLV stream starts directly at NI payload offset 80.
 
@@ -213,23 +221,26 @@ The response (frame 15) is not yet extracted as a standalone fixture — add as 
 
 ---
 
-## Password scrambling (0x0117) — OQ-C01 RESOLVED
+## Password scrambling (0x0117)
 
-The 17-byte 0x0117 record is **not a cryptographic hash**. SAP scrambles the password
-with the classic reversible **`ab_scramble`** byte cipher and prepends a 4-byte
-client-generated random seed. Derived from Binary Ninja / objdump decompilation of
-`libsapnwrfc.so` (`binja_ref`s in
-[bn-passwordhash-notes.md](../../.planning/phases/04-reverse-engineering-spike-protocol-spec/bn-passwordhash-notes.md)):
+!!! danger "This is obfuscation, not encryption"
+    The 17-byte `0x0117` record is **not a cryptographic hash and not encryption**. It is a
+    reversible byte cipher with a client-chosen seed transmitted in the clear alongside the
+    ciphertext. Anyone who can read the frame can recover the password. Passwords on a plain
+    RFC connection are effectively in the clear on the network — use SNC or WebSocket RFC over
+    TLS for any connection leaving a trusted segment.
+
+The record is a 4-byte client-generated random seed followed by the scrambled password bytes:
 
 ```
-0x0117 value (17 bytes for the captured 13-char password):
+0x0117 value (17 bytes for the captured 13-character password):
 
-  [ seed: 4 bytes ]  [ ab_scramble(password_bytes, seed) : N bytes ]
-    rand_r(time())     N = len(password) in the password codepage
+  [ seed: 4 bytes LE ]  [ scramble(password_bytes, seed) : N bytes ]
+                          N = len(password) in the password codepage
   total = 4 + N
 
-ab_scramble(buf, len, seed):              # symmetric XOR stream; its own inverse
-    k  = (((seed >> 5) ^ (seed*2)) ^ seed) & 0x3f
+scramble(buf, len, seed):                 # symmetric XOR stream; its own inverse
+    k  = (((seed >> 5) ^ (seed * 2)) ^ seed) & 0x3f
     ck = 0xffffffff
     for i in range(len):
         ks   = (ck * i) & 0xffffffff
@@ -238,43 +249,41 @@ ab_scramble(buf, len, seed):              # symmetric XOR stream; its own invers
         k  = (k + 1) & 0x3f
         ck = (ck + seed) & 0xffffffff
 
-kt (64-byte key table, .rodata @ 0x647c20):
+kt (64-byte key table):
     f0ed53b83244f1f876c67959fd4f13a2
     c15195ec5483c234774943a27de26596
     5e5398789a17a33cd383a8b829fbdca5
     55d7027784 13acddf9b8311 6610e6dfa   (whitespace cosmetic)
 ```
 
-Provenance (BN/nm addresses; BN = nm + 0x400000):
-- `writeRfcSessionLogon` 0x5543b8 — emits TLV order 0x114, 0x111, …, **0x117** (writeRfcData), 0x115
-- `scrambleChars` 0x55176a — `time()`→`ThrRand`(=`rand_r`)→writes seed→`ab_scramble`, returns `len+4`
-- `ab_scramble` 0x7099e6 — the cipher above
-- `unscramblePassword` 0x5529be — inverse: reads seed from first 4 bytes, re-runs `ab_scramble`
+Implemented as `_scramble_password` in `src/saprfclib/connection.py`, verified against a live
+logon reaching READY (`0x0420 == 0`).
 
-**Salt freshness (T-04-SALT):** the seed is a fresh client `rand_r(time())` per scramble —
-there is NO server-supplied nonce. The 0x0514 session token and codepage tags do NOT feed it.
+**Seed:** the seed is stored **little-endian** (x86 native), unlike the big-endian NI and TLV
+headers. It is freshly generated per scramble on the client — there is **no server-supplied
+nonce**, and neither the `0x0514` session token nor the codepage tags feed into it. A replayed
+frame therefore replays successfully; the seed provides no anti-replay property.
 
-**Residual GAP (live truth-check, Plan 04-01 Task 3):** scrambleChars branches on the
-password codepage (`conn+0xdfc`); a 13-char ASCII password producing exactly 13 scrambled
-bytes implies the **single-byte passthrough** codepage was used for the password (even
-though the session negotiated 4103/UTF-16LE for all other strings). The implementation
-uses single-byte; a live logon reaching READY (0x0420 == 0) is the byte-for-byte proof.
+**Password codepage:** a 13-character ASCII password produces exactly 13 scrambled bytes,
+which means the password is scrambled as **single-byte** characters even though the session
+negotiated `4103` (UTF-16LE) for every other string. `saprfclib` uses single-byte, confirmed
+by a live logon. Behaviour for non-ASCII passwords is untested — treat it as an open question.
 
 ---
 
-## Key Protocol Facts (Gate C Findings)
+## Key Protocol Facts
 
 | Finding | Evidence | Confidence |
 |---------|----------|------------|
-| Codepage negotiated in NI_VERSION at offset 24 | Frame 4 (proposes "1100") + Frame 6 (selects "4103") | HIGH — live capture |
-| Codepage 4103 = UTF-16LE (Unicode mode) | sapucrfc.h + codepage 4103 confirmation in frames 6 and 13 | HIGH |
-| COM_HEAD only in logon frame | Frames 14 (has COM_HEAD), 19/21/24/35 (no COM_HEAD) | HIGH — live capture |
-| Connection handle = 8-byte ASCII decimal | Frame 9 assigns "75568442", used in all subsequent frames | HIGH — live capture |
-| RFC logon TLV uses 0x0114/0x0111/0x0117 for client/user/password | Frame 14 TLV parse | HIGH — live capture |
-| Password field is tag 0x0117, 17 bytes | Frame 14 TLV parse | HIGH — live capture |
-| 0x0117 = `seed(4B) + ab_scramble(pw, seed)`, NOT a hash (reversible cipher) | BN: writeRfcSessionLogon 0x5543b8 → scrambleChars 0x55176a → ab_scramble 0x7099e6; inverse unscramblePassword 0x5529be | HIGH — BN decompilation (live byte-for-byte pending Task 3) |
-| Server response includes SID (0x0450), release (0x0012), user (0x0150) | Frame 15 TLV parse | HIGH — live capture |
-| Logon always calls RFCPING as probe (tag 0x0102 in logon TLV) | Frame 14 | HIGH — live capture |
+| Codepage negotiated in NI_VERSION at offset 24 | Frame 4 proposes "1100", frame 6 selects "4103" | HIGH — live capture |
+| Codepage 4103 = UTF-16LE (Unicode mode) | Confirmed in frames 6 and 13 | HIGH — live capture |
+| COM_HEAD only in the logon frame | Frame 14 has it; frames 19/21/24/35 do not | HIGH — live capture |
+| Connection handle = 8-byte ASCII decimal | Frame 9 assigns "75568442", reused in all later frames | HIGH — live capture |
+| Logon TLV uses 0x0114 / 0x0111 / 0x0117 for client / user / password | Frame 14 TLV parse | HIGH — live capture |
+| Password field is tag 0x0117, 17 bytes for a 13-character password | Frame 14 TLV parse | HIGH — live capture |
+| 0x0117 = `seed(4B) + scramble(pw, seed)` — a reversible cipher, not a hash | Derived, then confirmed by a live logon reaching READY | HIGH |
+| Server response carries SID (0x0450), release (0x0012), user (0x0150) | Frame 15 TLV parse | HIGH — live capture |
+| Logon always calls RFCPING as its probe (tag 0x0102 in the logon TLV) | Frame 14 | HIGH — live capture |
 
 ---
 
@@ -282,11 +291,10 @@ uses single-byte; a live logon reaching READY (0x0420 == 0) is the byte-for-byte
 
 | # | Question | Urgency | Notes |
 |---|----------|---------|-------|
-| ~~OQ-C01~~ **RESOLVED** | ~~Password hash format~~ | — | **It is NOT a hash.** Tag 0x0117 = SAP's reversible `ab_scramble` byte cipher: `value = seed(4B) + ab_scramble(password, seed)`. `seed` is a client-local `rand_r(time())` nonce (NO server salt). 17B = 4 (seed) + 13 (password bytes). Algorithm + 64-byte key table `kt`@0x647c20 fully decompiled. See [bn-passwordhash-notes.md](../../.planning/phases/04-reverse-engineering-spike-protocol-spec/bn-passwordhash-notes.md) and §"Password scrambling (0x0117)" below. **Residual:** codepage of scrambled bytes (single-byte passthrough inferred from 17B length) is byte-for-byte confirmed only by the live logon truth-check (Plan 04-01 Task 3). |
-| OQ-C02 | Tag 0x0106 (11 bytes): codepage negotiation details | MEDIUM | Appears in both request and response; binary content unclear |
-| OQ-C03 | Tag 0x0101 (8 bytes): capability flags bit layout | MEDIUM | Differs between request (client) and response (server) |
-| OQ-C04 | GW_INFO (type 0x060F) layout | LOW | Frame 10 contains network routing info; not needed for basic logon implementation |
-| OQ-C05 | SNC/Kerberos logon path | LOW | Different tag set; defer to Phase 2+ SNC implementation |
+| OQ-C02 | Tag 0x0106 (11 bytes): codepage negotiation detail | MEDIUM | Present in both request and response; binary content not decoded |
+| OQ-C03 | Tag 0x0101 (8 bytes): capability flag bit layout | MEDIUM | Differs between client request and server response |
+| OQ-C04 | GW_INFO (type 0x060F) body layout | LOW | Frame 10 carries network routing info; not required for logon |
+| OQ-C05 | Non-ASCII password codepage | LOW | Single-byte scrambling confirmed for ASCII only |
 
 ---
 
@@ -316,7 +324,5 @@ To implement the logon handshake in `saprfclib`:
 
 ---
 
-*Document created: 2026-06-26*
-*Source: Live Wireshark capture of SAP A4H (sysnr=00) via pyrfc/STFC_CONNECTION*
-*Gate C status: CLOSED — all critical fields identified; OQ-C01 (password scrambling) RESOLVED 2026-06-27 via BN decompilation (Phase 04 Plan 01), live byte-for-byte truth-check pending Task 3*
-*See also: [framing.md](framing.md) (Gate A — CLOSED), [serialization.md](serialization.md) (Gate B — SUBSTANTIALLY CLOSED)*
+*Source: live capture of an `STFC_CONNECTION` session, SAP NetWeaver 7.58, sysnr=00, port 3300.*
+*See also: [Framing](framing.md), [Serialization](serialization.md).*

@@ -1,56 +1,70 @@
 {
   "message_type": "GW_DONE_SERVER",
   "capture_source": "live capture 2026-06-26 frame 13; SAP A4H sysnr=00",
-  "binja_ref": "libsapnwrfc.so::GwDoneServer — GW layer; BN confirmation PENDING",
+  "evidence": "GW_DONE (server) — GW layer; independent confirmation pending",
   "ni_header_length": 4,
   "notes": [
     "Server GW handshake completion (type 0x0605) — final GW-layer frame before RFC logon",
     "KEY: codepage '4103' (UTF-16LE) appears at offset 73-76 — confirms Unicode mode at GW layer",
     "After this frame, client sends RFC logon TLV (frame 14) with COM_HEAD",
-    "Tail marker is 0x00000001 (differs from client tail 0xffff0001)"
+    "Tail marker is (differs from client tail)"
   ],
   "field_annotations": [
     {
-      "offset": 0, "length": 4,
-      "name": "ni_length", "value": "0x00000050",
+      "offset": 0,
+      "length": 4,
+      "name": "ni_length",
+      "value": "",
       "type": "fixed",
       "note": "BE uint32 = 80 bytes"
     },
     {
-      "offset": 4, "length": 2,
-      "name": "gw_msg_class", "value": "0x0605",
+      "offset": 4,
+      "length": 2,
+      "name": "gw_msg_class",
+      "value": "0x0605",
       "type": "fixed",
       "note": "GW done/complete message type"
     },
     {
-      "offset": 6, "length": 2,
-      "name": "gw_protocol_version", "value": "0x0200",
+      "offset": 6,
+      "length": 2,
+      "name": "gw_protocol_version",
+      "value": "0x0200",
       "type": "fixed",
       "note": "GW protocol version 2.0"
     },
     {
-      "offset": 8, "length": 36,
-      "name": "gw_session_state", "value": "variable",
+      "offset": 8,
+      "length": 36,
+      "name": "gw_session_state",
+      "value": "variable",
       "type": "variable",
       "note": "GW session state [UNKNOWN layout]; server sets capability/version info here"
     },
     {
-      "offset": 44, "length": 8,
-      "name": "connection_handle", "value": "3735353638343432",
+      "offset": 44,
+      "length": 8,
+      "name": "connection_handle",
+      "value": "3735353638343432",
       "type": "fixed",
       "note": "ASCII '75568442' — connection handle confirmed"
     },
     {
-      "offset": 52, "length": 28,
-      "name": "gw_session_tail_area", "value": "variable",
+      "offset": 52,
+      "length": 28,
+      "name": "gw_session_tail_area",
+      "value": "variable",
       "type": "variable",
       "note": "Contains codepage '4103' at offset 73-76 (= session_tail_area[21:25]); rest zeros"
     },
     {
-      "offset": 80, "length": 4,
-      "name": "tail", "value": "0x00000001",
+      "offset": 80,
+      "length": 4,
+      "name": "tail",
+      "value": "",
       "type": "fixed",
-      "note": "GW server done marker 0x00000001"
+      "note": "GW server done marker"
     }
   ],
   "expected_parse": {

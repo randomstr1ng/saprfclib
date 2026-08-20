@@ -121,7 +121,7 @@ def test_acquire_cred_uses_initiate() -> None:
 
 def test_import_name_strips_enclosing_quotes() -> None:
     # D-14: SAP env may quote SNC_PARTNERNAME; strip enclosing " and the SAP
-    # SNC type prefix ("p:") before gss_import_name (BN RE of STISncInit).
+    # SNC type prefix ("p:") before gss_import_name (protocol analysis of STISncInit).
     mock = MockGssLib()
     _make_binding(mock, snc_partnername='"p:CN=X"')
     assert mock.gss_import_name.calls, "import_name was never called"

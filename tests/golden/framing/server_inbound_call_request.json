@@ -1,7 +1,7 @@
 {
   "message_type": "SERVER_INBOUND_CALL_REQUEST",
   "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 192.168.88.7:3300 pushing the post-registration inbound exchange to the registered server",
-  "binja_ref": "libsapnwrfc.so::RfcListenAndDispatch::0x77c680 -> RfcConnectionBase::rfcReceive::0x5589f4 -> readUpTo::0x55662a (same readRfcChars/rfcDeserialize codepath as the client response read)",
+  "evidence": "inbound server receive path (same codepath as the client response read)",
   "ni_header_length": 4,
   "notes": [
     "Inbound dispatch reuses the 06-family GW machinery. First inner frame type 0x060F (GW data) carrying the gateway-assigned handle '36964135' and the peer IP block; a second inner frame 0x0605 (GW_DONE) follows at payload offset 224.",
@@ -15,8 +15,29 @@
     "connection_handle": "36964135"
   },
   "field_annotations": [
-    {"offset": 4, "length": 2, "name": "gw_type", "value": "0x060f", "type": "fixed", "note": "GW data frame (inbound)"},
-    {"offset": 0, "length": 4, "name": "ni_payload_length", "value": "0x000000e0", "type": "fixed", "note": "BE uint32 = 224 (first inner frame)"},
-    {"offset": 6, "length": 306, "name": "inbound_payload", "value": "session-specific", "type": "variable", "note": "peer-influenced handle/IP/host block + trailing 0x0605 GW_DONE frame; untrusted"}
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x060f",
+      "type": "fixed",
+      "note": "GW data frame (inbound)"
+    },
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
+      "type": "fixed",
+      "note": "BE uint32 = 224 (first inner frame)"
+    },
+    {
+      "offset": 6,
+      "length": 306,
+      "name": "inbound_payload",
+      "value": "session-specific",
+      "type": "variable",
+      "note": "peer-influenced handle/IP/host block + trailing 0x0605 GW_DONE frame; untrusted"
+    }
   ]
 }

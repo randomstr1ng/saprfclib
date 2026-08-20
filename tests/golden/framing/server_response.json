@@ -1,10 +1,10 @@
 {
   "message_type": "SERVER_RESPONSE",
   "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 192.168.88.7:3300 reply on the registered server channel (this capture is a logon-error reply: the post-registration client logon used a wrong password)",
-  "binja_ref": "libsapnwrfc.so::RfcConnectionBase::writeRfcCallEnd::0x5536a8 / onServerCallEnd::0x55343a (server-direction serializer; mirror of writeRfcCallBegin::0x554a10)",
+  "evidence": "server-direction serializer (mirror of the client-direction serializer)",
   "ni_header_length": 4,
   "notes": [
-    "GW frame type 0x06CB, RFC marker 0x00000001 (server direction). TLV stream ends with 0x0402 'Name or password is incorrect (repeat logon)' + 0xFFFF terminator.",
+    "GW frame type 0x06CB, RFC marker (server direction). TLV stream ends with 0x0402 'Name or password is incorrect (repeat logon)' + 0xFFFF terminator.",
     "Observed tags (cross-ref the logon-TLV table): 0x0108, 0x013b, 0x0450 ('A4H' sys id), 0x0016/0x0017 host blocks, 0x0013 '793', 0x0012 '758', 0x0601/0x0130 'SAPMSSY1', 0x0500 call-end, 0x0402 error.",
     "0x0402-carries-error / absent-on-success holds for the server direction (mirrors session.py).",
     "Stored as a reference fixture for the Wave 2 accepted-response serializer (response-only tag set OQ-3/A4); not byte-reproduced by this plan, so all content is marked variable.",
@@ -17,8 +17,29 @@
     "sys_id": "A4H"
   },
   "field_annotations": [
-    {"offset": 0, "length": 4, "name": "ni_payload_length", "value": "0x0000018b", "type": "fixed", "note": "BE uint32 = 395"},
-    {"offset": 4, "length": 2, "name": "gw_type", "value": "0x06cb", "type": "fixed", "note": "RFC data frame"},
-    {"offset": 6, "length": 393, "name": "server_response_payload", "value": "session-specific", "type": "variable", "note": "GW header + 00000001 server marker + TLV stream incl 0x0402 error; session/peer-specific"}
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
+      "type": "fixed",
+      "note": "BE uint32 = 395"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 6,
+      "length": 393,
+      "name": "server_response_payload",
+      "value": "session-specific",
+      "type": "variable",
+      "note": "GW header + 00000001 server marker + TLV stream incl 0x0402 error; session/peer-specific"
+    }
   ]
 }

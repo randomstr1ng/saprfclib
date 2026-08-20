@@ -28,6 +28,6 @@
     "encoding": "utf-16-le"
   },
   "capture_source": "synthetic AB — UTF-16-LE encoding confirmed via live STFC_STRUCTURE capture 2026-06-26 (RFCCHAR1='A' at offset 8, RFCCHAR4='ABCD' at offset 14)",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_CHAR_branch — addr 0x8d35f",
+  "evidence": "RFCTYPE_CHAR serialization",
   "gap_status": "closed — UTF-16-LE space-padded encoding confirmed from live wire capture 2026-06-26"
 }

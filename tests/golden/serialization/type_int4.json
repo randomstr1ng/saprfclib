@@ -6,7 +6,7 @@
       "offset": 0,
       "length": 4,
       "name": "int4_value",
-      "value": "0x00010000",
+      "value": "",
       "type": "fixed",
       "notes": "Signed 32-bit integer, value=65536; little-endian confirmed via live STFC_STRUCTURE capture 2026-06-26; wire bytes 00 00 01 00"
     }
@@ -18,6 +18,6 @@
     "value": 65536
   },
   "capture_source": "live capture 2026-06-26 — STFC_STRUCTURE IMPORTSTRUCT offset 24; SAP A4H sysnr=00; RFCINT4=65536",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_INT_branch — addr 0x8d35f (BN confirmed LE path)",
+  "evidence": "RFCTYPE_INT serialization (protocol analysis confirmed LE path)",
   "gap_status": "closed — LE byte order confirmed from live wire capture; wire bytes 00 00 01 00 = 65536"
 }

@@ -157,7 +157,7 @@ def test_close_is_idempotent_and_safe() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 0x0117 password scramble (Plan 04-01 Task 2; RE: bn-passwordhash-notes.md)
+# 0x0117 password scramble (Plan 04-01 Task 2; RE: docs/protocol/handshake.md)
 # --------------------------------------------------------------------------- #
 def _parse_tlv_stream(frame: bytes) -> dict[int, bytes]:
     """Parse TLV stream (simple or extended format with repeated-tag suffix)."""
@@ -176,7 +176,7 @@ def _parse_tlv_stream(frame: bytes) -> dict[int, bytes]:
 
 
 def test_ab_scramble_is_its_own_inverse() -> None:
-    """ab_scramble applied twice with the same seed is the identity (symmetric
+    """the password-scramble cipher applied twice with the same seed is the identity (symmetric
     XOR stream — RE: unscramblePassword recovers plaintext with the same seed)."""
     original = bytearray(b"hunter2-passw0rd")
     work = bytearray(original)
@@ -187,7 +187,7 @@ def test_ab_scramble_is_its_own_inverse() -> None:
 
 
 def test_scramble_password_layout_and_length() -> None:
-    """_scramble_password emits seed(4B LE) + ab_scramble(pw); a 13-char password
+    """_scramble_password emits seed(4B LE) + the password-scramble cipher(pw); a 13-char password
     yields exactly 17 bytes (matches the captured 0x0117 field length).
     Seed is stored little-endian (x86 native): bytes 96 4d 05 30 = LE 0x30054d96."""
     value = _scramble_password("DemoPassw0rd!", seed=0xDEADBEEF)  # 13 chars
@@ -787,8 +787,8 @@ def test_close_after_partial_handshake() -> None:
 
 # --------------------------------------------------------------------------- #
 # V1 ngrfc Q-marker structural tests for non-CHAR rfctypes                    #
-# (BN RE getNgRfcTypeFromRfcType 0x51d568 + serializeSingleTypeMetaData       #
-#  0x516a3e + serializeField 0x51c17e — no live network required)             #
+# (protocol analysis the type mapping + serializeSingleTypeMetaData       #
+# + the field serializer — no live network required)             #
 # --------------------------------------------------------------------------- #
 
 import struct as _struct  # noqa: E402
@@ -915,8 +915,8 @@ class TestV1QBlockInts:
     def test_utclong_d_block(self) -> None:
         """UTCLONG (rfctype=32): ngrfc_type=29 (0x1d), field_len=8, INT8 wire encoding.
 
-        BN getNgRfcTypeFromRfcType (0x51d568) case 0x20 → ngrfc_type=0x1d.
-        BN serializeField (0x51c17e) case 0x1f,0x20 → shared INT8 path (compMode=0x4e + int64LE).
+        the type mapping case 0x20 → ngrfc_type=0x1d.
+        the field serializer case 0x1f,0x20 → shared INT8 path (compMode=0x4e + int64LE).
         ngrfc_type 29 > 4 → field_len IS written in D-block (unlike INT8's ngrfc_type=4).
         """
         ts = 1_000_000_000  # arbitrary UTCLONG value (nanoseconds)
@@ -997,7 +997,7 @@ class TestV1QBlockString:
     def test_string_d_block(self) -> None:
         """STRING (rfctype=29): ngrfc_type=24 (0x18), field_len=0, compMode=0x53.
 
-        BN serializeStringLike (0x52a5f4) non-UC single chunk:
+        the string serializer non-UC single chunk:
         chunk_hdr = utf8_byte_count | 0x4000 (last-chunk flag for first chunk in non-UC mode).
         """
         val = _v1_enc_string("hello")
@@ -1019,7 +1019,7 @@ class TestV1QBlockString:
     def test_xstring_d_block(self) -> None:
         """XSTRING (rfctype=30): ngrfc_type=25 (0x19), field_len=0, compMode=0x58.
 
-        BN serializeStringLike non-UC single chunk: chunk_hdr = byte_count | 0x4000.
+        the string serializer non-UC single chunk: chunk_hdr = byte_count | 0x4000.
         """
         raw = b"\xde\xad\xbe\xef"
         val = _v1_enc_xstring(raw)
@@ -1035,7 +1035,7 @@ class TestV1QBlockString:
 
 
 class TestV1StringlikeChunks:
-    """Unit tests for _v1_stringlike_chunks (multi-chunk serializeStringLike helper)."""
+    """Unit tests for _v1_stringlike_chunks (multi-chunk the string serializer helper)."""
 
     def test_empty(self) -> None:
         """Empty data → single chunk with 0x4000 flag."""
@@ -1092,7 +1092,7 @@ class TestV1StringlikeChunks:
 class TestV1EncodeCharValueLarge:
     """Tests for the large CHAR path (uc_length > 0x3333) in _v1_encode_char_value.
 
-    BN serializeField case 0: compMode='S' when uc_length > 0x3333; calls serializeStringLike.
+    the field serializer case 0: compMode='S' when uc_length > 0x3333; calls the string serializer.
     """
 
     def test_large_char_compmode_s(self) -> None:
@@ -1149,7 +1149,7 @@ class TestV1Tname:
 
 class TestV1NgtMapping:
     def test_unicode_mode_ngrfc_types(self) -> None:
-        """BN getNgRfcTypeFromRfcType 0x51d568 (Unicode mode) mapping."""
+        """the type mapping (Unicode mode) mapping."""
         assert _V1_NGT[0] == 6  # CHAR → CHAR_UC
         assert _V1_NGT[1] == 12  # DATE → DATE_UC
         assert _V1_NGT[2] == 9  # BCD
@@ -1163,4 +1163,4 @@ class TestV1NgtMapping:
         assert _V1_NGT[29] == 24  # STRING
         assert _V1_NGT[30] == 25  # XSTRING
         assert _V1_NGT[31] == 4  # INT8
-        assert _V1_NGT[32] == 29  # UTCLONG → ngrfc_type 0x1d (BN 0x51d568 case 0x20)
+        assert _V1_NGT[32] == 29  # UTCLONG → ngrfc_type 0x1d ( case 0x20)

@@ -486,8 +486,8 @@ def _options_table_desc() -> FunctionDesc:
 def test_build_invoke_request_table_with_rows_uses_0x0301_protocol():
     """Non-empty TABLE param emits 0x0301(name)+0x0330(dm_id)+0x0302(info)+0x0303(rows)+0x0306.
 
-    BN-CONFIRMED: RfcParameter::rfcSerialize 0x4afdfe (writeRfcString tag=0x301) +
-    RfcTable::rfcSerialize 0x4b3693 (0x0330 DM ID + writeRfcTableInfo 0x302 + row data 0x303).
+    CONFIRMED: the parameter layer::the serializer (writeRfcString tag=0x301) +
+    RfcTable::the serializer (0x0330 DM ID + writeRfcTableInfo 0x302 + row data 0x303).
     """
     from saprfclib.invoke import build_invoke_request
 
@@ -580,7 +580,7 @@ def test_build_invoke_request_empty_table_no_0x0301():
 
 
 def test_extract_name_value_pairs_new_table_format():
-    """Response parser handles 0x0301(name)+data sequence (BN-confirmed format)."""
+    """Response parser handles 0x0301(name)+data sequence (confirmed format)."""
     from saprfclib.invoke import _extract_name_value_pairs, tlv_record
 
     def _tlv(tag: int, data: bytes) -> bytes:
@@ -602,7 +602,7 @@ def test_extract_name_value_pairs_new_table_format():
 
 
 def test_build_invoke_request_changing_gets_0x0205_decl():
-    """RFC_CHANGING params emit 0x0205 decl (BN: rfcSupplyOutParam, bit 1 of direction).
+    """RFC_CHANGING params emit 0x0205 decl (rfcSupplyOutParam, bit 1 of direction).
 
     RFC_CHANGING = 0x03; bit 1 set (0x03 & 0x02 == 0x02) → rfcSupplyOutParam called.
     """

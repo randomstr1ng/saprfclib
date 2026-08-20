@@ -10,7 +10,7 @@
 # single SapRfcError
 # base lets callers `except saprfclib.SapRfcError` to catch every RFC error (D-18).
 #
-# The AbapApplicationError field set mirrors RFC_ERROR_INFO from sapnwrfc.h
+# The AbapApplicationError field set mirrors RFC_ERROR_INFO from SDK type definitions
 # (key, message, abapMsgClass, abapMsgType, abapMsgNumber, abapMsgV1..V4) for full
 # pyrfc field parity (D-15). Any field may be absent in the error TLV, so every
 # field defaults to None.

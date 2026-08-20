@@ -8,7 +8,7 @@
 #
 #   TidStore       (D-01)  — structural Protocol for TID duplicate-execution guards.
 #   UnitStore      (D-02)  — structural Protocol for bgRFC Unit lifecycle tracking.
-#   UnitState      (RFC_UNIT_STATE, sapnwrfc.h:326-332) — five-value enum.
+#   UnitState      (RFC_UNIT_STATE, SDK type definitions-332) — five-value enum.
 #   InMemoryTidStore  (D-03) — process-lifetime default, thread-safe.
 #   InMemoryUnitStore (D-03) — process-lifetime default, thread-safe.
 #   SqliteTidStore    (D-04) — durable stdlib sqlite3 TID store, :memory:-safe.
@@ -77,14 +77,14 @@ from typing import Protocol, runtime_checkable
 _SCHEMA_VERSION = 1
 
 # --------------------------------------------------------------------------- #
-# UnitState enum (RFC_UNIT_STATE, sapnwrfc.h:326-332)
+# UnitState enum (RFC_UNIT_STATE, SDK type definitions-332)
 # --------------------------------------------------------------------------- #
 
 
 class UnitState(enum.Enum):
     """Processing state of a bgRFC Unit on the receiver side (RFC_UNIT_STATE).
 
-    Maps the five values from ``RFC_UNIT_STATE`` in sapnwrfc.h:326-332. The
+    Maps the five values from ``RFC_UNIT_STATE`` in SDK type definitions-332. The
     string values mirror the ``ServerSessionState`` style used elsewhere in
     this package (consistent string-valued enum.Enum pattern).
 
@@ -132,7 +132,7 @@ class TidStore(Protocol):
     alphabet (``ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-``). Treat ``tid`` as
     **untrusted input**: use parameterised queries; never concatenate ``tid``
     into SQL strings or file paths. Length is expected to be 24 chars
-    (``RFC_TID_LN`` in sapnwrfc.h) but the store MUST NOT silently normalise
+    (``RFC_TID_LN`` in SDK type definitions) but the store MUST NOT silently normalise
     or truncate — document any length enforcement as part of the backend contract.
     """
 
@@ -205,7 +205,7 @@ class UnitStore(Protocol):
     Security contract (T-06-S01)
     -----------------------------
     ``unit_id`` values are peer-influenced 32-character uppercase hex strings
-    (``RFC_UNITID_LN`` in sapnwrfc.h). Treat as **untrusted input**: use
+    (``RFC_UNITID_LN`` in SDK type definitions). Treat as **untrusted input**: use
     parameterised queries; never concatenate into SQL or file paths.
     ``unit_type`` is ``'T'`` or ``'Q'``; validate before use.
     """

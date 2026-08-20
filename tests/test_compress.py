@@ -291,7 +291,7 @@ class TestTableTLV:
         assert pairs[0][1] == b"HELLO"
 
     def test_raw_rows_0x0304(self):
-        # BN-CONFIRMED (RfcConnectionBase::readUpTo 0x55662a case 3): 0x0304
+        # CONFIRMED (the connection layer::the bounded reader case 3): 0x0304
         # (RFCID_TableCompr) feeds rfcDeserialize directly — raw bytes, NOT SAPCOMPRESS.
         raw = b"\x01\x02\x03\x04\x05"
         stream = self._table_stream("RAW4", raw, len(raw), 1, content_tag=0x0304)

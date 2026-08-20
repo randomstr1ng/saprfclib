@@ -203,7 +203,7 @@ def test_xstring_roundtrip(raw):
 # BCD packed decimals (CODEC-02) — decimal.Decimal only, never float.
 # Selectable via -k bcd. Confirmed wire form from the live BAPISFLIGHT.PRICE
 # capture (type_bcd_p15_2): 2 digits/byte, sign nibble in the low nibble of the
-# last byte, 0x0C=positive / 0x0D=negative (sapucrfc.h SAP_BCD).
+# last byte, 0x0C=positive / 0x0D=negative (SDK type definitions SAP_BCD).
 # --------------------------------------------------------------------------- #
 
 

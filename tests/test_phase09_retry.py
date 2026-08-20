@@ -26,7 +26,11 @@ saprfc_connection = pytest.importorskip(
 )
 
 from saprfclib.connection import AsyncConnection  # noqa: E402
-from saprfclib.exceptions import AbapApplicationError, CommunicationError, RetryExhausted  # noqa: E402
+from saprfclib.exceptions import (  # noqa: E402
+    AbapApplicationError,
+    CommunicationError,
+    RetryExhausted,
+)
 from saprfclib.session import SessionState  # noqa: E402
 from saprfclib.stores import InMemoryTidStore, UnitState  # noqa: E402
 from tests._mocks import AsyncMockTransport  # noqa: E402

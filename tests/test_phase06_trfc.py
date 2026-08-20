@@ -30,13 +30,13 @@ import string
 # TRFC-02: TID character-set validation (offline — no production symbol needed)
 # --------------------------------------------------------------------------- #
 
-#: Valid TID alphabet per BN 0x4b5a33 (ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-)
+#: Valid TID alphabet per (ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-)
 _TID_ALPHABET: frozenset[str] = frozenset(string.ascii_uppercase + string.digits + "/_=@-")
-_TID_LN = 24  # RFC_TID_LN from sapnwrfc.h:79
+_TID_LN = 24  # RFC_TID_LN from SDK type definitions
 
 
 def _is_valid_tid(tid: object) -> bool:
-    """Return True iff tid is a 24-char string over the BN-confirmed TID alphabet."""
+    """Return True iff tid is a 24-char string over the confirmed TID alphabet."""
     return isinstance(tid, str) and len(tid) == _TID_LN and all(c in _TID_ALPHABET for c in tid)
 
 
@@ -45,7 +45,7 @@ def test_tid_alphabet_subset_accepts_uuid_hex() -> None:
     """UUID hex (A-Z0-9) is a subset of the TID alphabet — offline, always passes.
 
     Validates the alphabet constant itself. Does NOT require saprfclib symbols.
-    BN source: RfcTransaction::createTid 0x4b5a33 (41-char alphabet).
+    Source: TID generation (41-char alphabet).
     """
     import uuid
 
@@ -123,7 +123,7 @@ def test_call_transactional_frame() -> None:
     arfc_utf16 = "ARFC_DEST_SHIP".encode("utf-16-le")
     assert arfc_utf16 in frame, (
         "ARFC_DEST_SHIP (UTF-16LE) not found in outbound frame "
-        "(BN RfcServer::dispatch 0x4bb5de — function name IS the discriminator)"
+        "(the server dispatch — function name IS the discriminator)"
     )
 
     # TID must appear in the frame (24 chars → 48 bytes UTF-16LE, Pitfall 4)
@@ -174,7 +174,7 @@ def test_qrfc_queue_name() -> None:
 
     GREEN: Plan 06-03.
     Assertion: outbound frame contains 'TESTQUEUE' (UTF-16LE) in the ARFCSSTATE
-    table param — BN 0x4bb632: r13_1[0xe58].b != 0 → qRFC branch.
+    table param: r13_1[0xe58].b != 0 → qRFC branch.
     """
     conn = _make_ready_connection()
 
@@ -191,7 +191,7 @@ def test_qrfc_queue_name() -> None:
 
     assert queue_name.encode("utf-16-le") in frame, (
         f"Queue name '{queue_name}' (UTF-16LE) must appear in qRFC frame "
-        f"(BN RfcServer::dispatch 0x4bb632 — 0xe58 byte is qRFC indicator)"
+        f"(the server dispatch — 0xe58 byte is qRFC indicator)"
     )
 
 

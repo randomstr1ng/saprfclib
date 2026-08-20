@@ -220,7 +220,7 @@ def test_live_qrfc_queued_call() -> None:
 
     D-08 gate: Proves TRFC-04 against live SAP:
     - conn.call_transactional(func, tid=tid, queue="SAPRFC_Q1") emits a qRFC frame
-      (ARFC_DEST_SHIP with ARFCQUEUE param, BN 0x4bb632)
+      (ARFC_DEST_SHIP with ARFCQUEUE param)
     - The SAP backend accepts the call (no exception raised), routes the invocation
       into the named queue (visible in SMQS / SM58 on the SAP side)
     - conn.confirm_tid(tid) completes the lifecycle without error
@@ -324,7 +324,7 @@ def test_live_bgrfc_unit_lifecycle() -> None:
          depending on backend speed; both are valid — see note below)
       5. confirm_unit(unit_id, unit_type) → BGRFC_DEST_CONFIRM sent
 
-    Note on NOT_FOUND after submit (sapnwrfc.h:327 / T-06-U04):
+    Note on NOT_FOUND after submit (T-06-U04):
       If the backend processes the unit BEFORE get_unit_state is called, it may
       have already cleaned up — returning NOT_FOUND. This is NOT an error.
       NOT_FOUND after a successful submit means the backend committed and cleaned
@@ -351,14 +351,14 @@ def test_live_bgrfc_unit_lifecycle() -> None:
         passwd=passwd,
     )
     try:
-        # TRFC-05: create_unit with a queue name → unit_type='Q' (BN 0x483919).
+        # TRFC-05: create_unit with a queue name → unit_type='Q'.
         with conn.create_unit(queues=["SAPRFC_BG_Q1"]) as unit:
             unit_id = unit.unit_id
             unit_type = unit.unit_type
 
             assert len(unit_id) == 32, (
                 f"create_unit() produced a UnitID of length {len(unit_id)}, "
-                "expected 32 (RFC_UNITID_LN=32, sapnwrfc.h:80)"
+                "expected 32 (RFC_UNITID_LN=32, SDK type definitions)"
             )
             assert unit_type == "Q", (
                 f"unit_type should be 'Q' when queues are given, got {unit_type!r}"

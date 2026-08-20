@@ -8,7 +8,7 @@
   },
   "summary": "No RFC function module on the SAP A4H test system (sysnr=00) exposes a DECFLOAT16 or DECFLOAT34 typed parameter. All probes (STFC_DECFLOAT, RFC_DECFLOAT_TEST, DEMO_DECFLOAT_ARITH) returned FU_NOT_FOUND. Per the no-guessing constraint (PROJECT.md D-04/D-05), the DecFloat wire encoding is NOT guessed and NO fixture .bin is fabricated.",
   "decision": "No type_decf16/type_decf34 .bin+.json fixtures are created. This file is a documentation-only marker (no .bin pair) so the golden-fixture runner skips it. Plan 04 ships NotImplementedError for RFCTYPE_DECF16 (23) and RFCTYPE_DECF34 (24) until a live DecFloat capture closes GAP-B-01.",
-  "header_evidence_only": "sapdecf.h lines 1159-1169 indicate IEEE 754r DPD transmitted big-endian (DecFloat16ToDecFloat16Neutral 'preferred neutral network byte order is Big-Endian'). HIGH confidence from headers but UNCONFIRMED on the wire — insufficient to implement per no-guessing policy.",
+  "header_evidence_only": "SDK type definitions lines 1159-1169 indicate IEEE 754r DPD transmitted big-endian (DecFloat16ToDecFloat16Neutral 'preferred neutral network byte order is Big-Endian'). HIGH confidence from headers but UNCONFIRMED on the wire — insufficient to implement per no-guessing policy.",
   "probe_log": [
     "STFC_DECFLOAT → FU_NOT_FOUND",
     "RFC_DECFLOAT_TEST → FU_NOT_FOUND",

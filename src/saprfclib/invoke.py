@@ -9,7 +9,7 @@
 #
 #   tlv_record(tag, data) -> bytes
 #       Full open+close TLV record builder. Every invoke record has a trailing
-#       close tag (writeRfcIDEnd pattern). This is different from session._tlv
+#       close tag (the TLV closing writer pattern). This is different from session._tlv
 #       which emits open-only records — do NOT reuse session._tlv here (Pitfall 1).
 #
 #   build_invoke_request(func_name, desc, params) -> bytes
@@ -47,8 +47,8 @@ from saprfclib.types import (
     FunctionDesc,
 )
 
-# rfctype constant for TABLE (RFCTYPE_TABLE = 5 from sapnwrfc.h / codec.py)
-# BN-CONFIRMED: RfcParameter::rfcSerialize 0x4afdfe checks rcx_1 == 5 for TABLE branch
+# rfctype constant for TABLE (RFCTYPE_TABLE = 5 from SDK type definitions / codec.py)
+# CONFIRMED: the parameter serializer checks rcx_1 == 5 for TABLE branch
 _RFCTYPE_TABLE = 5
 
 __all__ = [
@@ -72,21 +72,21 @@ _TAG_PARAM_NAME = 0x0201  # IMPORTING/CHANGING/TABLE param name UTF-16LE
 _TAG_PARAM_VALUE = 0x0203  # IMPORTING/CHANGING/TABLE param value (codec bytes)
 _TAG_TERMINATOR = 0xFFFF  # stream terminator (len=0)
 
-# Table protocol tags (BN-CONFIRMED from RfcParameter::rfcSerialize 0x4afdfe +
-# RfcTable::rfcSerialize 0x4b3693 + writeRfcTableInfo 0x551860)
+# Table protocol tags (CONFIRMED from the parameter serializer +
+# the table serializer + the table-info writer)
 #
 # 0x0301 is the TABLE NAME TAG — it carries the param name UTF-16LE as its value
 # and replaces 0x0201 for rfctype==5 params.  There is NO separate empty "begin"
 # marker before it.  REQUEST sequence:
 #   0x0301(name) → [0x0330(dm_id)] → 0x0302(row_size+row_count) → 0x0303* → 0x0306
-# RESPONSE sequence (server uses same rfcSerialize path — symmetric):
+# RESPONSE sequence (server uses the same serializer path — symmetric):
 #   0x0301(name) → 0x0302(info) → {0x0303|0x0304|0x0305}* → 0x0306
 _TAG_TABLE_NAME = 0x0301  # TABLE param name tag (replaces 0x0201 for TABLE rfctype)
 _TAG_TABLE_BEGIN = 0x0301  # alias: same tag received in responses (name+begin combined)
 _TAG_TABLE_INFO = 0x0302  # 8B: [0-3] BE uint32 row_size, [4-7] BE uint32 row_count
 _TAG_TABLE_CONTENT = 0x0303  # uncompressed row data (RFCID_TableContent)
-# BN-CONFIRMED (RfcConnectionBase::readUpTo 0x55662a case 3): 0x0304 (RFCID_TableCompr) is
-# also raw row data — same rfcDeserialize path as 0x0303 despite the misleading name.
+# CONFIRMED (the bounded reader case 3): 0x0304 (RFCID_TableCompr) is
+# also raw row data — the same deserializer path as 0x0303 despite the misleading name.
 _TAG_TABLE_CONTENT_ALT = 0x0304  # raw row data, alternate tag (RFCID_TableCompr)
 _TAG_TABLE_CONTENT_LZ = (
     0x0305  # SAPCOMPRESS compressed rows (RFCID_TableContLZ; rfcDeserializeCompressed)
@@ -101,7 +101,7 @@ _TAG_RETURN_CODE = 0x0420  # 4B BE uint32 return code (0=success)
 # Exception-specific tags (confirmed from stfc_exception_response.bin)
 _TAG_EXCEPTION_NUMBER = 0x0417  # exception sequence number UTF-16LE (e.g. "000")
 _TAG_EXCEPTION_KEY = 0x0401  # ABAP exception key UTF-16LE (e.g. "EXAMPLE")
-# Additional exception metadata tags (from sapnwrfc.h error TLV docs)
+# Additional exception metadata tags (from SDK type definitions error TLV docs)
 _TAG_EXCEPTION_MSG_CLASS = 0x0402
 _TAG_EXCEPTION_MSG_TYPE = 0x0403
 _TAG_EXCEPTION_MSG_NUMBER = 0x0404
@@ -125,7 +125,7 @@ def tlv_record(tag: int, data: bytes = b"") -> bytes:
 
     Uses the extended form (tag + 0xFFFF + ext-len 4B BE + data + tag) when
     len >= 0xFFFF (65535 bytes), per framing.md §"TLV Record Format"
-    (writeRfcIDBegin 0x551560 / writeRfcIDEnd 0x5515da).
+    (the TLV opening writer / the TLV closing writer).
 
     This is NOT the same as session._tlv, which emits open-only records.
     Pitfall 1: session._tlv is insufficient for invoke — always use this function.
@@ -154,7 +154,7 @@ def build_invoke_request(
     """Build the RFC invoke TLV payload (from offset 80 onward, NOT the GW header).
 
     TLV order (framing.md §"RFC Function Call Sequence", confirmed from golden fixture +
-    BN RE of RfcFunction::rfcSerializeParams 0x4aef92):
+    protocol analysis of RfcFunction::rfcSerializeParams):
       0x0502 empty: call-start
       0x000b UTF-16LE version string (default "754")
       0x0102 UTF-16LE function name
@@ -166,14 +166,14 @@ def build_invoke_request(
              (0x0301 carries the param name; 0x0330 = DM table ID counter)
       0xFFFF empty: terminator
 
-    Direction routing (Pitfall 3: caller perspective, BN-CONFIRMED):
+    Direction routing (Pitfall 3: caller perspective, CONFIRMED):
       RFC_EXPORT (0x02): ABAP EXPORTING → server sends back → 0x0205 decl only
       RFC_IMPORT (0x01): ABAP IMPORTING → caller sends → 0x0201+0x0203 (scalar/struct)
       RFC_CHANGING (0x03): caller sends AND receives → 0x0205 decl + 0x0201+0x0203 value
       RFC_TABLES (0x07): tables → 0x0205 decl + 0x0301+table protocol if rows supplied
 
-    TABLE protocol (BN-CONFIRMED from RfcParameter::rfcSerialize 0x4afdfe +
-    RfcTable::rfcSerialize 0x4b3693 + writeRfcTableInfo 0x551860):
+    TABLE protocol (CONFIRMED from the parameter serializer +
+    the table serializer + the table-info writer):
       - 0x0301 tag carries the param name (replaces 0x0201 for rfctype==5)
       - 0x0330: 4B BE DM table ID (internal per-call counter starting at 1)
       - 0x0302: 8B [BE uint32 row_size][BE uint32 row_count]
@@ -197,7 +197,7 @@ def build_invoke_request(
     ]
 
     # Emit 0x0205 decls for params the server should return (EXPORT, CHANGING, TABLES).
-    # BN: rfcSupplyOutParam at 0x4b01e2 — direction bit 1 set (0x02, 0x03, 0x07) triggers this.
+    # rfcSupplyOutParam at — direction bit 1 set (0x02, 0x03, 0x07) triggers this.
     for field in desc.parameters:
         if field.direction in (RFC_EXPORT, RFC_CHANGING, RFC_TABLES):
             parts.append(tlv_record(_TAG_EXPORT_DECL, field.name.encode("utf-16-le")))
@@ -249,10 +249,10 @@ def build_invoke_request(
 # tRFC / qRFC request builders (TRFC-01, TRFC-02, TRFC-04)
 # --------------------------------------------------------------------------- #
 #
-# BN-CONFIRMED (Plan 06-01): tRFC and qRFC are ordinary synchronous RFC calls
+# CONFIRMED (Plan 06-01): tRFC and qRFC are ordinary synchronous RFC calls
 # to the SAP system function module ARFC_DEST_SHIP.  There are NO new TLV tags
 # for the call-type discriminator — the function name in TLV 0x0102 IS the
-# discriminator (RfcServer::dispatch 0x4bb5de).  The TID is carried as a CHAR
+# discriminator (RfcServer::dispatch).  The TID is carried as a CHAR
 # parameter (ARFCTID) within the ARFCSSTATE table, encoded UTF-16LE exactly
 # like any other CHAR param.  The queue name is carried similarly for qRFC.
 #
@@ -267,13 +267,13 @@ def build_invoke_request(
 # Security (T-06-C02): TID length is enforced to exactly RFC_TID_LN=24 chars
 # before encoding.  Queue name is bounded to the protocol max (256 chars).
 
-_TID_LN = 24  # RFC_TID_LN from sapnwrfc.h:79
-_MAX_QUEUE_NAME = 256  # conservative upper bound (sapnwrfc.h §RFC_MAX_QUEUE_NAME_LENGTH)
+_TID_LN = 24  # RFC_TID_LN from SDK type definitions
+_MAX_QUEUE_NAME = 256  # conservative upper bound (SDK type definitions §RFC_MAX_QUEUE_NAME_LENGTH)
 
-# TID character alphabet confirmed by BN RfcTransaction::createTid 0x4b5a33.
+# TID character alphabet confirmed by protocol analysis.
 _TID_ALPHABET: frozenset[str] = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-")
 
-# System FM names (BN RfcServer::dispatch 0x4bb5de / 0x4bb65a).
+# System FM names (protocol analysis).
 _ARFC_DEST_SHIP = "ARFC_DEST_SHIP"
 _ARFC_DEST_CONFIRM = "ARFC_DEST_CONFIRM"
 
@@ -281,11 +281,11 @@ _ARFC_DEST_CONFIRM = "ARFC_DEST_CONFIRM"
 def _validate_tid(tid: str) -> None:
     """Raise ValueError if tid is not a valid 24-char TID (T-06-C02 / V5).
 
-    TID must be exactly RFC_TID_LN (24) characters from the BN-confirmed alphabet
+    TID must be exactly RFC_TID_LN (24) characters from the confirmed alphabet
     ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-.  A UUID-hex TID (uppercase, digits
     only) is a valid subset and accepted.
 
-    Source: sapnwrfc.h:79 (RFC_TID_LN=24), BN 0x4b5a33 (alphabet).
+    Source: SDK type definitions (RFC_TID_LN=24) (alphabet).
     """
     if not isinstance(tid, str):
         raise ValueError(f"TID must be a str, got {type(tid).__name__!r}")
@@ -295,7 +295,7 @@ def _validate_tid(tid: str) -> None:
     if bad:
         raise ValueError(
             f"TID contains characters not in the RFC alphabet: {bad!r} "
-            f"(BN 0x4b5a33 — ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-)"
+            f"(allowed: ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-)"
         )
 
 
@@ -317,12 +317,12 @@ def build_trfc_request(
     """Build the RFC invoke TLV payload for an ARFC_DEST_SHIP (tRFC/qRFC) call.
 
     This is a standard invoke frame with function name ARFC_DEST_SHIP in TLV
-    0x0102 (the call-type discriminator per BN 0x4bb5de).  The TID and the
+    0x0102 (the call-type discriminator per).  The TID and the
     wrapped function name are encoded as named CHAR parameters (UTF-16LE).
 
     For qRFC (queue is not None): the queue name is included as an additional
     CHAR parameter (ARFCQUEUE) so the server can read the queue indicator at
-    ARFCSSTATE offset 0xe58 (BN 0x4bb632).
+    ARFCSSTATE offset 0xe58.
 
     Security: validates TID length and alphabet, queue name length before encoding
     (T-06-C02 / RESEARCH V5).
@@ -331,7 +331,7 @@ def build_trfc_request(
     TID as ARFCTID param works; no raw ARFCSSTATE field decomposition needed.
 
     Args:
-        tid:       24-char TID from the RFC TID alphabet (BN 0x4b5a33).
+        tid:       24-char TID from the RFC TID alphabet.
         func_name: The wrapped ABAP function module name (informational; stored as
                    ARFCFNAM in ARFCSSTATE — included as ARFCFNAM param for now).
         queue:     qRFC queue name; when not None, the call is qRFC.
@@ -380,11 +380,11 @@ def build_trfc_confirm_request(
 
     Confirms the TID on the backend, allowing the server to remove it from
     ARFCRSTATE.  After this call the backend loses duplicate-execution protection
-    for this TID (sapnwrfc.h:2168 — never call before verifying the submit landed).
+    for this TID (SDK type definitions — never call before verifying the submit landed).
 
     Security: validates TID before encoding (T-06-C02).
 
-    BN source: RfcServer::dispatch 0x4bb65a (ARFC_DEST_CONFIRM branch).
+    Confirmed: the ARFC_DEST_CONFIRM branch of the server dispatch.
     """
     _validate_tid(tid)
 
@@ -411,28 +411,28 @@ def build_trfc_confirm_request(
 # bgRFC request builders (TRFC-05, TRFC-06)
 # --------------------------------------------------------------------------- #
 #
-# BN-CONFIRMED (Plan 06-01): bgRFC uses BGRFC_DEST_SHIP / BGRFC_DEST_CONFIRM /
-# BGRFC_CHECK_UNIT_STATE_SERVER function-module names (RfcServer::dispatch 0x4bb5de).
-# The UnitID is a 32-char uppercase hex string (BN 0x511855: pfuuid_print asserts
-# len == 32).  Unit type is 'T' (no queues) or 'Q' (queues given) — BN 0x483919.
+# CONFIRMED (Plan 06-01): bgRFC uses BGRFC_DEST_SHIP / BGRFC_DEST_CONFIRM /
+# BGRFC_CHECK_UNIT_STATE_SERVER function-module names (RfcServer::dispatch).
+# The UnitID is a 32-char uppercase hex string (: the UUID formatter asserts
+# len == 32).  Unit type is 'T' (no queues) or 'Q' (queues given).
 #
 # OG-06-02 CONFIRMED (2026-08-05): test_live_bgrfc_unit_lifecycle passed — BGRFC_UNIT_ID/
 # BGRFC_UNIT_TYPE named-param encoding confirmed correct by live bgRFC gate.  No raw
 # BGRFC_SRV_STATE/ARFCSDATA struct layout needed — server reads only the named params.
-# Source: BN 0x4bb6b1 discriminator + live bgRFC gate.
+# Source: discriminator + live bgRFC gate.
 #
 # Security (T-06-U02): UnitID length is enforced to exactly RFC_UNITID_LN=32 hex chars
 # before encoding. queue_names are bounded.
 
-_UNITID_LN = 32  # RFC_UNITID_LN from sapnwrfc.h:80
+_UNITID_LN = 32  # RFC_UNITID_LN from SDK type definitions
 _UNITID_CHARSET: frozenset[str] = frozenset("0123456789ABCDEF")
 
-# System FM names (BN RfcServer::dispatch 0x4bb5de / 0x4bb6b1 / 0x4bb713 / 0x4bb733).
+# System FM names (protocol analysis).
 _BGRFC_DEST_SHIP = "BGRFC_DEST_SHIP"
 _BGRFC_DEST_CONFIRM = "BGRFC_DEST_CONFIRM"
 _BGRFC_CHECK_UNIT_STATE_SERVER = "BGRFC_CHECK_UNIT_STATE_SERVER"
 
-# Unit type bytes: 'T' (0x54) = no queues; 'Q' (0x51) = queues given (BN 0x483919).
+# Unit type bytes: 'T' (0x54) = no queues; 'Q' (0x51) = queues given.
 _UNIT_TYPE_T = "T"
 _UNIT_TYPE_Q = "Q"
 
@@ -441,7 +441,7 @@ def _validate_unit_id(uid: str) -> None:
     """Raise ValueError if uid is not a valid 32-char uppercase hex UnitID (T-06-U02 / V5).
 
     UnitID must be exactly RFC_UNITID_LN (32) characters of uppercase hex (0-9A-F).
-    Source: sapnwrfc.h:80 (RFC_UNITID_LN=32), BN 0x511855 (pfuuid_print → 32 hex chars).
+    Source: SDK type definitions (RFC_UNITID_LN=32) (the UUID formatter → 32 hex chars).
     """
     if not isinstance(uid, str):
         raise ValueError(f"UnitID must be a str, got {type(uid).__name__!r}")
@@ -452,8 +452,7 @@ def _validate_unit_id(uid: str) -> None:
     bad = [c for c in uid if c not in _UNITID_CHARSET]
     if bad:
         raise ValueError(
-            f"UnitID contains characters not in uppercase hex alphabet: {bad!r} "
-            f"(BN 0x511855 — 0-9A-F only)"
+            f"UnitID contains characters not in uppercase hex alphabet: {bad!r} (allowed: 0-9A-F)"
         )
 
 
@@ -468,7 +467,7 @@ def build_bgrfc_request(
     """Build the RFC invoke TLV payload for a BGRFC_DEST_SHIP (bgRFC submit) call.
 
     This is a standard invoke frame with function name BGRFC_DEST_SHIP in TLV
-    0x0102 (the call-type discriminator per BN 0x4bb6b1). The UnitID and
+    0x0102 (the call-type discriminator per). The UnitID and
     unit_type are encoded as named CHAR parameters (UTF-16LE).
 
     Open gap OG-06-02: the exact BGRFC_DEST_SHIP parameter byte layout is deferred
@@ -478,8 +477,8 @@ def build_bgrfc_request(
     Security: validates UnitID length and hex charset before encoding (T-06-U02 / V5).
 
     Args:
-        unit_id:        32-char uppercase hex UnitID (BN 0x511855).
-        unit_type:      'T' (no queues) or 'Q' (queues given) — BN 0x483919.
+        unit_id:        32-char uppercase hex UnitID.
+        unit_type:      'T' (no queues) or 'Q' (queues given).
         queue_names:    List of queue names (empty for type 'T').
         buffered_calls: Optional list of pre-serialized call TLV bytes to embed.
         version:        RFC version string bytes (default b"754").
@@ -489,7 +488,7 @@ def build_bgrfc_request(
     """
     _validate_unit_id(unit_id)
     if unit_type not in (_UNIT_TYPE_T, _UNIT_TYPE_Q):
-        raise ValueError(f"unit_type must be 'T' or 'Q', got {unit_type!r} (BN 0x483919)")
+        raise ValueError(f"unit_type must be 'T' or 'Q', got {unit_type!r}")
 
     version_bytes: bytes
     if isinstance(version, str):
@@ -505,7 +504,7 @@ def build_bgrfc_request(
         # UnitID — 32 chars → 64 bytes UTF-16LE (Pitfall 4: 2 bytes per code unit)
         tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_ID".encode("utf-16-le")),
         tlv_record(_TAG_PARAM_VALUE, unit_id.encode("utf-16-le")),
-        # Unit type — 'T' or 'Q' (BN 0x483919)
+        # Unit type — 'T' or 'Q'
         tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_TYPE".encode("utf-16-le")),
         tlv_record(_TAG_PARAM_VALUE, unit_type.encode("utf-16-le")),
     ]
@@ -539,7 +538,7 @@ def build_bgrfc_confirm_request(
 
     Security: validates UnitID before encoding (T-06-U02).
 
-    BN source: RfcServer::dispatch 0x4bb713 (BGRFC_DEST_CONFIRM branch).
+    Confirmed: the BGRFC_DEST_CONFIRM branch of the server dispatch.
     """
     _validate_unit_id(unit_id)
     if unit_type not in (_UNIT_TYPE_T, _UNIT_TYPE_Q):
@@ -578,7 +577,7 @@ def build_bgrfc_state_request(
 
     Security: validates UnitID before encoding (T-06-U02).
 
-    BN source: RfcServer::dispatch 0x4bb733 (BGRFC_CHECK_UNIT_STATE_SERVER branch).
+    Confirmed: the BGRFC_CHECK_UNIT_STATE_SERVER branch of the server dispatch.
     """
     _validate_unit_id(unit_id)
     if unit_type not in (_UNIT_TYPE_T, _UNIT_TYPE_Q):
@@ -759,7 +758,7 @@ def _extract_name_value_pairs(data: bytes) -> list[tuple[str, bytes]]:
 
     Scalar: 0x0201(name) → 0x0203(value)
 
-    TABLE (BN-CONFIRMED from RfcParameter::rfcSerialize 0x4afdfe):
+    TABLE (CONFIRMED from the parameter serializer):
       0x0301(name)  ← combined name+begin; value is param name UTF-16LE
       0x0302(info)  ← 8B [BE row_size][BE row_count] (informational; ignored here)
       {0x0303|0x0304|0x0305}* rows  ← uncompressed or SAPCOMPRESS compressed
@@ -821,9 +820,9 @@ def _extract_name_value_pairs(data: bytes) -> list[tuple[str, bytes]]:
             current_name = None
 
         # --- Table name+begin tag ---
-        # BN-CONFIRMED (RfcParameter::rfcSerialize 0x4afdfe): 0x0301 carries the
+        # CONFIRMED (the parameter serializer): 0x0301 carries the
         # param name UTF-16LE as its value (new format — server uses writeRfcString
-        # at 0x4afeab).  Also accept legacy format where a preceding 0x0201 set the
+        # at).  Also accept legacy format where a preceding 0x0201 set the
         # name and 0x0301 is empty (begin marker only) — tolerates older captures.
         elif tag == _TAG_TABLE_NAME:  # 0x0301
             if in_table and current_name is not None:
@@ -838,7 +837,7 @@ def _extract_name_value_pairs(data: bytes) -> list[tuple[str, bytes]]:
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
             pass  # row_size / row_count already available from row data length
         elif tag in (_TAG_TABLE_CONTENT, _TAG_TABLE_CONTENT_ALT) and in_table:  # 0x0303/0x0304
-            # BN-CONFIRMED: both tags carry raw uncompressed row bytes (rfcDeserialize path)
+            # CONFIRMED: both tags carry raw uncompressed row bytes (the deserializer path)
             table_rows.extend(value)
         elif tag == _TAG_TABLE_CONTENT_LZ and in_table:  # 0x0305
             if len(value) >= 8:

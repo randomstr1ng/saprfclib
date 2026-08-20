@@ -185,5 +185,5 @@ captures/*.cap
 sap-rfc-sdk/
 
 # hatch-vcs generated version file — do not track.
-src/saprfc/_version.py
+src/saprfclib/_version.py
 

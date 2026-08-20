@@ -4,7 +4,7 @@
 # `pytest tests/golden/serialization/ -v` acceptance criterion.
 # The canonical parametrized runner lives at tests/golden/test_fixtures.py.
 #
-# Branch B (no live SAP system): fixtures are synthetic (BN-derived).
+# Branch B (no live SAP system): fixtures are synthetic (constructed, not captured).
 # test_serialization_replay remains skipped until Gate B closes with Wireshark capture.
 
 from pathlib import Path
@@ -28,9 +28,9 @@ def test_serialization_fixture_loads(fixture_dir: Path, name: str) -> None:
     - D-07 schema validation passes (all 5 required keys present)
     - D-12: fixture .bin length matches sum of field_annotations lengths
 
-    Branch B note: fixtures are synthetic (BN-derived; no live Wireshark capture).
+    Branch B note: fixtures are synthetic (constructed, not captured; no live Wireshark capture).
     Wire byte correctness is marked [ASSUMED] in field_annotations until Gate B
-    closes with BN call-site confirmation and live STFC_STRUCTURE capture.
+    closes with independent confirmation and live STFC_STRUCTURE capture.
     """
     fix = load_fixture(fixture_dir, name)
     # D-12: verify annotation coverage equals binary length

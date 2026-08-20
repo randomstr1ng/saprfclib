@@ -97,23 +97,23 @@ _TAG_ERROR_MESSAGE = 0x0402  # error message text (server-direction; from fixtur
 
 _logger = logging.getLogger(__name__)
 
-# Return codes (sapnwrfc.h RFC_RC). 0 = OK; non-zero = failure on the response.
+# Return codes (SDK type definitions RFC_RC). 0 = OK; non-zero = failure on the response.
 _RC_OK = 0
 _RC_SYSTEM_FAILURE = 3  # RFC_SYS_EXCEPTION family (non-zero signals failure)
-_RC_EXECUTED = 16  # RFC_EXECUTED (sapnwrfc.h:151) — TID already executed
+_RC_EXECUTED = 16  # RFC_EXECUTED — TID already executed
 
-# System FM names that trigger transactional dispatch (BN 0x4bb5de).
+# System FM names that trigger transactional dispatch.
 # ARFC_DEST_SHIP is the tRFC/qRFC call-type discriminator (function name IS the marker).
-_ARFC_DEST_SHIP = "ARFC_DEST_SHIP"  # tRFC/qRFC inbound (Plan 06-01 BN 0x4bb632)
-_ARFC_DEST_CONFIRM = "ARFC_DEST_CONFIRM"  # tRFC confirm (BN 0x4bb65a)
-_BGRFC_DEST_SHIP = "BGRFC_DEST_SHIP"  # bgRFC submit (BN 0x4bb6b1)
-_BGRFC_DEST_CONFIRM = "BGRFC_DEST_CONFIRM"  # bgRFC confirm (BN 0x4bb713)
-_BGRFC_CHECK_UNIT_STATE_SERVER = "BGRFC_CHECK_UNIT_STATE_SERVER"  # bgRFC state query (BN 0x4bb733)
+_ARFC_DEST_SHIP = "ARFC_DEST_SHIP"  # tRFC/qRFC inbound (Plan 06-01)
+_ARFC_DEST_CONFIRM = "ARFC_DEST_CONFIRM"  # tRFC confirm
+_BGRFC_DEST_SHIP = "BGRFC_DEST_SHIP"  # bgRFC submit
+_BGRFC_DEST_CONFIRM = "BGRFC_DEST_CONFIRM"  # bgRFC confirm
+_BGRFC_CHECK_UNIT_STATE_SERVER = "BGRFC_CHECK_UNIT_STATE_SERVER"  # bgRFC state query
 
 # TID parameter name as carried in the ARFC_DEST_SHIP frame (invoke.py: ARFCTID).
 _PARAM_ARFCTID = "ARFCTID"
 
-# UnitID validation constants (T-06-U02 / sapnwrfc.h:80 / BN 0x511855).
+# UnitID validation constants (T-06-U02).
 _UNITID_LN = 32
 _UNITID_CHARSET: frozenset[str] = frozenset("0123456789ABCDEF")
 
@@ -214,9 +214,9 @@ def _wrap_in_0608(rfc_data: bytes, gw_handle: bytes) -> bytes:
 def _extract_5001_params(data: bytes) -> dict[str, str]:
     """Parse tag 0x5001 NgRfc compact param block → IMPORTING CHAR param values.
 
-    BN-verified format (NgRfcReceiveStream + NgRfcDeserializer, 2026-07-02):
+    verified format (the NgRfc receive stream + NgRfcDeserializer, 2026-07-02):
       [0:14]  NgRfc stream header: '$' magic (0x24) + 'H' (0x48) + 12 bytes flags
-      [14..]  Entry stream from getNextParameter (0x524960):
+      [14..]  Entry stream from getNextParameter:
               0x54 [name_len 1B] [name_ascii] = type-spec (EXPORTING from server)
               0x51 [name_len 1B] [name_ascii] = IMPORTING param (value follows)
               0x44 = DDic type descriptor compMode (readMetadata/readColumnMetadata
@@ -229,8 +229,8 @@ def _extract_5001_params(data: bytes) -> dict[str, str]:
               N = LE int16 & 0x7FFF bytes of ASCII content.
 
     Only CHAR-type params are decoded (compMode 0x43 pattern); non-CHAR types
-    (INT, FLOAT, DATE, STRING, TABLE etc.) are deferred to Phase 6 BN RE.
-    See bn-re-findings.md §"Phase 5 BN RE" for full analysis.
+    (INT, FLOAT, DATE, STRING, TABLE etc.) are deferred to Phase 6 protocol analysis.
+    See docs/protocol/framing.md §"Phase 5 protocol analysis" for full analysis.
     """
     params: dict[str, str] = {}
     pos = 14  # skip 14-byte header
@@ -297,7 +297,7 @@ def _scan_5001_char_values(data: bytes) -> list[tuple[int, int, bytes]]:
 def _extract_trfc_params_from_5001(raw_5001: bytes) -> tuple[str, str]:
     """Extract (tid_24, arfcfnam) from an ARFC_DEST_SHIP 0x5001 block.
 
-    BN-confirmed ARFCSSTATE field order (getTidFields / getArfcDestShipFunctionDesc):
+    confirmed ARFCSSTATE field order (getTidFields / getArfcDestShipFunctionDesc):
       ARFCIPID(8) + ARFCPID(4) + ARFCTIME(8) + ARFCTIDCNT(4) consecutive CHAR values
       → concatenated to form the 24-char TID (all uppercase hex from IP/PID/time/cnt).
     ARFCFNAM (the wrapped function module name): first CHAR value after the TID group
@@ -404,7 +404,7 @@ class RfcServer:
 
     def __init__(self, params: dict[str, Any]) -> None:
         # Registration params (program_id/gwhost/gwserv). Shape is discretion; the
-        # ServerSession enforces the STIRegTp constraints when serve() registers.
+        # ServerSession enforces the registration constraints when serve() registers.
         self._params = dict(params)
         # FM_NAME.upper() -> (FunctionDesc | None, handler) — mirrors MetadataCache keying.
         # func_desc may be None for transactional handlers where dispatch short-circuits
@@ -424,7 +424,7 @@ class RfcServer:
         # TID store (TRFC-03 / D-03): default InMemoryTidStore so a bare server works.
         # Replace with a custom durable store via set_tid_store().
         self._tid_store: TidStore = InMemoryTidStore()
-        # Transaction lifecycle callbacks (sapnwrfc.h:729-732 — RfcInstallTransactionHandlers).
+        # Transaction lifecycle callbacks (SDK type definitions-732 — RfcInstallTransactionHandlers).
         # When set, invoked at the corresponding check→commit/rollback→confirm sequence points.
         # Unset (None) means the store-only default behaviour applies (Task 1 dispatch).
         self._on_check_transaction: Callable[[str], int] | None = None
@@ -434,7 +434,7 @@ class RfcServer:
         # bgRFC Unit store (TRFC-07 / D-03): default InMemoryUnitStore so a bare server works.
         # Replace with a custom durable store via set_unit_store().
         self._unit_store: UnitStore = InMemoryUnitStore()
-        # bgRFC unit lifecycle callbacks (sapnwrfc.h:737-741 — RfcInstallBgRfcHandlers).
+        # bgRFC unit lifecycle callbacks (SDK type definitions-741 — RfcInstallBgRfcHandlers).
         # Unset (None) means store-only default behaviour applies.
         self._on_check_unit: Callable[..., int] | None = None
         self._on_commit_unit: Callable[..., None] | None = None
@@ -540,7 +540,7 @@ class RfcServer:
     ) -> None:
         """Register the four tRFC transaction lifecycle callbacks (TRFC-03).
 
-        Maps the ``RfcInstallTransactionHandlers`` API (sapnwrfc.h:729-732):
+        Maps the ``RfcInstallTransactionHandlers`` API (SDK type definitions-732):
 
         - ``on_check(tid) -> int``: called first; return 0 (RFC_OK) for a new TID
           or 16 (RFC_EXECUTED) if already executed. When set, this callback REPLACES
@@ -554,7 +554,7 @@ class RfcServer:
 
         When unset (None), the corresponding store method is used directly. Setting
         the callbacks enables the full ``RFC_ON_CHECK/COMMIT/ROLLBACK/CONFIRM_TRANSACTION``
-        contract from sapnwrfc.h.
+        contract from SDK type definitions.
 
         Example::
 
@@ -603,7 +603,7 @@ class RfcServer:
     ) -> None:
         """Register the five bgRFC unit lifecycle callbacks (TRFC-07).
 
-        Maps ``RfcInstallBgRfcHandlers`` (sapnwrfc.h:737-741):
+        Maps ``RfcInstallBgRfcHandlers`` (SDK type definitions-741):
 
         - ``check(unit_id, unit_type) -> int``: called first; return 0 (RFC_OK) for a
           new unit or 16 (RFC_EXECUTED) if already known.
@@ -646,7 +646,7 @@ class RfcServer:
            MockTransport passes through — first byte != 0x06).
         2. Read the function name (tag 0x0102, UTF-16LE).
 
-        Phase-6 Pitfall 6 seam: the call-type IS the function name (BN 0x4bb5de).
+        Phase-6 Pitfall 6 seam: the call-type IS the function name.
         Branch on name BEFORE normal handler lookup (TRFC-03):
           - ``ARFC_DEST_SHIP``    → transactional tRFC/qRFC dispatch (this phase)
           - ``ARFC_DEST_CONFIRM`` → tRFC confirm (Plan 06-05; placeholder SYSTEM_FAILURE)
@@ -662,7 +662,7 @@ class RfcServer:
         tlv = _strip_gw_header(frame)
 
         # Phase-6 Pitfall 6 seam: function name IS the call-type discriminator
-        # (BN RfcServer::dispatch 0x4bb5de — no separate byte needed).
+        # (protocol analysis — no separate byte needed).
         fname = self._read_func_name(tlv)
 
         if fname == _ARFC_DEST_SHIP:
@@ -718,7 +718,7 @@ class RfcServer:
         """Transactional (tRFC/qRFC) inbound dispatch — TRFC-03 exactly-once gate.
 
         Implements the server-side dedup state machine from RESEARCH Pattern 2
-        (docs/protocol/trfc.md §"Server-Side Dispatch") and sapnwrfc.h:729-732:
+        (docs/protocol/trfc.md §"Server-Side Dispatch") and SDK type definitions-732:
 
           1. Extract TID from the ARFCTID param; validate (V5 — reject non-24-char
              TIDs before any store call, T-06-D02).
@@ -803,7 +803,7 @@ class RfcServer:
         # and return RFC_EXECUTED (exactly-once guarantee). Confirmation (cleanup)
         # happens only when the client sends ARFC_DEST_CONFIRM (a separate call),
         # which maps to the on_confirm callback. Removing the TID here (calling
-        # store.confirm()) would break dedup on retry — Pitfall 3 / sapnwrfc.h:2168.
+        # store.confirm()) would break dedup on retry — Pitfall 3.
         store.mark_executed(tid)
         if self._on_commit_transaction is not None:
             self._on_commit_transaction(tid)
@@ -822,7 +822,7 @@ class RfcServer:
         """bgRFC unit inbound dispatch — TRFC-07 unit callback state machine.
 
         Implements the server-side unit processing sequence from
-        docs/protocol/trfc.md §"Server-Side Dispatch" and sapnwrfc.h:2478-2500:
+        docs/protocol/trfc.md §"Server-Side Dispatch" and SDK type definitions-2500:
 
           1. Extract + validate UnitID (exactly 32 uppercase hex chars, V5 / T-06-U02).
           2. Extract unit_type ('T' or 'Q') from frame params.
@@ -847,13 +847,12 @@ class RfcServer:
             )
         if len(unit_id) != _UNITID_LN:
             return self._build_system_failure(
-                f"BGRFC_DEST_SHIP: invalid UnitID length {len(unit_id)} "
-                f"(expected {_UNITID_LN}) — T-06-U02"
+                f"BGRFC_DEST_SHIP: invalid UnitID length {len(unit_id)} (expected {_UNITID_LN})"
             )
         if any(c not in _UNITID_CHARSET for c in unit_id):
             return self._build_system_failure(
                 "BGRFC_DEST_SHIP: UnitID contains characters outside uppercase hex charset "
-                "(BN 0x511855 — 0-9A-F only) — T-06-U02"
+                "(allowed: 0-9A-F)"
             )
 
         # --- unit_type extraction ---
@@ -1163,7 +1162,7 @@ class RfcServer:
         return ""
 
     def _build_rfc_executed_response(self) -> bytes:
-        """Build the RFC_EXECUTED wire response (sapnwrfc.h:151, value 0x10 = 16).
+        """Build the RFC_EXECUTED wire response (SDK type definitions, value 0x10 = 16).
 
         The response return code is _RC_EXECUTED (16).  SAP's client interprets
         this as "TID already executed" and does NOT raise an error; it is a
@@ -1286,7 +1285,7 @@ class RfcServer:
 
         Returns ``(user, password)``; either may be ``None`` if the field is
         absent (registration-mode inbound calls may pre-authenticate — A3). The
-        password 0x0117 value is ``seed(4B LE) + ab_scramble(passwd, seed)``;
+        password 0x0117 value is ``seed(4B LE) + scramble(passwd, seed)``;
         ``_ab_scramble`` is symmetric so the same routine recovers the plaintext.
         The plaintext is returned to the callback ONLY — never logged (T-05-C03).
         """
@@ -1682,7 +1681,9 @@ class AsyncRfcServer(RfcServer):
         except asyncio.CancelledError:
             raise  # Pitfall 7 — never swallow
         except Exception as exc:  # noqa: BLE001 — log, never crash the loop
-            _logger.error("[saprfclib-async-server] dispatch ERROR: %s: %s", type(exc).__name__, exc)
+            _logger.error(
+                "[saprfclib-async-server] dispatch ERROR: %s: %s", type(exc).__name__, exc
+            )
 
     async def serve(
         self,

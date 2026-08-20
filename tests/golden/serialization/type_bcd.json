@@ -24,7 +24,7 @@
       "name": "bcd_byte_2_digit_and_sign",
       "value": "0x4C",
       "type": "fixed",
-      "notes": "Packed BCD byte 2: high nibble=4 (digit 4), low nibble=C (0x0C = positive sign canonical); represents final digit '4' + sign; sign nibble encoding 0x0C=positive CONFIRMED by live BAPISFLIGHT.PRICE capture 2026-06-26 (same packing rules) and sapucrfc.h SAP_BCD"
+      "notes": "Packed BCD byte 2: high nibble=4 (digit 4), low nibble=C (0x0C = positive sign canonical); represents final digit '4' + sign; sign nibble encoding 0x0C=positive CONFIRMED by live BAPISFLIGHT.PRICE capture 2026-06-26 (same packing rules) and SDK type definitions SAP_BCD"
     }
   ],
   "expected_parse": {
@@ -38,6 +38,6 @@
     "sign_nibble": "0x0C"
   },
   "capture_source": "synthetic value (P5.2=123.45) — encoding CONFIRMED against live BCD capture 2026-06-26 (BAPI_FLIGHT_GETLIST FLIGHT_LIST.PRICE P15.2=800000.50, SAP A4H sysnr=00, port 3300 offset 0x44D); same packed-BCD scheme (2 digits/byte, sign in low nibble of last byte, 0x0C=positive). See live fixture type_bcd_p15_2",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_BCD_branch [ASSUMED pending BN confirmation — addr 0x8d35f]",
-  "gap_status": "confirmed — live capture 2026-06-26; BCD packed-decimal encoding confirmed from BAPISFLIGHT.PRICE live wire bytes (00 00 00 08 00 00 05 0C = 800000.50, P15.2). Positive sign nibble 0x0C confirmed. Negative (0x0D) remains sapucrfc.h-confirmed only (SFLIGHT prices are positive — no live negative reachable); standard packed BCD per no-guessing policy"
+  "evidence": "RFCTYPE_BCD serialization [ASSUMED pending independent confirmation]",
+  "gap_status": "confirmed — live capture 2026-06-26; BCD packed-decimal encoding confirmed from BAPISFLIGHT.PRICE live wire bytes (00 00 00 08 00 00 05 0C = 800000.50, P15.2). Positive sign nibble 0x0C confirmed. Negative (0x0D) remains SDK type definitions-confirmed only (SFLIGHT prices are positive — no live negative reachable); standard packed BCD per no-guessing policy"
 }

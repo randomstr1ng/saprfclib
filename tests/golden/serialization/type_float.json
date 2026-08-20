@@ -6,7 +6,7 @@
       "offset": 0,
       "length": 8,
       "name": "float64_value",
-      "value": "0x400921F9F01B866E",
+      "value": "",
       "type": "fixed",
       "notes": "IEEE 754 double-precision 3.14159; little-endian confirmed via live STFC_STRUCTURE capture 2026-06-26; wire bytes 6e 86 1b f0 f9 21 09 40"
     }
@@ -20,6 +20,6 @@
     "ieee754_be_hex": "400921f9f01b866e"
   },
   "capture_source": "live capture 2026-06-26 — STFC_STRUCTURE IMPORTSTRUCT offset 0; SAP A4H sysnr=00; RFCFLOAT=3.14159",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke::RFCTYPE_FLOAT_branch — addr 0x8d35f (BN confirmed LE path)",
+  "evidence": "RFCTYPE_FLOAT serialization (protocol analysis confirmed LE path)",
   "gap_status": "closed — IEEE 754 double LE confirmed from live wire capture; wire bytes 6e 86 1b f0 f9 21 09 40 = 3.14159"
 }

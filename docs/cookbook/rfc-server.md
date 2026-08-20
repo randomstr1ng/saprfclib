@@ -87,7 +87,7 @@ server.serve_forever()
 ## Notes
 
 - `FunctionDesc` and `FieldDesc` are importable directly from `saprfclib` (top-level public API).
-- `rfctype=0` is `RFCTYPE_CHAR`.  Consult `sapnwrfc.h` or the ABAP DDIC for other type codes.
+- `rfctype=0` is `RFCTYPE_CHAR`.  See [Serialization](../protocol/serialization.md) for the full type-code table, or the ABAP DDIC for a specific field.
 - `nuc_length` is the character count in the non-Unicode encoding; `uc_length` is double
   that value for UTF-16 (2 bytes per code unit).
 - The `RESPTEXT` export is sent back to the SAP caller automatically when the handler returns.

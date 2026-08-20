@@ -5,9 +5,9 @@
       "offset": 0,
       "length": 8,
       "name": "int8_value",
-      "value": "0x2a00000000000000",
+      "value": "",
       "type": "fixed",
-      "notes": "Signed 64-bit integer, value=42; little-endian (struct '<q'); wire bytes 2a 00 00 00 00 00 00 00 [ASSUMED LE like INT4/INT2 — byte order and enum value 31 pending BN confirmation per Assumption A1]"
+      "notes": "Signed 64-bit integer, value=42; little-endian (struct '<q'); wire bytes 2a 00 00 00 00 00 00 00 [ASSUMED LE like INT4/INT2 — byte order and enum value 31 pending independent confirmation per Assumption A1]"
     }
   ],
   "expected_parse": {
@@ -17,8 +17,8 @@
     "value": 42
   },
   "capture_source": "synthetic value (42) — INT8 layout derived from serialization.md line 413; no live RFM exposing INT8 reachable on SAP A4H 2026-06-26",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch [ASSUMED pending BN confirmation — addr 0x8d35f common dispatch]",
+  "evidence": "the type dispatch [ASSUMED pending independent confirmation]",
   "status": "synthetic",
-  "gap_status": "[ASSUMED] — INT8 (enum 31 per Assumption A1) wire byte order LE assumed by analogy to INT4; pending BN confirmation + live capture",
+  "gap_status": "[ASSUMED] — INT8 (enum 31 per Assumption A1) wire byte order LE assumed by analogy to INT4; pending independent confirmation + live capture",
   "ni_header_length": 0
 }

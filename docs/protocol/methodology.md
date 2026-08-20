@@ -1,140 +1,171 @@
-# RE Methodology: Reverse Engineering the SAP RFC Protocol
+# Protocol Analysis Methodology
 
 ## Overview
 
-This document describes the reverse engineering (RE) workflow used to derive the SAP RFC wire protocol specification for the `saprfclib` project. It is intended for future contributors extending the protocol documentation, and for validation of documented findings.
+This document describes how the SAP RFC wire protocol specification in these pages was
+derived, and how to extend it. It is written for contributors adding protocol coverage,
+and for anyone who wants to check a documented claim rather than take it on trust.
+
+The protocol is not publicly specified. Everything here was established by observing
+traffic between systems the authors operate, for the purpose of interoperating with SAP
+systems the operator is licensed to use. No SAP source, headers, or binaries are
+reproduced in this repository — see [NOTICE](https://github.com/randomstr1ng/saprfclib/blob/main/NOTICE).
 
 ---
 
-## RE Sources (Ranked by Confidence)
+## Evidence Tiers
 
-| Source | Confidence | Usage |
-|--------|------------|-------|
-| Live Wireshark capture (pcap) | **HIGHEST** | Ground truth for wire bytes; overrides all other sources |
-| SAP SDK headers (`sapnwrfc.h`, `sapucrfc.h`, `sapdecf.h`) | **HIGH** | Type definitions, enum values, field descriptions |
-| Binary Ninja decompilation of `libsapnwrfc.so` | **HIGH** | Confirms header assumptions; reveals byte-order at call sites |
-| `pyrfc` behavior (black-box observation) | **MEDIUM** | Reveals what SAP accepts; does not reveal exact wire bytes |
-| Protocol inference from traffic patterns | **LOW** | Useful for hypothesis generation; requires confirmation |
+Every documented field carries an evidence tier. The tier is part of the claim: a
+byte layout marked `[ASSUMED]` is a hypothesis, not a specification.
 
-**Rule:** Any field documented as CONFIRMED must have a live capture citation or BN call-site reference. Fields marked `[ASSUMED]` are hypotheses pending confirmation.
+| Tier | Source | Weight | What it establishes |
+|------|--------|--------|---------------------|
+| **Live capture** | Wireshark/tshark pcap of real traffic | **HIGHEST** | Ground truth for wire bytes. Overrides every other source, including this document. |
+| **Golden fixture** | A capture committed under `tests/golden/` | **HIGHEST** | Same as above, replayable in CI. |
+| **Behavioural probe** | What a live server accepts or rejects | **MEDIUM** | Semantics and validity ranges; not exact bytes. |
+| **Reference-client analysis** | Observed behaviour of SAP's own RFC client | **MEDIUM** | Which code paths exist and in what order; not authoritative for bytes. |
+| **Inference** | Extrapolation from a confirmed neighbouring field | **LOW** | Hypothesis only. Must be labelled `[ASSUMED]`. |
+
+**Rule:** a field documented as CONFIRMED must cite a live capture or a golden fixture.
+Anything else is `[ASSUMED]` until a capture lands. No value is documented without a
+stated source — see [CLAUDE.md](https://github.com/randomstr1ng/saprfclib/blob/main/CLAUDE.md)
+for why this is enforced rather than encouraged.
 
 ---
 
-## Toolchain
+## Capturing Traffic
 
-### Live Traffic Capture
+RFC rides on plain TCP. The gateway port is **3300 + sysnr** — not 3200, which is the
+dispatcher. Captures filtered on 3200 yield zero RFC packets.
 
 ```bash
-# Capture SAP RFC traffic (port = 3300 + sysnr)
-bash captures/capture.sh
-
-# Manual capture (when tshark/dumpcap capabilities unavailable)
-# Use Wireshark GUI → capture on 'any' interface, filter: tcp port 3300
+# Capture RFC traffic to a system with sysnr=00
+sudo tshark -i any -f "tcp port 3300" -w rfc_session.pcapng
 ```
 
-**Critical discovery:** pyrfc wraps `libsapnwrfc.so` (native C library). The C library calls `socket()` directly — Python socket monkey-patching is ineffective. Use Wireshark/tshark at the OS interface level, not Python-level interception.
+Capture at the OS interface level. Intercepting inside Python does not work against
+SAP's own client: it is a native library that calls `socket()` directly, so replacing
+`socket.socket` in the interpreter sees nothing. This also applies to `saprfclib`'s own
+traffic if you want a comparison capture — use the same interface-level tooling for
+both so the two are directly diffable.
 
-**Port:** SAP NW RFC SDK connects to **3300 + sysnr** (Gateway port), NOT 3200 (Dispatcher). Captures on port 3200 will yield 0 packets.
+!!! note "tshark capabilities"
+    `tshark` shells out to `dumpcap`. Granting `cap_net_raw` to the `tshark` binary
+    alone is not enough — set it on `dumpcap`, or capture with `sudo`.
 
-### pcap Analysis
+---
+
+## Analysing a Capture
 
 ```python
 import subprocess, struct
 
-# List frames
+# List frames with their raw TCP payloads
 result = subprocess.run([
-    "tshark", "-r", "captures/stfc_connection.pcapng",
+    "tshark", "-r", "rfc_session.pcapng",
     "-T", "fields", "-e", "frame.number", "-e", "ip.src", "-e", "tcp.len", "-e", "tcp.payload"
 ], capture_output=True, text=True)
 
-# Parse NI frame from raw TCP payload
+# Every TCP payload is an NI frame
 raw = bytes.fromhex(tcp_payload_hex)
-ni_len = struct.unpack_from(">I", raw, 0)[0]
-payload = raw[4:4+ni_len]
+ni_len = struct.unpack_from(">I", raw, 0)[0]   # big-endian, excludes the 4-byte header
+payload = raw[4:4 + ni_len]
 
-# Parse TLV stream (starts at payload offset 80)
+# TLV stream begins at payload offset 80
 # [tag 2B BE][len 2B BE][data][close_tag 2B BE]
-# Extended: [tag 2B][0xFFFF][len 4B BE][data][close_tag 2B]
-# Terminated by: tag=0xFFFF len=0
+# Extended:  [tag 2B BE][0xFFFF][len 4B BE][data][close_tag 2B BE]
+# Terminated by: tag=0xFFFF, len=0
 ```
-
-### Binary Ninja (BN) Decompilation
-
-```python
-# Via MCP tools (when BN MCP server running):
-mcp__binary_ninja_mcp__select_binary(path="sap-rfc-sdk/nwrfcsdk/lib/libsapnwrfc.so")
-mcp__binary_ninja_mcp__decompile_function(address=0x8d35f)  # RfcInvoke entry
-mcp__binary_ninja_mcp__get_il(address=0x8d35f, il_type="hlil")
-```
-
-BN is used to confirm byte-order at type serialization call sites and to verify TLV encoding paths.
 
 ---
 
-## Protocol Discovery Process
+## Discovery Process
 
-### Step 1: Capture Known Traffic
+### Step 1 — Capture known traffic
 
-Use `pyrfc` (the reference implementation) to make well-known calls and capture the traffic:
+Drive well-known function modules so the payload content is predictable, and capture
+the result:
 
 ```python
 conn.call("STFC_CONNECTION", REQUTEXT="saprfc_capture_test")
 conn.call("STFC_STRUCTURE", IMPORTSTRUCT={...all scalar types...})
 ```
 
-`STFC_CONNECTION` gives a minimal frame (CHAR params only). `STFC_STRUCTURE` (RFCTEST struct) gives INT1, INT2, INT4, FLOAT, CHAR, DATE, TIME all in one struct.
+`STFC_CONNECTION` produces a minimal frame — CHAR parameters only. `STFC_STRUCTURE`
+carries the RFCTEST structure, which packs INT1, INT2, INT4, FLOAT, CHAR, DATE and TIME
+into a single value, making it the most efficient single call for type work.
 
-### Step 2: Identify Frame Boundaries
+Using a known-good client for the capture and `saprfclib` for a second capture of the
+same call gives a byte-level diff that localises a defect immediately.
 
-Every TCP payload is an NI frame:
-- Bytes 0-3: NI length (BE uint32, excludes 4-byte header)
-- Bytes 4+: payload
+### Step 2 — Identify frame boundaries
 
-For RFC data frames (handshake phase 3 + function calls):
-- Payload offset 0-75: 76-byte GW/APPC header
-- Payload offset 76-79: RFC marker (0xFFFF0001 = client, 0x00000001 = server)
-- Payload offset 80+: TLV stream (or COM_HEAD + TLV for logon frame only)
+Every TCP payload is one NI frame:
 
-### Step 3: Parse TLV Stream
+- bytes 0–3: NI length, big-endian uint32, excluding the 4-byte header
+- bytes 4+: payload
 
-Each TLV record has:
+For RFC data frames (handshake phase 3 onward, and all function calls):
+
+- payload offset 0–75: 76-byte gateway/APPC header
+- payload offset 76–79: RFC marker — `0xFFFF0001` client, `0x00000001` server
+- payload offset 80+: TLV stream (the logon frame additionally carries COM_HEAD here)
+
+### Step 3 — Parse the TLV stream
+
 ```
 tag (2B BE) | len (2B BE, or 0xFFFF for extended) | [ext_len 4B BE] | data | close_tag (2B BE)
 ```
 
-The TLV stream ends when `tag == 0xFFFF and len == 0`.
+The stream ends at `tag == 0xFFFF and len == 0`.
 
-Common structural tags:
-- `0x0502 len=0` = call-start
-- `0x0512 len=0` = parameter section start
-- `0x0102` = function name (UTF-16LE)
-- `0x0201` = parameter name (UTF-16LE)
-- `0x0203` = parameter value (UTF-16LE or binary)
-- `0x0205` = parameter name in response
-- `0xFFFF len=0` = terminator
+Structural tags seen in every call:
 
-### Step 4: Decode Parameter Values
+| Tag | Meaning |
+|-----|---------|
+| `0x0502` len=0 | Call start |
+| `0x0512` len=0 | Parameter section start |
+| `0x0102` | Function name (UTF-16LE) |
+| `0x0201` | Parameter name (UTF-16LE) |
+| `0x0203` | Parameter value (UTF-16LE or binary) |
+| `0x0205` | Parameter name in response |
+| `0xFFFF` len=0 | Terminator |
 
-Parameter values (`0x0203` / `0x0204`) contain the serialized ABAP type:
-- CHAR(N): `N×2` bytes UTF-16LE, space-padded
-- DATE: 16 bytes UTF-16LE (YYYYMMDD)
-- TIME: 12 bytes UTF-16LE (HHMMSS)
-- INT4: 4 bytes **little-endian** signed int
-- INT2: 2 bytes **little-endian** signed int
-- INT1: 1 byte unsigned int
-- FLOAT: 8 bytes IEEE 754 double **little-endian**
+### Step 4 — Decode parameter values
 
-Key pitfall: **ABAP integers are little-endian** (x86 native) while **NI headers are big-endian** (network byte order). Don't confuse the two.
+Parameter value records (`0x0203` / `0x0204`) hold the serialized ABAP value:
 
-### Step 5: Create Golden Fixtures
+| Type | Wire form |
+|------|-----------|
+| CHAR(N) | N×2 bytes UTF-16LE, space-padded |
+| DATE | 16 bytes UTF-16LE (`YYYYMMDD`) |
+| TIME | 12 bytes UTF-16LE (`HHMMSS`) |
+| INT4 | 4 bytes **little-endian** signed |
+| INT2 | 2 bytes **little-endian** signed |
+| INT1 | 1 byte unsigned |
+| FLOAT | 8 bytes IEEE 754 double, **little-endian** |
+
+The trap: **ABAP scalars are little-endian while NI headers are big-endian.** Both
+appear in the same frame, a few bytes apart.
+
+### Step 5 — Commit a golden fixture
 
 For each confirmed frame:
-1. Extract raw bytes from pcap → `tests/golden/{category}/{name}.bin`
-2. Write field annotations JSON → `tests/golden/{category}/{name}.json`
-3. JSON schema requires: `message_type`, `ni_header_length`, `field_annotations[]`, `expected_parse`, `capture_source`
-4. D-12 check: `sum(annotation.length) == len(bin_file)` — every byte must be annotated
 
-Tests in `tests/golden/{category}/test_*.py` verify D-12 on every fixture load.
+1. Extract the raw bytes to `tests/golden/{category}/{name}.bin`.
+2. Write the field annotations to `tests/golden/{category}/{name}.json`, including
+   `message_type`, `ni_header_length`, `field_annotations[]`, `expected_parse`, and
+   `capture_source`.
+3. Satisfy the **zero-unknowns rule**: `sum(annotation.length) == len(bin_file)`. Every
+   byte in a fixture must be accounted for. A byte nobody can explain is an open
+   question, not a detail.
+
+`tests/golden/{category}/test_*.py` enforces the zero-unknowns rule on every fixture
+load, so a fixture cannot be added with unexplained bytes.
+
+Sanitising a fixture — removing a real hostname or credential — must preserve the
+original byte length, or every offset after the substitution becomes wrong. See the
+substitution note in `tests/test_router.py` for the pattern.
 
 ---
 
@@ -142,21 +173,21 @@ Tests in `tests/golden/{category}/test_*.py` verify D-12 on every fixture load.
 
 | Pitfall | Detail |
 |---------|--------|
-| Wrong port | pyrfc connects to **3300+sysnr** (Gateway), not 3200 (Dispatcher). Filter `tcp port 3300`. |
-| Python socket interception | `libsapnwrfc.so` calls C `socket()` directly. Python `socket.socket` subclassing doesn't intercept it. Use Wireshark at OS level. |
-| tshark vs dumpcap capabilities | `tshark` uses `dumpcap` internally. Setting `cap_net_raw` on `tshark` binary alone is insufficient — must set on `dumpcap` binary or use `sudo`. |
-| COM_HEAD only in logon frame | `D9C6C3F0F0F0F0F0F0F0F0F0` (EBCDIC "RFC000000000") appears ONLY in the logon frame (frame 14). Function call frames start TLV directly at offset 80 — no COM_HEAD. |
-| INT byte order | NI length headers are big-endian. ABAP INT2/INT4 inside struct values are **little-endian**. |
-| CHAR width vs byte width | CHAR(N) is N characters = N×2 bytes in UTF-16LE mode. `field_length` in descriptors is in characters. Off-by-2x is common. |
-| UTF-16 BOM | Use explicit `utf-16-le` codec, never bare `utf-16` (which emits/reads BOM). The SAP wire format has no BOM. |
-| Metadata prefetch frames | pyrfc auto-calls `RFC_GET_FUNCTION_INTERFACE` and `DDIF_FIELDINFO_GET` before user-visible calls. The actual `STFC_STRUCTURE` call is frame 35, not frame 19. Always count frames carefully. |
-| STFC_STRUCTURE has 264-byte struct | The RFCTEST struct blob is 264 bytes with alignment padding. The last 200 bytes are CHAR-field space-padding. Actual scalar data is in offsets 0-63. |
+| Wrong port | RFC connects to **3300 + sysnr** (gateway), not 3200 (dispatcher). Filter `tcp port 3300`. |
+| Python-level interception | SAP's client is native and calls `socket()` directly; subclassing `socket.socket` intercepts nothing. Capture at the OS level. |
+| tshark vs dumpcap capabilities | `cap_net_raw` must be set on `dumpcap`, not just `tshark`. |
+| COM_HEAD only in the logon frame | `D9C6C3F0F0F0F0F0F0F0F0F0` (EBCDIC `RFC000000000`) appears **only** in the logon frame. Function-call frames start the TLV stream directly at offset 80. |
+| INT byte order | NI length headers are big-endian; ABAP INT2/INT4 inside values are little-endian. |
+| CHAR width vs byte width | CHAR(N) is N *characters* = N×2 bytes in UTF-16LE. `field_length` in descriptors is in characters. The off-by-2× is the most common bug in this codebase. |
+| UTF-16 BOM | Use explicit `utf-16-le`; never bare `utf-16`, which emits and consumes a BOM. The wire format has none. |
+| Metadata prefetch frames | A client auto-issues `RFC_GET_FUNCTION_INTERFACE` and `DDIF_FIELDINFO_GET` before the user's call. The call you are looking for is not the first RFC frame in the capture — count carefully. |
+| RFCTEST is 264 bytes | The structure blob is 264 bytes including alignment padding. Scalar data lives in offsets 0–63; the trailing 200 bytes are CHAR space-padding. |
 
 ---
 
-## RFCTEST Structure Layout (Confirmed from Live Capture)
+## RFCTEST Structure Layout
 
-From `STFC_STRUCTURE IMPORTSTRUCT` in frame 35 (264 bytes total):
+Confirmed from a live `STFC_STRUCTURE IMPORTSTRUCT` capture (2026-06-26), 264 bytes:
 
 ```
 Offset  Size  Type     Field       Value (sent)    Wire bytes
@@ -174,20 +205,9 @@ Offset  Size  Type     Field       Value (sent)    Wire bytes
 64      200   [chars]  —           spaces          20 00 repeated (space UTF-16LE)
 ```
 
-Offsets 28-35 contain unknown fields (possibly additional RFCTEST fields not set in the test call).
+Offsets 28–35 are not yet explained — most likely RFCTEST fields left unset by the test
+call. Flagged as an open question rather than described as padding.
 
 ---
 
-## RE Session Log
-
-| Date | Session | Deliverable |
-|------|---------|-------------|
-| 2026-06-26 | BN decompilation of `NiIWrite`/`NiIRead` | NI header = 4B BE uint32 (confirmed) |
-| 2026-06-26 | BN decompilation of GW header path | 76-byte APPC/GW header (confirmed) |
-| 2026-06-26 | Live Wireshark capture (manual, 40 frames) | All Gate A+C fields confirmed |
-| 2026-06-26 | STFC_STRUCTURE frame 35 analysis | RFCTEST struct layout, INT/FLOAT byte order confirmed |
-
----
-
-*Document created: 2026-06-26*
-*See also: [framing.md](framing.md), [serialization.md](serialization.md), [handshake.md](handshake.md)*
+*See also: [Framing](framing.md), [Serialization](serialization.md), [Handshake](handshake.md).*

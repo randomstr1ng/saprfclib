@@ -12,20 +12,16 @@
 # tests/golden/framing/ with ZERO network (the socket-free boundary is the same
 # substitution point session.py uses).
 #
-# Requirements: SERVER-02 (gateway registration frame). The registration frame
-# builder is RE-gated: every reproduced byte is sourced from
-# .planning/bn-re-findings.md §"Server registration & inbound dispatch" — the BN
-# chain RfcRegisterServer (0x77c550) -> CpicConnection::registerAsServer_SM
-# (0x4ff35c) -> SAP_CMREGTP3 (0x5a7ba1) -> STIRegTp (0x798a70) -> GwIConnect
-# (0x7a0c80), cross-checked against server_registration_request.bin. NO guessed
-# bytes (RESEARCH Pitfall 1 / D-04).
+# Requirements: SERVER-02 (gateway registration frame). Every reproduced byte is
+# sourced from docs/protocol/framing.md and cross-checked against the
+# server_registration_request.bin golden fixture. NO guessed bytes.
 #
-# KEY RE finding: the on-wire registration request is the SAME 0x0601 GW_CONNECT
-# APPCHDR6 frame the client emits (STIInit-family builder), and it is
+# KEY finding: the on-wire registration request is the SAME 0x0601 GW_CONNECT
+# APPCHDR6 frame the client emits, and it is
 # program_id-INDEPENDENT — the PROGRAM_ID (tpname) does NOT appear in this frame
 # in any encoding. The "NWRFC" string at payload offset 48 is the fixed partner
 # LU name, not the PROGRAM_ID. The tpname is conveyed to the gateway by the
-# follow-up SAP_CMACCPTP3 accept exchange (Wave 2 / server core). build_*
+# follow-up accept exchange. build_*
 # therefore accepts program_id/gwserv (to match the public RfcRegisterServer
 # signature and to drive state) but reproduces the program_id-independent connect
 # frame; session-specific bytes (handle, IP/host/service, OS user, time() blob)
@@ -53,27 +49,27 @@ __all__ = ["ServerSession", "ServerSessionState"]
 
 
 # --------------------------------------------------------------------------- #
-# Registration-frame wire constants — all sourced from bn-re-findings.md
-# §"Server registration & inbound dispatch" (BN + capture). The frame is the
-# 0x0601 GW_CONNECT built by GwIConnect/STIInit; offsets below are payload
+# Registration-frame wire constants — all sourced from docs/protocol/framing.md
+# §"Server registration & inbound dispatch" (analysis + capture). The frame is the
+# 0x0601 GW_CONNECT built by the gateway connect call/the GW_CONNECT builder; offsets below are payload
 # offsets (NI 4-byte length header NOT included — added by _ni_frame()).
 # --------------------------------------------------------------------------- #
 _NI_HEADER = struct.Struct(">I")  # 4-byte big-endian NI length prefix (NiIWrite)
 
-# Captured registration request payload length (STIRegTp/GwIConnect GW_CONNECT).
+# Captured registration request payload length (the registration builder/the gateway connect call GW_CONNECT).
 # Wire-captured server_registration_request.bin = 457B file = 4B NI + 453B payload.
 _REG_PAYLOAD_LEN = 453
 
-# APPCHDR6 / STIInit fixed fields (BN STIInit 0x5add9d; see bn-re-findings GW
+# APPCHDR6 / the GW_CONNECT builder fixed fields (protocol analysis; see docs/protocol/framing.md GW
 # common table + GW_CONNECT_REQUEST table). Payload offsets:
-_OFF_B10 = 10  # STIInit *(r13_11+0x5a) init = 0x01
-_OFF_B16 = 16  # STIInit *(r13_11+0x60) |= 0x80 + CONV_PROTO 0x40 = 0xC0
-_OFF_B21 = 21  # STIInit *(r13_11+0x65) |= 4 (standard client) = 0x04
+_OFF_B10 = 10  # the GW_CONNECT builder *(r13_11+0x5a) init = 0x01
+_OFF_B16 = 16  # the GW_CONNECT builder *(r13_11+0x60) |= 0x80 + CONV_PROTO 0x40 = 0xC0
+_OFF_B21 = 21  # the GW_CONNECT builder *(r13_11+0x65) |= 4 (standard client) = 0x04
 _OFF_LU_NAME = 48  # UtilCpyUcToNet partner LU name (8 bytes, net/ASCII)
-_OFF_B73 = 73  # STIInit *(r13_11+0x99) = 1
+_OFF_B73 = 73  # the GW_CONNECT builder *(r13_11+0x99) = 1
 _OFF_MARKER = 76  # request marker [76:80]: 0x0000 then 0xFFFF (request)
 
-_LU_PARTNER_NAME = b"NWRFC   "  # 8-byte partner LU name (fixed; bn-re-findings)
+_LU_PARTNER_NAME = b"NWRFC   "  # 8-byte partner LU name (fixed; docs/protocol/framing.md)
 _REG_MARKER_REQUEST = b"\x00\x00\xff\xff"  # payload[76:80] request; ACK flips [78:80]->0004
 
 # Registration-ACK detection: the gateway echoes the 0x0601 type and flips the
@@ -140,15 +136,15 @@ class ServerSession:
         """Build the NI-framed 0x0601 GW_CONNECT registration request.
 
         Reproduces the program_id-INDEPENDENT connect frame exactly per
-        bn-re-findings.md (the STIInit-family GW_CONNECT builder). ``program_id``
+        docs/protocol/framing.md (the GW_CONNECT frame builder). ``program_id``
         and ``gwserv`` are recorded to drive state and match the public
         ``RfcRegisterServer(program_id, gwserv)`` signature, but the PROGRAM_ID is
-        NOT embedded in this frame (it is sent by the SAP_CMACCPTP3 accept step,
+        NOT embedded in this frame (it is sent by the follow-up accept step,
         Wave 2). Session-specific bytes (connection handle, local IP/host/service,
         OS user, ``time()`` blob) are left zero — they are emitted by the live
         Transport facade and are annotated ``variable`` in the golden sidecar.
 
-        STIRegTp validation (BN 0x798a70) is enforced defensively: PROGRAM_ID must
+        the registration builder validation is enforced defensively: PROGRAM_ID must
         be non-empty, ≤64 chars, and contain no ``*``; gwserv must be non-empty.
         """
         if not program_id:
@@ -164,18 +160,18 @@ class ServerSession:
         self._gwserv = gwserv
 
         payload = bytearray(_REG_PAYLOAD_LEN)
-        # APPCHDR6 header (BN GW common table + STIInit GW_CONNECT_REQUEST):
+        # APPCHDR6 header (GW common table + GW_CONNECT_REQUEST):
         struct.pack_into(">H", payload, 0, _GW_TYPE_CONNECT)  # [0:2] 0x0601
         struct.pack_into(">H", payload, 2, _GW_VERSION)  # [2:4] 0x0200
         struct.pack_into(">I", payload, 4, _GW_FLAGS)  # [4:8] 0xFFFF0000
-        payload[_OFF_B10] = 0x01  # [10]  STIInit init
+        payload[_OFF_B10] = 0x01  # [10]  the GW_CONNECT builder init
         payload[_OFF_B16] = 0xC0  # [16]  |=0x80 + 0x40
         payload[_OFF_B21] = 0x04  # [21]  standard client
-        # [40:48] connection handle: 8 spaces on the outbound connect (STIInit
+        # [40:48] connection handle: 8 spaces on the outbound connect (the GW_CONNECT builder
         # strncpy "        "). Left zero here — annotated `variable` (the live
         # facade writes the spaces); compare_bytes skips it.
         payload[_OFF_LU_NAME : _OFF_LU_NAME + len(_LU_PARTNER_NAME)] = _LU_PARTNER_NAME
-        payload[_OFF_B73] = 0x01  # [73]  STIInit
+        payload[_OFF_B73] = 0x01  # [73]  the GW_CONNECT builder
         payload[_OFF_MARKER : _OFF_MARKER + 4] = _REG_MARKER_REQUEST  # [76:80]
 
         self._state = ServerSessionState.GW_CONNECTED
@@ -301,8 +297,8 @@ class ServerSession:
             raise ValueError(f"registration ACK GW payload too short: {len(data)} < 80")
         # Handle at GW payload[40:48] (gateway-assigned ASCII, e.g. b"36964135").
         self._handle = data[40:48]
-        # BN STISendToGw (0x799710): REG_WAITING[78:80] = rol.w(*(arg2+0x1c), 8).
-        # Empirically: *(arg2+0x1c) is populated from ACK[78:80] by GwIConnect.
+        # protocol analysis: REG_WAITING[78:80] = rol.w(*(arg2+0x1c), 8).
+        # Empirically: *(arg2+0x1c) is populated from ACK[78:80] by the gateway connect call.
         self._ack_tail = bytes(data[78:80])
         self._state = ServerSessionState.REGISTERED
         return b""

@@ -43,7 +43,7 @@
     "encoding": "utf-16-le"
   },
   "capture_source": "synthetic value (42 as NUM(4)='0042') — UTF-16-LE zero-padded numeric string per serialization.md line 204; same UTF-16 encoding confirmed via live CHAR capture 2026-06-26",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch — addr 0x8d35f (byte layout derived from docs/protocol/serialization.md)",
+  "evidence": "the type dispatch (byte layout derived from docs/protocol/serialization.md)",
   "status": "synthetic",
   "gap_status": "closed — NUM uses the same UTF-16-LE encoding as CHAR (confirmed live 2026-06-26); only the leading-zero padding differs",
   "ni_header_length": 0

@@ -17,7 +17,7 @@
     "value": 256
   },
   "capture_source": "synthetic value (256) — INT2 LE byte order confirmed via live STFC_STRUCTURE capture 2026-06-26",
-  "binja_ref": "libsapnwrfc.so::RfcInvoke type-switch — addr 0x8d35f (byte layout derived from docs/protocol/serialization.md)",
+  "evidence": "the type dispatch (byte layout derived from docs/protocol/serialization.md)",
   "status": "synthetic",
   "gap_status": "closed — INT2 LE byte order confirmed from live wire capture 2026-06-26 (RFCINT2=256 = 00 01)",
   "ni_header_length": 0

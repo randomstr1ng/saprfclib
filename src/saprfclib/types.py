@@ -27,7 +27,7 @@ __all__ = [
     "RFC_TABLES",
 ]
 
-# RFC_DIRECTION constants (sapnwrfc.h lines 644-650).
+# RFC_DIRECTION constants (SDK type definitions lines 644-650).
 # These reflect the **caller's perspective**: RFC_IMPORT means the caller sends the
 # value (ABAP IMPORTING param); RFC_EXPORT means the caller receives it back.
 RFC_IMPORT: int = 0x01  # caller sends  (ABAP IMPORTING, PARAMCLASS 'I')

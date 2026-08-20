@@ -6,9 +6,7 @@
 # tests/golden/framing/server_registration_request.bin byte-for-byte (modulo the
 # session-variable fields annotated in the .json sidecar).
 #
-# RE source of every reproduced byte: .planning/bn-re-findings.md §"Server
-# registration & inbound dispatch" (BN RfcRegisterServer -> registerAsServer_SM ->
-# SAP_CMREGTP3 -> STIRegTp -> GwIConnect, cross-checked against the live capture).
+# RE source of every reproduced byte: docs/protocol/framing.md (protocol analysis + capture).
 # ZERO sockets — the registration frame is built by the pure state machine.
 #
 # Plan 03 also extends this file with the dispatch/serialize/auth tests; this plan
@@ -29,7 +27,7 @@ from tests.conftest import GOLDEN_ROOT, compare_bytes, load_fixture
 FRAMING_DIR = GOLDEN_ROOT / "framing"
 
 # The PROGRAM_ID / gwserv the captured oracle registered with. The PROGRAM_ID is
-# NOT present on the wire in the 0x0601 connect frame (see bn-re-findings); it is
+# NOT present on the wire in the 0x0601 connect frame (see docs/protocol/framing.md); it is
 # accepted via the follow-up SAP_CMACCPTP3 exchange (Wave 2). The builder still
 # takes it so the public API matches RfcRegisterServer(program_id, gwhost, gwserv).
 FIXTURE_PROGRAM_ID = "SAPRFC_TEST"
@@ -272,7 +270,7 @@ def _inbound_call_with_creds(
     """Inbound call frame carrying logon credentials (0x0111 user, 0x0117 passwd).
 
     The password is scrambled with the same _scramble_password the client uses
-    (seed 4B LE + ab_scramble), so the server's symmetric unscramble recovers it.
+    (seed 4B LE + the password-scramble cipher), so the server's symmetric unscramble recovers it.
     """
     parts = [
         tlv_record(_TAG_FUNC_NAME, func_name.encode("utf-16-le")),

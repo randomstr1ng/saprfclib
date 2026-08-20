@@ -3,7 +3,6 @@
   "_source": "wire-captured",
   "fixture_file": "tests/golden/router/sapms_server_list.bin",
   "total_size_bytes": 598,
-
   "frame_header": {
     "_comment": "SAPMS MESSAGE frame header bytes 0..117. wire-captured.",
     "ni_length_prefix": {
@@ -103,12 +102,10 @@
       "_note": "[ASSUMED] sub-opcode or response flags. wire-captured value."
     }
   },
-
   "server_entries_start_offset": 118,
   "server_entry_size": 160,
   "_entry_count_note": "[ASSUMED] 3 entries derived from (598 - 118) / 160 = 3.0. No explicit count field identified in header — count is inferred by parsing entries until buffer end. wire-captured byte math.",
   "server_entry_count": 3,
-
   "per_server_entry_layout": {
     "_comment": "Per-server entry field layout (offsets relative to entry start). Entry size = 160 bytes. wire-captured from 3 entries in frame.",
     "instance_name": {
@@ -169,7 +166,6 @@
       "_note": "[ASSUMED] trailing bytes: entry1 byte[0]=0x01 (active flag?), rest zeros. wire-captured values."
     }
   },
-
   "server_entries": [
     {
       "index": 0,
@@ -207,7 +203,6 @@
       "_note": "wire-captured: loopback entry, inactive for external clients."
     }
   ],
-
   "selection_rule": {
     "_note": "Select first entry with port > 0 (active). For Phase 4 MVP, this selects entry index 1 (192.168.88.7:3200, sysnr=0). Pool selection deferred to Phase 5.",
     "selected_index": 1,
@@ -216,7 +211,6 @@
     "sysnr_formula": "sysnr = (port - 3200) // 100",
     "sysnr": 0
   },
-
   "error_code_field": {
     "_note": "[ASSUMED] No confirmed error code field in this frame. The parser rejects frames with wrong magic or too-short buffer. A SAPMS error response has not been captured — error code location is UNKNOWN. parse_sapms_server_list raises ValueError if magic is wrong; no error-code byte check possible without further RE.",
     "confirmed": false,

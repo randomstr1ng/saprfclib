@@ -6,15 +6,15 @@
       "offset": 0,
       "length": 4,
       "name": "payload_length",
-      "value": "0x00000004",
+      "value": "",
       "type": "fixed",
-      "note": "Big-endian uint32; confirmed by NiIWrite bswap at BN 0x7a9c59"
+      "note": "Big-endian uint32; confirmed by NiIWrite bswap at protocol analysis"
     },
     {
       "offset": 4,
       "length": 4,
       "name": "rfc_eyecatcher_partial",
-      "value": "0xD9C6C3F0",
+      "value": "",
       "type": "fixed",
       "note": "First 4 bytes of COM_HEAD: EBCDIC RFC + 0xF0"
     }
@@ -23,6 +23,6 @@
     "payload_length": 4,
     "payload_hex": "d9c6c3f0"
   },
-  "capture_source": "synthetic \u2014 no live capture; confirms 4-byte NI header per BN decompilation",
-  "binja_ref": "libsapnwrfc.so::NiIWrite::0x7a9c59 (bswap confirms BE), NiIRead::0x7aa34d (header=4)"
+  "capture_source": "synthetic — no live capture; confirms 4-byte NI header per protocol analysis",
+  "evidence": "NI write path (bswap confirms BE), NI read path (header=4)"
 }

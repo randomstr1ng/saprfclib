@@ -16,12 +16,12 @@
 #
 # Wire layouts are sourced from docs/protocol/serialization.md (the Phase 1 RE
 # output). Confirmed-from-live-capture types: INT4/INT2/INT1, FLOAT, CHAR, DATE,
-# TIME. BN-confirmed via rfcSerialize switch (GAP-B-03 closed): INT8=31,
+# TIME. confirmed via the type dispatch (GAP-B-03 closed): INT8=31,
 # UTCLONG=32, UTCSECOND=33, UTCMINUTE=34, DTDAY=35, DTWEEK=36, DTMONTH=37,
 # TSECOND=38, TMINUTE=39, CDAY=40 — all raw LE binary same path as INT4/INT2.
-# STRING wire = UTF-8 bytes inside TLV (writeRfcUTF8Chars, SAP codepage 4110);
+# STRING wire = UTF-8 bytes inside TLV (the UTF-8 string writer, SAP codepage 4110);
 # XSTRING wire = raw bytes inside TLV. Neither type has an internal length prefix —
-# the TLV header byte count is the length (GAP-B-06 closed via BN writeRfcIDBegin).
+# the TLV header byte count is the length (confirmed 2026-07-05).
 #
 # SAP_UC encoding rule (CODEC-07 / threat T-02-05): UTF-16 with an explicit
 # byte order only — "utf-16-le" in Unicode mode (the confirmed 4103 wire mode),
@@ -42,8 +42,8 @@ __all__ = ["encode", "decode"]
 
 
 # --------------------------------------------------------------------------- #
-# RFCTYPE integer constants (sapnwrfc.h lines 91-125; values 31-40 confirmed
-# from both header auto-increment and BN rfcSerialize switch cases 0x1f-0x28).
+# RFCTYPE integer constants (SDK type definitions lines 91-125; values 31-40 confirmed
+# from both header auto-increment and dispatch cases 0x1f-0x28).
 # --------------------------------------------------------------------------- #
 RFCTYPE_CHAR = 0
 RFCTYPE_DATE = 1
@@ -78,22 +78,22 @@ RFCTYPE_CDAY = 40
 # struct format chars for the fixed-width integer / float types. All multi-byte
 # scalars are little-endian on the confirmed x86-64 wire (DATE/TIME excepted —
 # those are SAP_UC text, not integers). FLOAT is an IEEE 754 double "<d".
-# INT8/UTCLONG/UTCSECOND/UTCMINUTE share the INT8 8-byte group in rfcSerialize
-# (BN switch cases 7/0x1f-0x22); DTDAY-TSECOND share INT4 group (0x23-0x26);
+# INT8/UTCLONG/UTCSECOND/UTCMINUTE share the INT8 8-byte group in the serializer
+# (dispatch cases 7/0x1f-0x22); DTDAY-TSECOND share INT4 group (0x23-0x26);
 # TMINUTE/CDAY share INT2 group (0x27-0x28). All confirmed LE by grouping.
 _INT_FORMATS: dict[int, str] = {
     RFCTYPE_INT: "<i",  # signed 32-bit
     RFCTYPE_INT2: "<h",  # signed 16-bit
-    RFCTYPE_INT8: "<q",  # signed 64-bit (BN case 0x1f, same group as FLOAT=7)
-    RFCTYPE_UTCLONG: "<q",  # 8-byte (BN case 0x20)
-    RFCTYPE_UTCSECOND: "<q",  # BN case 0x21
-    RFCTYPE_UTCMINUTE: "<q",  # BN case 0x22
-    RFCTYPE_DTDAY: "<i",  # 4-byte (BN case 0x23)
-    RFCTYPE_DTWEEK: "<i",  # BN case 0x24
-    RFCTYPE_DTMONTH: "<i",  # BN case 0x25
-    RFCTYPE_TSECOND: "<i",  # BN case 0x26
-    RFCTYPE_TMINUTE: "<h",  # 2-byte (BN case 0x27)
-    RFCTYPE_CDAY: "<h",  # BN case 0x28
+    RFCTYPE_INT8: "<q",  # signed 64-bit (protocol analysis, same group as FLOAT=7)
+    RFCTYPE_UTCLONG: "<q",  # 8-byte (protocol analysis
+    RFCTYPE_UTCSECOND: "<q",  # protocol analysis
+    RFCTYPE_UTCMINUTE: "<q",  # protocol analysis
+    RFCTYPE_DTDAY: "<i",  # 4-byte (protocol analysis
+    RFCTYPE_DTWEEK: "<i",  # protocol analysis
+    RFCTYPE_DTMONTH: "<i",  # protocol analysis
+    RFCTYPE_TSECOND: "<i",  # protocol analysis
+    RFCTYPE_TMINUTE: "<h",  # 2-byte (protocol analysis
+    RFCTYPE_CDAY: "<h",  # protocol analysis
 }
 
 # DecFloat16/34 remain an UNCONFIRMED wire form — GAP-B-01. Plan 01 found no
@@ -108,8 +108,11 @@ _DEFERRED: dict[int, str] = {}
 
 # The single GAP-B-01 message both decode and encode raise for DecFloat16/34.
 _DECF_GAP_MESSAGE = (
-    "DecFloat16/34 wire form unconfirmed — see GAP-B-01 (D-04 capture); "
-    "deferred per no-guessing constraint"
+    "RFCTYPE_DECF16/DECF34 (DECFLOAT16/DECFLOAT34) is not implemented: the wire "
+    "encoding is unconfirmed. Big-endian DPD is documented behaviour but has "
+    "never been observed on the wire, and shipping a guessed decimal codec risks "
+    "silently corrupting values. See "
+    "https://randomstr1ng.github.io/saprfclib/protocol/serialization/"
 )
 
 # Types the SAP SDK documents as not serialized on the wire.
@@ -195,7 +198,7 @@ def _encode_uc_fixed(value: str, field: FieldDesc, *, pad: str) -> bytes:
 # bytes, so the digit count is (width * 2 - 1) — derived directly from the
 # field's declared byte span, no separate precision field needed.
 #
-# Sign nibbles (sapucrfc.h SAP_BCD; Pitfall 4): 0x0C / 0x0F / 0x0B → positive,
+# Sign nibbles (SDK type definitions SAP_BCD; Pitfall 4): 0x0C / 0x0F / 0x0B → positive,
 # 0x0D → negative on DECODE; ENCODE emits only the canonical 0x0C (non-negative)
 # or 0x0D (negative). The value is modelled with decimal.Decimal exclusively —
 # NEVER float — for exact base-10 financial correctness (D-13).

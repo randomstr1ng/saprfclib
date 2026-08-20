@@ -14,7 +14,7 @@
 #            check/mark_received/mark_executed calls.
 #
 # Sources: 06-CONTEXT.md D-01/02/03; 06-RESEARCH.md Pattern 1 (Protocol shape);
-#          sapnwrfc.h:326-332 (RFC_UNIT_STATE enum — 5 values);
+#          the SDK's RFC_UNIT_STATE enum (5 values);
 #          docs/protocol/trfc.md §"TID / UnitID Validation"
 
 from __future__ import annotations
@@ -40,12 +40,12 @@ InMemoryUnitStore = stores.InMemoryUnitStore
 
 
 # --------------------------------------------------------------------------- #
-# UnitState enum shape (TRFC-08, sapnwrfc.h:326-332)
+# UnitState enum shape (TRFC-08, SDK type definitions-332)
 # --------------------------------------------------------------------------- #
 
 
 def test_unit_state_enum_has_all_five_values() -> None:
-    """UnitState enum must expose all 5 values from RFC_UNIT_STATE (h:326-332).
+    """UnitState enum must expose all 5 values from the SDK's RFC_UNIT_STATE.
 
     NOT_FOUND=0, IN_PROCESS=1, COMMITTED=2, ROLLED_BACK=3, CONFIRMED=4
     """
@@ -53,7 +53,7 @@ def test_unit_state_enum_has_all_five_values() -> None:
     actual = {m.name for m in UnitState}
     assert required <= actual, (
         f"UnitState missing members: {required - actual} "
-        f"(must mirror RFC_UNIT_STATE sapnwrfc.h:326-332)"
+        f"(must mirror the SDK's RFC_UNIT_STATE values)"
     )
 
 
@@ -139,7 +139,7 @@ def test_inmemory_tid_store_confirm_removes_or_clears() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# InMemoryTidStore: thread safety (TRFC-08 + sapnwrfc.h SERVER-06 lineage)
+# InMemoryTidStore: thread safety (TRFC-08 + SDK type definitions SERVER-06 lineage)
 # --------------------------------------------------------------------------- #
 
 

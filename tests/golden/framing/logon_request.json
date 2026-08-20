@@ -1,7 +1,7 @@
 {
   "message_type": "LOGON_REQUEST",
   "capture_source": "live capture 2026-06-26 via Wireshark on enp111s0; SAP A4H sysnr=00 port=3300",
-  "binja_ref": "libsapnwrfc.so::NiIWrite::0x7a9c59; COM_HEAD confirmed at payload+80 after GW header",
+  "evidence": "NI write path; COM_HEAD confirmed at payload+80 after GW header",
   "ni_header_length": 4,
   "notes": [
     "First RFC message of a session — the only frame that contains COM_HEAD",
@@ -12,32 +12,42 @@
   ],
   "field_annotations": [
     {
-      "offset": 0, "length": 4,
-      "name": "ni_payload_length", "value": "0x00000151",
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
       "type": "fixed",
       "note": "BE uint32 = 337"
     },
     {
-      "offset": 4, "length": 76,
-      "name": "gw_header", "value": "06cb0200ffff...",
+      "offset": 4,
+      "length": 76,
+      "name": "gw_header",
+      "value": "06cb0200ffff...",
       "type": "variable",
       "note": "SAP Gateway header: 76 bytes; same structure as all RFC data frames; see stfc_connection_request for field breakdown"
     },
     {
-      "offset": 80, "length": 4,
-      "name": "rfc_stream_marker", "value": "0xffff0001",
+      "offset": 80,
+      "length": 4,
+      "name": "rfc_stream_marker",
+      "value": "",
       "type": "fixed",
       "note": "Pre-TLV marker ffff0001 = client request"
     },
     {
-      "offset": 84, "length": 12,
-      "name": "com_head", "value": "d9c6c3f0f0f0f0f0f0f0f0f0",
+      "offset": 84,
+      "length": 12,
+      "name": "com_head",
+      "value": "d9c6c3f0f0f0f0f0f0f0f0f0",
       "type": "fixed",
       "note": "RFC eyecatcher: EBCDIC 'RFC000000000' — present ONLY in logon frame, not in subsequent call frames"
     },
     {
-      "offset": 96, "length": 245,
-      "name": "logon_tlv_stream", "value": "variable",
+      "offset": 96,
+      "length": 245,
+      "name": "logon_tlv_stream",
+      "value": "variable",
       "type": "variable",
       "note": "TLV records encoding logon parameters: client 001, user DEVELOPER, language E, codepage, system info"
     }

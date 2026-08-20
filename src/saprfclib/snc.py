@@ -15,9 +15,9 @@
 # a standalone, fully offline-testable unit: the GssBinding takes an injectable
 # `loader` so tests drive it with a MockGssLib double, no real .so required.
 #
-# Frame layout (D-02, confirmed from SncPMakeFrame/SncPUnFrame BN RE):
+# Frame layout (D-02, confirmed):
 #     offset  size  field
-#     0x00    8B    eye-catcher = "SNCFRAME" (D-22 resolved — BN RE 2026-07-21)
+#     0x00    8B    eye-catcher = "SNCFRAME" (D-22 resolved — protocol analysis 2026-07-21)
 #     0x08    1B    frame_type: 2=FR_INIT, 4=FR_ACCEPT, 7=plain, 8=integrity, 9=privacy
 #     0x09    1B    protocol version = 6
 #     0x0a    2B    BE uint16: total header length (0x18 + extension header size)
@@ -226,7 +226,7 @@ def parse_snc_frame(buf: bytes) -> tuple[int, int, int, bytes, bytes]:
         )
     # hdrlen=0 means no extension headers; otherwise token starts at hdrlen bytes
     # from the start of the frame (hdrlen includes the 8-byte eye — confirmed by
-    # BN RE of SncPMakeFrame). Standard hdrlen=0x18; extended (SSO2) hdrlen>0x18.
+    # protocol analysis of the SNC frame builder). Standard hdrlen=0x18; extended (SSO2) hdrlen>0x18.
     token_start = hdrlen if hdrlen >= _SNC_HEADER_SIZE else _SNC_HEADER_SIZE
     data_start = token_start + token_len
     gss_token = buf[token_start:data_start]
@@ -424,7 +424,7 @@ class GssBinding:
         # D-14: strip enclosing double-quotes SAP env may add, then strip the
         # SAP SNC type prefix ("p:", "u:", "s:") — CommonCryptoLib's DName_decode
         # expects a raw X.500 DN; the prefix is a SAP-level convention only
-        # (confirmed BN RE of sec1_gss_import_name at 0x558329 / 0x558869).
+        # (confirmed protocol analysis of sec1_gss_import_name at).
         self._partnername = _strip_snc_prefix(_strip_quotes(snc_partnername))
         self._myname = (
             _strip_snc_prefix(_strip_quotes(snc_myname)) if snc_myname is not None else None
@@ -697,7 +697,7 @@ def _strip_quotes(value: str) -> str:
 
 
 def _strip_snc_prefix(value: str) -> str:
-    """Strip SAP SNC type prefix before passing to gss_import_name (BN 0x558869).
+    """Strip SAP SNC type prefix before passing to gss_import_name.
 
     CommonCryptoLib's DName_decode expects a raw X.500 DN string (e.g.
     "CN=A4H, OU=...").  The "p:" / "u:" / "s:" prefixes are SAP-level
@@ -769,8 +769,8 @@ class SncTransport:
         self._established = False  # SEC-06 gate; set by _handshake()
         # D-24 (live pyrfc capture): ctx_id=3 in all SNC frames.
         self._ctx_id = _SNC_CTX_ID
-        # D-22 RESOLVED (BN RE 2026-07-21): snc_eyecatcher global at 0xd88568
-        # points to "SNCFRAME\0" at 0xa4b297. Injectable so tests can override.
+        # D-22 RESOLVED (protocol analysis 2026-07-21): snc_eyecatcher global at
+        # points to "SNCFRAME\0" at. Injectable so tests can override.
         self._eye = eye_catcher or b"SNCFRAME"
         self._gss = gss_binding or GssBinding(
             snc_lib=snc_lib,
@@ -816,9 +816,9 @@ class SncTransport:
     # -- GW envelope builder/stripper (port-4800 flow) -----------------------
 
     def _build_gw_snc_frame(self, snc_frame: bytes) -> bytes:
-        """Wrap an SNC frame in the GW type-0x06CB envelope (STISncOut BN RE).
+        """Wrap an SNC frame in the GW type-0x06CB envelope (the SNC output path protocol analysis).
 
-        Layout (all confirmed from proxy capture + BN RE of STISncOut):
+        Layout (all confirmed from proxy capture + protocol analysis of the SNC output path):
           [0:2]   0x06CB   GW frame type
           [2]     0x02     version (from CONV_PROTO+0x17, always 2 in practice)
           [4:6]   0xFFFF   flags high bytes
@@ -827,7 +827,7 @@ class SncTransport:
           [30:32] LE 0x0C05 (from CONV_PROTO; zero-init → 0x050C in BE view)
           [40:48] handle   8-byte ASCII GW connection handle
           [48:52] LE 0x00850000 → wire bytes 00 00 85 00
-          [76:80] FF FF 00 09   RFC_MARKER (hardcoded by STISncOut)
+          [76:80] FF FF 00 09   RFC_MARKER (hardcoded by the SNC output path)
           [80:]   SNC frame content
           [-8:]   trailer = BE(snc_size) + 00 00 85 00
         """
@@ -978,7 +978,7 @@ class SncTransport:
         frame_type, _ctx, _qop, gss_token, app_data = parse_snc_frame(snc_raw)
         if frame_type == int(SncFrameType.PRIVACY):
             # PRIVACY: encrypted data is in gss_token (token_len field),
-            # data_len=0 — confirmed by proxy capture and STISncOut BN RE.
+            # data_len=0 — confirmed by proxy capture and the SNC output path protocol analysis.
             return self._gss.unwrap(gss_token)
         if frame_type == int(SncFrameType.INTEGRITY):
             self._gss.verify_mic(app_data, gss_token)

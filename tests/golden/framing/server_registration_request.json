@@ -1,7 +1,7 @@
 {
   "message_type": "SERVER_REGISTRATION_REQUEST",
   "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 192.168.88.7:3300 (sapgw00); SM59 type-T dest SAPRFC_TEST; pyrfc/NWRFC oracle registering a PROGRAM_ID",
-  "binja_ref": "libsapnwrfc.so::RfcRegisterServer::0x77c550 -> CpicConnection::registerAsServer_SM::0x4ff35c -> SAP_CMREGTP3::0x5a7ba1 -> STIRegTp::0x798a70 -> GwIConnect::0x7a0c80 (0x0601 GW_CONNECT, STIInit-family builder 0x5add9d)",
+  "evidence": "server registration path",
   "ni_header_length": 4,
   "notes": [
     "Registration request = the SAME 0x0601 GW_CONNECT APPCHDR6 frame the client emits; program_id-independent on the wire.",
@@ -17,25 +17,165 @@
     "rfc_marker_direction": "request"
   },
   "field_annotations": [
-    {"offset": 0, "length": 4, "name": "ni_payload_length", "value": "0x000001c5", "type": "fixed", "note": "BE uint32 = 453; NiIWrite BN bswap"},
-    {"offset": 4, "length": 2, "name": "gw_type", "value": "0x0601", "type": "fixed", "note": "GW_CONNECT; STIInit *(p+0x51)=1"},
-    {"offset": 6, "length": 1, "name": "gw_version", "value": "0x02", "type": "fixed", "note": "CONV_PROTO[0x17] NW 7.x"},
-    {"offset": 7, "length": 1, "name": "gw_pad", "value": "0x00", "type": "fixed", "note": "memset"},
-    {"offset": 8, "length": 2, "name": "gw_flags_hi", "value": "0xffff", "type": "fixed", "note": "all builders set flags-hi"},
-    {"offset": 10, "length": 2, "name": "gw_flags_lo", "value": "0x0000", "type": "fixed", "note": "memset"},
-    {"offset": 12, "length": 2, "name": "gw_b10", "value": "0x0100", "type": "fixed", "note": "STIInit [10]=1 (payload offset 10 = file 14)"},
-    {"offset": 14, "length": 6, "name": "gw_zeros_a", "value": "zeros", "type": "fixed", "note": "memset region"},
-    {"offset": 20, "length": 1, "name": "gw_b16", "value": "0xc0", "type": "fixed", "note": "STIInit [16]|=0x80 + CONV_PROTO 0x40"},
-    {"offset": 21, "length": 4, "name": "gw_zeros_b", "value": "zeros", "type": "fixed", "note": "memset"},
-    {"offset": 25, "length": 1, "name": "gw_b21", "value": "0x04", "type": "fixed", "note": "STIInit [21]|=4 (standard client); ACK echoes 0x06"},
-    {"offset": 26, "length": 18, "name": "gw_session_a", "value": "session-specific", "type": "variable", "note": "appc version/buffer fields incl [24:28]=00000175, [28:32]=00000500 — vary by gateway session"},
-    {"offset": 44, "length": 8, "name": "gw_connection_handle", "value": "spaces (request) / ASCII handle (ACK)", "type": "variable", "note": "STIInit strncpy 8 spaces on request; gateway assigns on ACK"},
-    {"offset": 52, "length": 4, "name": "gw_lu_partner_name", "value": "NWRFC", "type": "fixed", "note": "UtilCpyUcToNet partner LU name (payload[48:56]='NWRFC   '); first 4 bytes 'NWRF' deterministic"},
-    {"offset": 56, "length": 4, "name": "gw_lu_partner_name_tail", "value": "C+spaces", "type": "fixed", "note": "'C   ' completing the 8-char 'NWRFC   ' LU name"},
-    {"offset": 60, "length": 17, "name": "gw_session_info", "value": "192.168.. sapdp00 I", "type": "variable", "note": "local IP / NI hostname / service block — session-specific"},
-    {"offset": 77, "length": 3, "name": "gw_b73", "value": "0x010000", "type": "fixed", "note": "payload[73]=0x01 STIInit; trailing zeros"},
-    {"offset": 80, "length": 2, "name": "rfc_marker_hi", "value": "0x0000", "type": "fixed", "note": "payload[76:78]=0x0000"},
-    {"offset": 82, "length": 2, "name": "rfc_marker_lo", "value": "0xffff", "type": "fixed", "note": "payload[78:80]=0xffff request marker; ACK flips to 0x0004"},
-    {"offset": 84, "length": 373, "name": "gw_register_payload", "value": "session-specific (LU name pad, CPIC, time() blob, IP, user, service)", "type": "variable", "note": "tail block: 32B padded LU name, 'CPIC', time() ASCII-hex blob @ payload[122:138], peer IP, OS user, service — all session-specific"}
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
+      "type": "fixed",
+      "note": "BE uint32 = 453; NiIWrite protocol analysis bswap"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x0601",
+      "type": "fixed",
+      "note": "GW_CONNECT; STIInit *(p+0x51)=1"
+    },
+    {
+      "offset": 6,
+      "length": 1,
+      "name": "gw_version",
+      "value": "0x02",
+      "type": "fixed",
+      "note": "CONV_PROTO[0x17] NW 7.x"
+    },
+    {
+      "offset": 7,
+      "length": 1,
+      "name": "gw_pad",
+      "value": "0x00",
+      "type": "fixed",
+      "note": "memset"
+    },
+    {
+      "offset": 8,
+      "length": 2,
+      "name": "gw_flags_hi",
+      "value": "0xffff",
+      "type": "fixed",
+      "note": "all builders set flags-hi"
+    },
+    {
+      "offset": 10,
+      "length": 2,
+      "name": "gw_flags_lo",
+      "value": "0x0000",
+      "type": "fixed",
+      "note": "memset"
+    },
+    {
+      "offset": 12,
+      "length": 2,
+      "name": "gw_b10",
+      "value": "0x0100",
+      "type": "fixed",
+      "note": "STIInit [10]=1 (payload offset 10 = file 14)"
+    },
+    {
+      "offset": 14,
+      "length": 6,
+      "name": "gw_zeros_a",
+      "value": "zeros",
+      "type": "fixed",
+      "note": "memset region"
+    },
+    {
+      "offset": 20,
+      "length": 1,
+      "name": "gw_b16",
+      "value": "0xc0",
+      "type": "fixed",
+      "note": "STIInit [16]|=0x80 + CONV_PROTO 0x40"
+    },
+    {
+      "offset": 21,
+      "length": 4,
+      "name": "gw_zeros_b",
+      "value": "zeros",
+      "type": "fixed",
+      "note": "memset"
+    },
+    {
+      "offset": 25,
+      "length": 1,
+      "name": "gw_b21",
+      "value": "0x04",
+      "type": "fixed",
+      "note": "STIInit [21]|=4 (standard client); ACK echoes 0x06"
+    },
+    {
+      "offset": 26,
+      "length": 18,
+      "name": "gw_session_a",
+      "value": "session-specific",
+      "type": "variable",
+      "note": "appc version/buffer fields incl [24:28]=00000175, [28:32]=00000500 — vary by gateway session"
+    },
+    {
+      "offset": 44,
+      "length": 8,
+      "name": "gw_connection_handle",
+      "value": "spaces (request) / ASCII handle (ACK)",
+      "type": "variable",
+      "note": "STIInit strncpy 8 spaces on request; gateway assigns on ACK"
+    },
+    {
+      "offset": 52,
+      "length": 4,
+      "name": "gw_lu_partner_name",
+      "value": "NWRFC",
+      "type": "fixed",
+      "note": "UtilCpyUcToNet partner LU name (payload[48:56]='NWRFC '); first 4 bytes 'NWRF' deterministic"
+    },
+    {
+      "offset": 56,
+      "length": 4,
+      "name": "gw_lu_partner_name_tail",
+      "value": "C+spaces",
+      "type": "fixed",
+      "note": "'C ' completing the 8-char 'NWRFC ' LU name"
+    },
+    {
+      "offset": 60,
+      "length": 17,
+      "name": "gw_session_info",
+      "value": "192.168.. sapdp00 I",
+      "type": "variable",
+      "note": "local IP / NI hostname / service block — session-specific"
+    },
+    {
+      "offset": 77,
+      "length": 3,
+      "name": "gw_b73",
+      "value": "",
+      "type": "fixed",
+      "note": "payload[73]=0x01 STIInit; trailing zeros"
+    },
+    {
+      "offset": 80,
+      "length": 2,
+      "name": "rfc_marker_hi",
+      "value": "0x0000",
+      "type": "fixed",
+      "note": "payload[76:78]=0x0000"
+    },
+    {
+      "offset": 82,
+      "length": 2,
+      "name": "rfc_marker_lo",
+      "value": "0xffff",
+      "type": "fixed",
+      "note": "payload[78:80]=0xffff request marker; ACK flips to 0x0004"
+    },
+    {
+      "offset": 84,
+      "length": 373,
+      "name": "gw_register_payload",
+      "value": "session-specific (LU name pad, CPIC, time() blob, IP, user, service)",
+      "type": "variable",
+      "note": "tail block: 32B padded LU name, 'CPIC', time() ASCII-hex blob @ payload[122:138], peer IP, OS user, service — all session-specific"
+    }
   ]
 }
