@@ -1,0 +1,68 @@
+name: Bug report
+description: Something behaves incorrectly against an SAP system
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste real credentials, real hostnames, customer data, or an unsanitised
+        pcap.** Redact before posting. If this is a security issue, do not open an issue —
+        see SECURITY.md.
+
+  - type: input
+    id: version
+    attributes:
+      label: saprfclib version
+      placeholder: "0.1.0 (python -c 'import saprfclib; print(saprfclib.__version__)')"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version and OS
+      placeholder: "3.13.1 on Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: input
+    id: sap
+    attributes:
+      label: SAP system release
+      placeholder: "SAP NW 7.58 / S/4HANA 2023 / BTP ABAP environment"
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Connection mode
+      options:
+        - Direct TCP (ashost/sysnr)
+        - SAProuter
+        - Message server (group logon)
+        - SNC
+        - WebSocket RFC (BTP)
+        - RFC server (inbound)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the full traceback if there is one, with credentials redacted.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest snippet that shows the problem, with placeholders for connection parameters.
+      render: python

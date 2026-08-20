@@ -1,0 +1,50 @@
+name: Protocol gap or wrong wire behaviour
+description: A field, type, or frame is unsupported, mis-parsed, or mis-serialized
+labels: ["protocol"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project does not accept guessed wire values. A report that includes observed
+        bytes can be acted on; one that does not usually cannot. See CLAUDE.md for the
+        evidence tiers.
+
+        **Sanitise captures before attaching them** — no credentials, no real hostnames,
+        no customer data.
+
+  - type: textarea
+    id: area
+    attributes:
+      label: Which part of the protocol
+      placeholder: "e.g. DecFloat34 decode, tRFC TID format, 0x0514 session token"
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed bytes
+      description: Hex dump of the frame or field as seen on the wire, with offsets if known.
+      render: text
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What saprfclib produced or expected instead
+
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Evidence tier
+      options:
+        - Live capture (pcap from my own system)
+        - Behavioural probe (server accepted/rejected)
+        - Inference from a neighbouring confirmed field
+    validations:
+      required: true
+
+  - type: input
+    id: sap
+    attributes:
+      label: SAP system release
+      placeholder: "SAP NW 7.58 / S/4HANA 2023"

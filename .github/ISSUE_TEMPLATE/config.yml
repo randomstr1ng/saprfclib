@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/randomstr1ng/saprfclib/security/advisories/new
+    about: Report privately. Never open a public issue for a security problem.
+  - name: Documentation
+    url: https://randomstr1ng.github.io/saprfclib/
+    about: Getting started, cookbook, API reference, and wire-protocol docs.

@@ -1,0 +1,96 @@
+name: Security
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 6 * * 1"   # Weekly Monday 06:00 UTC — catch new CVEs without code change
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy (dependency CVEs + secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin latest
+
+      - name: Dependency vulnerability scan (HIGH/CRITICAL)
+        # Scans pyproject.toml / requirements / installed packages for known CVEs.
+        # OSV + NVD + GitHub Advisory DB. Exit 1 on any HIGH or CRITICAL finding.
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --pkg-types library \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format table \
+            .
+
+      - name: Secret scan
+        # Detects hardcoded credentials, API keys, private keys in source tree.
+        # Any finding fails the build — credentials must never be committed.
+        run: |
+          trivy fs \
+            --scanners secret \
+            --exit-code 1 \
+            --format table \
+            .
+
+  semgrep:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: SAST scan
+        # p/python      — Python security rules (dangerous builtins, injection, etc.)
+        # p/secrets     — hardcoded credential patterns (belt-and-suspenders vs Trivy)
+        # p/trailofbits — Trail of Bits crypto/protocol rules (relevant for RFC wire code)
+        # --error: any finding → exit 1. Suppress false positives inline with # nosemgrep.
+        run: |
+          semgrep \
+            --config p/python \
+            --config p/secrets \
+            --config p/trailofbits \
+            --error \
+            --no-rewrite-rule-ids \
+            src/ tests/
+
+  zizmor:
+    name: Zizmor (GitHub Actions workflow audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Audit workflows
+        run: |
+          pip install zizmor
+          zizmor --persona=regular .github/workflows/
