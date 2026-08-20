@@ -3,8 +3,8 @@
 **Status:** CONFIRMED — live SNC handshake against CommonCryptoLib X.509 passed 2026-08-05
 (partner `p:CN=A4H`). The frame codec and GSS binding are additionally proven offline against
 a mock GSS library.
-**Confidence:** HIGH for every implemented path. SSO2 extension headers remain unimplemented
-and raise `NotImplementedError` — see [Known Gaps](#known-gaps).
+**Confidence:** HIGH for every implemented path. SSO2 token mode remains unimplemented and
+raises `NotImplementedError` — see [Known Gaps](#known-gaps).
 
 ---
 
@@ -59,8 +59,13 @@ Offset  Length  Type        Name          Notes
 `struct` format: `>8sBBHIIHH` (24 bytes fixed header). Implemented in
 `src/saprfclib/snc.py` as `build_snc_frame` / `parse_snc_frame`.
 
-Only the fixed **0x18-byte** header is implemented. A frame with `hdr_len != 0x18`
-(extension headers) is rejected with `NotImplementedError` — see [Known Gaps](#known-gaps).
+`hdr_len` includes the 8-byte eye-catcher, so the standard value is `0x18`. When it is
+larger, the frame carries extension headers and the GSS token starts at `hdr_len` rather
+than at `0x18` — `parse_snc_frame` skips them by seeking to `hdr_len`, so an inbound frame
+with extension headers parses correctly even though their internal layout is undocumented.
+On the outbound side, `_build_snc_ext_header()` emits the mechanism extension header
+(mechanism OID + context ID). What is *not* supported is SSO2 token mode — see
+[Known Gaps](#known-gaps).
 
 ### DoS Guard
 
@@ -206,18 +211,21 @@ The 8-byte eye-catcher at frame offset `0x00` is **`b"SNCFRAME"`** — eight cha
 trailing NUL inside the field. `SncTransport` uses this as its default; the `eye_catcher`
 parameter remains injectable for testing.
 
-### Extension-header format (`hdr_len > 0x18`) — OPEN
+### SSO2 extension headers — OPEN
 
-When `hdr_len` exceeds `0x18` the frame carries extension headers, used for SNC SSO2 tokens and
-extended context data. That layout has not been established, so `saprfclib` implements the
-fixed 24-byte header only:
+Extension headers beyond the mechanism header carry SNC SSO2 tokens and extended context
+data. That layout has not been established, so:
 
-- `parse_snc_frame` raises `NotImplementedError` on any inbound frame with `hdr_len != 0x18`.
 - `snc_sso=True` raises `NotImplementedError` at `SncTransport.__init__`.
+- **No extension-header byte values are invented** beyond the mechanism header, whose OID
+  and context ID are confirmed.
 
-**No extension-header byte values are invented.** Both gates lift only when a live capture
-confirms the layout. **Consequence:** SSO2 ticket-based SNC logon is unavailable; certificate
-and Kerberos SNC are unaffected.
+Inbound frames carrying extension headers are *not* rejected: `parse_snc_frame` seeks past
+them using `hdr_len` and reads the GSS token from there, so an unrecognised extension header
+costs nothing as long as the token position is right.
+
+**Consequence:** SSO2 ticket-based SNC logon is unavailable. Certificate and Kerberos SNC are
+unaffected.
 
 ### CommonCryptoLib GSS mechanism OID — RESOLVED
 
