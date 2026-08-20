@@ -16,7 +16,7 @@ jobs:
     name: Trivy (dependency CVEs + secrets)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -51,12 +51,12 @@ jobs:
     name: Semgrep (SAST)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
@@ -81,16 +81,22 @@ jobs:
     name: Zizmor (GitHub Actions workflow audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Audit workflows
+        # GH_TOKEN enables zizmor's online audits — notably impostor-commit
+        # detection, which verifies that a pinned SHA actually belongs to the
+        # action's repository. Without it those audits are skipped, which is
+        # precisely the risk that pinning by SHA introduces.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           pip install zizmor
           zizmor --persona=regular .github/workflows/
