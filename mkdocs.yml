@@ -1,0 +1,101 @@
+site_name: saprfclib
+site_description: Pure Python SAP RFC protocol implementation — zero native dependencies
+site_author: Julian Petersohn
+site_url: https://randomstr1ng.github.io/saprfclib/
+repo_url: https://github.com/randomstr1ng/saprfclib
+repo_name: randomstr1ng/saprfclib
+edit_uri: edit/main/docs/
+copyright: "Licensed under the Mozilla Public License 2.0. Not affiliated with SAP SE."
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            members_order: source
+            show_submodules: false
+            show_root_heading: true
+            show_root_full_path: false
+            separate_signature: true
+            line_length: 80
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quick-start.md
+    - Connection Options: getting-started/connection-options.md
+    - Error Handling: getting-started/error-handling.md
+  - Cookbook:
+    - Overview: cookbook/index.md
+    - TABLE Parameters: cookbook/table-parameters.md
+    - RFC Server: cookbook/rfc-server.md
+    - tRFC / qRFC Submit: cookbook/trfc-submit.md
+    - Connection Pool: cookbook/connection-pool.md
+    - SNC Connection: cookbook/snc-connection.md
+    - WebSocket RFC: cookbook/websocket-rfc.md
+  - API Reference:
+    - connect(): api/connect.md
+    - Connection: api/connection.md
+    - ConnectionPool: api/connection-pool.md
+    - RfcServer: api/rfc-server.md
+    - Exceptions: api/exceptions.md
+    - Stores: api/stores.md
+    - Codec: api/codec.md
+  - Protocol Docs:
+    - Framing: protocol/framing.md
+    - Serialization: protocol/serialization.md
+    - Handshake: protocol/handshake.md
+    - SNC: protocol/snc.md
+    - tRFC / bgRFC: protocol/trfc.md
+    - RE Methodology: protocol/methodology.md
+
+validation:
+  links:
+    not_found: ignore
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
