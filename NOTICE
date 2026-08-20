@@ -1,0 +1,48 @@
+saprfclib
+Copyright (c) 2026 Julian Petersohn and saprfclib contributors
+
+This product is licensed under the Mozilla Public License, Version 2.0.
+A copy of the license is distributed with this software in the file LICENSE
+and is also available at https://mozilla.org/MPL/2.0/.
+
+--------------------------------------------------------------------------
+Trademarks and affiliation
+--------------------------------------------------------------------------
+
+saprfclib is an independent, community-developed project. It is NOT
+affiliated with, endorsed by, sponsored by, or supported by SAP SE or any
+of its subsidiaries.
+
+SAP, ABAP, SAP NetWeaver, SAProuter, SAP S/4HANA, SAP BTP, and other SAP
+product and service names referenced in this project are trademarks or
+registered trademarks of SAP SE (or an SAP affiliate company) in Germany
+and other countries. They are used here solely for identification and
+descriptive purposes, to state which systems this software interoperates
+with. No claim of ownership is made.
+
+--------------------------------------------------------------------------
+Relationship to SAP software
+--------------------------------------------------------------------------
+
+saprfclib contains no SAP source code, no SAP binaries, no SAP header
+files, and no material copied from the SAP NetWeaver RFC SDK. It links
+against no SAP library at build time or run time.
+
+The protocol behaviour implemented here was derived from analysis of
+network traffic produced by the authors' own systems, for the sole purpose
+of achieving interoperability with SAP systems the operator is licensed to
+use.
+
+Using this software does not grant you any licence to SAP software. You are
+responsible for holding whatever SAP licences your use of an SAP system
+requires, and for complying with the terms of your agreements with SAP.
+
+--------------------------------------------------------------------------
+Third-party dependencies
+--------------------------------------------------------------------------
+
+saprfclib depends on the following third-party Python packages, which are
+distributed under their own licences and are not covered by this NOTICE:
+
+  wsproto  -  MIT License  -  https://github.com/python-hyper/wsproto
+  h11      -  MIT License  -  https://github.com/python-hyper/h11
