@@ -118,6 +118,40 @@ _DECF_GAP_MESSAGE = (
 # Types the SAP SDK documents as not serialized on the wire.
 _OUT_OF_SCOPE = frozenset({RFCTYPE_NULL, RFCTYPE_ABAPOBJECT, RFCTYPE_XMLDATA})
 
+# Byte-like types whose "unset" value is empty bytes rather than an empty string.
+_BYTE_LIKE_TYPES = frozenset({RFCTYPE_BYTE, RFCTYPE_XSTRING})
+
+
+def _default_field_value(child: FieldDesc) -> Any:
+    """Return the initial value for a structure field the caller left unset.
+
+    ABAP initialises every field of a work area before an RFC fills it, so a
+    caller supplying only the fields they care about is the normal case — most
+    SAP function modules are written expecting it (RFC_READ_TABLE's FIELDS rows
+    are the canonical example: callers set FIELDNAME and nothing else).
+
+    The value is chosen so the type's own encoder produces the correct padding
+    rather than leaving the buffer's NUL fill in place: CHAR pads with blanks and
+    NUM pads with zeros (Pitfall: fixed-width character fields are blank-padded,
+    numeric fields zero-padded — the two are not interchangeable), so both start
+    from an empty string and let ``_encode_uc_fixed`` do the padding.
+    """
+    rfctype = child.rfctype
+    if rfctype == RFCTYPE_STRUCTURE:
+        return {}
+    if rfctype == RFCTYPE_TABLE:
+        return []
+    if rfctype in _BYTE_LIKE_TYPES:
+        return b""
+    if rfctype == RFCTYPE_FLOAT:
+        return 0.0
+    if rfctype == RFCTYPE_BCD:
+        return Decimal(0)
+    if rfctype in _INT_FORMATS or rfctype == RFCTYPE_INT1:
+        return 0
+    # CHAR / DATE / TIME / NUM / STRING and anything else character-shaped.
+    return ""
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -381,13 +415,26 @@ def _encode_structure(
     sized to the layout's total byte size, zero-padding any gaps. Recurses for
     nested STRUCTURE; nested TABLE fields encode to their full variable extent
     (the descriptor's row size bounds a single embedded row in Phase 2 tests).
+
+    Fields absent from ``value`` are filled with their type's initial value via
+    ``_default_field_value`` and encoded normally, so a partial row dict yields a
+    correctly padded work area instead of raising KeyError or leaving NUL fill
+    where the wire expects blanks.
     """
     size = _row_size(type_desc, unicode_mode)
     buf = bytearray(size)
     for child in type_desc.fields:
         child.unicode_mode = unicode_mode
         offset, _ = _field_span(child)
-        child_value = value[child.name]
+        if child.name in value:
+            child_value = value[child.name]
+        else:
+            if child.rfctype in (RFCTYPE_STRUCTURE, RFCTYPE_TABLE) and child.type_desc is None:
+                # No layout to lay out, and the caller supplied nothing: the
+                # zero fill already in ``buf`` is the initial value. Encoding a
+                # supplied value without a type_desc still asserts below.
+                continue
+            child_value = _default_field_value(child)
         if child.rfctype == RFCTYPE_STRUCTURE:
             assert child.type_desc is not None
             raw = _encode_structure(child_value, child.type_desc, unicode_mode)
