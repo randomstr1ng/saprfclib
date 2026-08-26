@@ -30,7 +30,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Hatch
-        run: pip install hatch "hatchling>=1.21,<1.32"
+        run: pip install hatch "hatchling>=1.21,<1.33"
 
       - name: Test before release (offline suite)
         run: hatch run test -m "not integration"
