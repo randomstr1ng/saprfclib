@@ -1273,13 +1273,30 @@ def test_logon_language_is_uppercased() -> None:
     assert _tlv_ext_value(tlv, 0x0011) == b"D"
 
 
-@pytest.mark.parametrize("bad", ["EN", "", "DE", "ENG"])
-def test_two_character_iso_codes_are_rejected(bad: str) -> None:
-    """ISO codes need the SAP kernel language table, which this project does not carry."""
+@pytest.mark.parametrize(("given", "expected"), [("EN", b"E"), ("DE", b"D"), ("ES", b"S")])
+def test_two_character_iso_codes_are_converted_before_the_wire(given: str, expected: bytes) -> None:
+    """SDK parity: LANG accepts an ISO code, the frame still carries one character."""
     from saprfclib.connection import _encode_logon_language
 
-    with pytest.raises(ValueError, match="one-character SAP language code"):
+    assert _encode_logon_language(given) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "ENG", "xx"])
+def test_unusable_language_codes_are_rejected(bad: str) -> None:
+    """Wrong length, or a two-character code naming no known SAP language."""
+    from saprfclib.connection import _encode_logon_language
+
+    with pytest.raises(ValueError):
         _encode_logon_language(bad)
+
+
+def test_logon_request_accepts_an_iso_language() -> None:
+    """connect(lang="EN") reaches the wire as b"E" on both language tags."""
+    tlv = Connection._build_logon_request(
+        client="001", user="DEVELOPER", passwd="secret", lang="EN", seed=1
+    )
+    assert _tlv_ext_value(tlv, 0x0115) == b"E"
+    assert _tlv_ext_value(tlv, 0x0011) == b"E"
 
 
 def test_connect_accepts_lang_keyword() -> None:

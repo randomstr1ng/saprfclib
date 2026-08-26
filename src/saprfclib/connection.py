@@ -60,6 +60,7 @@ from saprfclib.invoke import (
     build_trfc_request,
     parse_invoke_response,
 )
+from saprfclib.language import normalize_logon_language
 from saprfclib.metadata import (
     _CHAR_LIKE_TYPES,
     _EXID_TO_RFCTYPE,
@@ -269,33 +270,17 @@ def _tlv(tag: int, value: bytes) -> bytes:
 
 
 def _encode_logon_language(lang: str) -> bytes:
-    """Validate a logon language and return its wire bytes for tags 0x0011/0x0115.
+    """Return the wire bytes for logon TLV tags 0x0011 / 0x0115.
 
-    The wire carries the one-character SAP language code as a single ASCII byte,
-    on both tags. Source: golden fixture
-    tests/golden/framing/logon_request.bin — 0x0115 and 0x0011 each hold b"E" for
-    a logon in English.
+    The wire carries the one-character SAP language code as a single ASCII byte on
+    both tags. Source: golden fixture tests/golden/framing/logon_request.bin —
+    0x0115 and 0x0011 each hold b"E" for a logon in English.
 
-    Two-character ISO codes are rejected rather than translated. The SAP RFC SDK
-    accepts them on its LANG option, but only by converting them to the same
-    one-character SAP code through the SAP kernel's language table before the
-    logon frame is built; that mapping is not derivable by rule (EN maps to E and
-    DE to D, but ES maps to S) and the table is SAP material this project does not
-    carry. Passing the SAP code directly is the supported form here.
+    A two-character ISO code is converted to that one character first, matching
+    what the SAP RFC SDK does with its LANG connection option (see
+    saprfclib.language).
     """
-    if not isinstance(lang, str):
-        raise ValueError(f"lang must be a str, got {type(lang).__name__!r}")
-    code = lang.strip().upper()
-    if len(code) != 1:
-        raise ValueError(
-            f"lang must be the one-character SAP language code, got {lang!r}. "
-            f"Two-character ISO codes are not accepted — use 'E' for English, "
-            f"'D' for German, 'S' for Spanish, and so on."
-        )
-    try:
-        return code.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"lang must be an ASCII SAP language code, got {lang!r}") from exc
+    return normalize_logon_language(lang).encode("ascii")
 
 
 def _tlv_ext(tag: int, value: bytes) -> bytes:

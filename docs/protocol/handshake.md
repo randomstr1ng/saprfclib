@@ -192,16 +192,25 @@ function call — it is the protocol-level logon probe. The server processes the
 returns the logon response (frame 15). `RFCPING` means "validate this connection".
 
 **Note on the logon language (tags 0x0011 / 0x0115):** the wire carries the **one-character
-SAP language code** as a single ASCII byte — `"E"` in this capture. `saprfclib.connect(lang=…)`
-takes that one-character code and sends it verbatim.
+SAP language code** as a single ASCII byte — `"E"` on both tags in this capture. That single
+character is the whole of what the protocol transports; there is no two-character form on the
+wire.
 
-Two-character ISO codes are rejected rather than translated. The SAP RFC SDK does accept them
-on its `LANG` option, but only as a client-side convenience: it converts a code longer than one
-character to the same one-character SAP code through the SAP kernel's language table before the
-logon frame is built, and raises `RFC_INVALID_PARAMETER` when the code will not map. That
-mapping is not derivable by rule — `EN` maps to `E` and `DE` to `D`, but `ES` maps to `S` — and
-the table itself is SAP material this project does not carry, so `saprfclib` requires the SAP
-code directly.
+`saprfclib.connect(lang=…)` accepts either the one-character SAP code or the two-character ISO
+code, matching the SDK's `LANG` connection option. A one-character code is passed through
+untouched; a two-character code is converted to its SAP code first. Both end up as one byte in
+the frame.
+
+The SDK behaves the same way. Its `LANG` handling converts any input longer than one character
+through the SAP kernel's language routine before the logon frame is built, and refuses the
+connection with `RFC_INVALID_PARAMETER` when the code will not map. `pyrfc` adds nothing here —
+it hands `LANG` straight to `RfcOpenConnection` and lets the SDK convert, while re-exporting the
+SDK's two public conversion calls as `language_iso_to_sap` / `language_sap_to_iso`.
+
+The mapping is not derivable by rule. `EN`→`E` and `DE`→`D` look like a first-letter rule, but
+`ES`→`S`, `DA`→`K`, `FI`→`U`, `EL`→`G` and `ZH`→`1` are not. saprfclib carries the table in
+`saprfclib.language` and exposes the same two helper names pyrfc uses. See that module's header
+for how the mapping was established and why an unknown code raises there but not in the SDK.
 
 **Note on parsing the RFCPING response:** it is an ordinary RFC response and uses the full wire
 dialect — a GW frame, records that may use the extended-length form, and a repeated close tag

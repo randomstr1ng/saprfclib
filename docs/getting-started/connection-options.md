@@ -112,3 +112,56 @@ conn = saprfclib.connect(
     ws_proxy_port=3128,
 )
 ```
+
+## Logon language
+
+The `lang` parameter sets the SAP logon language. It accepts either form, matching
+the `LANG` option of the SAP NetWeaver RFC SDK:
+
+```python
+conn = saprfclib.connect(
+    ashost="10.0.1.5",
+    sysnr=0,
+    client="100",
+    user="USER",
+    passwd="pass",
+    lang="EN",        # two-character ISO code
+)
+
+conn = saprfclib.connect(..., lang="E")    # or the one-character SAP code
+```
+
+`lang` defaults to `"E"` (English). Input is case-insensitive.
+
+The RFC logon frame itself only ever carries **one character** — the SAP language
+code from the ABAP `SPRAS` domain. A two-character ISO code is converted before the
+frame is built, exactly as the C SDK does it, so both spellings above produce
+identical bytes on the wire.
+
+!!! warning "The ISO code is not the first letter of the SAP code"
+    `EN`→`E` and `DE`→`D` suggest a rule that does not hold. Spanish is `ES`→`S`,
+    Danish is `DA`→`K`, Finnish is `FI`→`U`, Greek is `EL`→`G`, and Chinese is
+    `ZH`→`1`. Do not truncate an ISO code by hand — pass it whole and let
+    `saprfclib` convert it.
+
+### Converting between the two forms
+
+Two helpers are exported for callers migrating from `pyrfc`, which exposes the same
+names:
+
+```python
+import saprfclib
+
+saprfclib.language_iso_to_sap("EN")   # "E"
+saprfclib.language_iso_to_sap("ES")   # "S"
+saprfclib.language_sap_to_iso("1")    # "ZH"
+```
+
+An unknown code raises `ValueError`. This differs deliberately from the C SDK, whose
+forward conversion returns an undefined character for an unrecognised ISO code rather
+than reporting an error.
+
+A **one-character** code is never looked up — it is taken at face value and sent as
+given. Systems can have custom languages that appear in no standard table, and the
+SDK does not validate one-character input either. The trade-off is that a typo in a
+one-character code reaches the server rather than being caught locally.

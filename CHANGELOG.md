@@ -9,9 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `connect()` and `connect_async()` accept `lang`, the logon language, sent on logon TLV
-  tag 0x0011. Takes the one-character SAP code (`"E"`, `"D"`, `"S"`, …), which is what the
-  wire carries; two-character ISO codes raise `ValueError` (#8).
+- `connect()` and `connect_async()` accept `lang`, the logon language. Takes either the
+  one-character SAP code (`"E"`) or the two-character ISO code (`"EN"`), matching the `LANG`
+  option of the SAP NetWeaver RFC SDK. The logon frame carries one character on TLV tags
+  0x0011 and 0x0115 either way; an ISO code is converted first (#8).
+- `saprfclib.language_iso_to_sap()` and `saprfclib.language_sap_to_iso()` convert between the
+  two forms, matching the helper names `pyrfc` exposes. Unlike the C SDK's forward conversion,
+  an unrecognised code raises `ValueError` instead of returning an undefined character.
 
 ### Fixed
 

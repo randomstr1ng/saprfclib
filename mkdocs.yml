@@ -69,6 +69,7 @@ nav:
     - Connection: api/connection.md
     - ConnectionPool: api/connection-pool.md
     - RfcServer: api/rfc-server.md
+    - Logon Language: api/language.md
     - Exceptions: api/exceptions.md
     - Stores: api/stores.md
     - Codec: api/codec.md
