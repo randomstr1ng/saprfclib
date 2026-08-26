@@ -165,3 +165,37 @@ A **one-character** code is never looked up — it is taken at face value and se
 given. Systems can have custom languages that appear in no standard table, and the
 SDK does not validate one-character input either. The trade-off is that a typo in a
 one-character code reaches the server rather than being caught locally.
+
+## Unknown keyword arguments
+
+`Connection.call()` matches keyword arguments against the function module's
+interface. `strict_params` decides what happens to a name the interface does not
+declare:
+
+```python
+conn = saprfclib.connect(...)                       # default: drop + warn
+conn = saprfclib.connect(..., strict_params=True)   # raise ValueError
+```
+
+The default is **lenient**, so code ported from `pyrfc` that passes a superset of
+kwargs across differing SAP releases keeps working:
+
+```python
+conn.call("SXPG_STEP_XPG_START", COMMANDNAME="LIST_DB2DUMP", MXROW=100)
+# MXROW is not in the interface -> dropped, warning logged, call proceeds
+```
+
+Each dropped argument is logged. The first occurrence of a given
+(function, argument-names) combination logs at `WARNING`; repeats fall to `DEBUG`,
+so a long-running loop leaves a record without flooding its log.
+
+!!! warning "A dropped argument changes what the call does"
+    The function then runs *without* it and returns a result you did not ask for,
+    and nothing in the response indicates an argument went missing. In the example
+    above, `SXPG_STEP_XPG_START` runs with no row limit. Watch the warnings, and
+    prefer `strict_params=True` wherever a dropped argument would change the result.
+
+For reference, both `pyrfc` and the SAP NetWeaver RFC SDK **raise** here — the SDK's
+`RfcGetParameterDescByName` returns `RFC_INVALID_PARAMETER` for a name it cannot
+resolve, and `pyrfc` propagates that. `strict_params=True` matches them; the lenient
+default is a deliberate convenience for migration.

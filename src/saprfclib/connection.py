@@ -60,7 +60,9 @@ from saprfclib.invoke import (
     build_trfc_request,
     decompress_table_stream,
     dm_table_ids,
+    drop_unknown_parameters,
     parse_invoke_response,
+    unknown_parameters,
 )
 from saprfclib.language import normalize_logon_language
 from saprfclib.metadata import (
@@ -1461,6 +1463,45 @@ def _strip_gw_header(resp: bytes) -> bytes:
     return resp
 
 
+def _filter_call_params(
+    func_name: str,
+    desc: FunctionDesc,
+    params: dict[str, Any],
+    *,
+    strict: bool,
+    seen: set[tuple[str, tuple[str, ...]]],
+) -> dict[str, Any]:
+    """Apply the connection's unknown-parameter policy to one call's arguments.
+
+    ``strict=True`` leaves ``params`` untouched, so build_invoke_request raises and
+    names what it did not recognise. ``strict=False`` drops the unrecognised names
+    and returns the rest, matching what callers porting from pyrfc expect when they
+    pass a superset of kwargs across differing SAP releases.
+
+    Dropping an argument is not free - the function then runs without it and returns
+    a result the caller did not ask for, with nothing in the response to say so - so
+    lenient mode is noisy on purpose. The first occurrence of each
+    (function, dropped-names) combination logs at WARNING and later repeats drop to
+    DEBUG, which keeps a long-running loop from flooding its log while still leaving
+    a record that the arguments never reached the server.
+    """
+    unknown = unknown_parameters(desc, params)
+    if not unknown or strict:
+        return params
+
+    key = (func_name.upper(), tuple(unknown))
+    message = (
+        "%s: dropping parameter(s) %s - not in the function interface "
+        "(strict_params=False). The call proceeds without them."
+    )
+    if key in seen:
+        _logger.debug(message, func_name.upper(), ", ".join(unknown))
+    else:
+        seen.add(key)
+        _logger.warning(message, func_name.upper(), ", ".join(unknown))
+    return drop_unknown_parameters(desc, params)
+
+
 _DFIES_ROW_BYTES = 138  # wire-confirmed DFIES row layout; the stride may be 140
 _GFI_ROW_BYTES = 402  # the documented 12-column PARAMS layout; the wire stride may
 # exceed it (alignment padding), so it is a minimum, never the stride itself.
@@ -1826,8 +1867,13 @@ class Connection:
     ``get_connection_attributes`` are available; ``close`` is safe in any state.
     """
 
-    def __init__(self, transport: Transport) -> None:
+    def __init__(self, transport: Transport, *, strict_params: bool = False) -> None:
         self._transport = transport
+        # Unknown-parameter policy (issue #24). Default False mirrors what callers
+        # porting from pyrfc expect; set True to have call() reject an argument the
+        # function interface does not declare.
+        self._strict_params = strict_params
+        self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self._session = Session()
         self._lock = threading.Lock()
         self._cache = MetadataCache()  # in-process FunctionDesc cache (META-03)
@@ -1865,6 +1911,8 @@ class Connection:
         inst._ws_invoke_counter = 2
         inst._async_conn = async_conn
         inst._loop_thread = loop_thread
+        inst._strict_params = async_conn._strict_params
+        inst._dropped_params_seen = async_conn._dropped_params_seen
         return inst
 
     # ------------------------------------------------------------------ #
@@ -3021,8 +3069,15 @@ class Connection:
                     result = _ws_parse_invoke_response(response, desc)
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
-                    request_tlv = build_invoke_request(func_name, desc, dict(params))
-                    dm_names = dm_table_ids(desc, dict(params))
+                    call_params = _filter_call_params(
+                        func_name,
+                        desc,
+                        dict(params),
+                        strict=self._strict_params,
+                        seen=self._dropped_params_seen,
+                    )
+                    request_tlv = build_invoke_request(func_name, desc, call_params)
+                    dm_names = dm_table_ids(desc, call_params)
                     handle = self._session.handle or b"        "
                     request = self._build_invoke_frame(handle, request_tlv)
                     try:
@@ -3729,6 +3784,7 @@ def connect(
     passwd: str,
     *,
     lang: str = _DEFAULT_LANG,
+    strict_params: bool = False,
     timeout: float | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
@@ -3772,10 +3828,17 @@ def connect(
         is out of scope for Phase 7.
       - direct: ``port = 3300 + int(sysnr)`` (gateway port), connect_tcp, handshake.
 
-    ``lang`` is the logon language as the one-character SAP code ('E' English,
-    'D' German, 'S' Spanish, …), sent on logon TLV tag 0x0011. Two-character ISO
-    codes raise ValueError — see _encode_logon_language for why the ISO mapping is
-    not performed here.
+    ``lang`` is the logon language. Accepts the one-character SAP code ('E' English,
+    'D' German, 'S' Spanish, …) or the two-character ISO code ('EN', 'DE', 'ES'); an
+    ISO code is converted before the logon frame is built, matching the SDK's LANG
+    option.
+
+    ``strict_params`` controls what ``call()`` does with a keyword argument the
+    function interface does not declare. The default (False) drops it and logs a
+    warning, which is what callers porting from pyrfc expect when they pass a
+    superset of kwargs across differing SAP releases. Set True to raise ValueError
+    instead — worth doing when a dropped argument would change the result, since the
+    server has no way to tell you an argument never arrived.
 
     The SAProuter and message-server wire bytes are [ASSUMED] (router.py) and
     gated behind the plan 03-03 blocking human-verify checkpoint. ``passwd``,
@@ -3831,7 +3894,7 @@ def connect(
             verify=ws_tls_verify,
             timeout=timeout,
         )
-        conn = Connection(transport)  # type: ignore[arg-type]
+        conn = Connection(transport, strict_params=strict_params)  # type: ignore[arg-type]
     elif snc_lib is not None:
         # SNC (SEC-02/03/04/06, D-13): SAP protocol order requires the NI
         # version exchange to complete on the plain channel BEFORE the GSS
@@ -3866,7 +3929,7 @@ def connect(
 
         # Step 3: Connection with the pre-versioned session so _handshake()
         # resumes from NI_VERSIONED (skips the NI leg, starts at GW connect).
-        conn = Connection(transport)  # type: ignore[arg-type]
+        conn = Connection(transport, strict_params=strict_params)  # type: ignore[arg-type]
         conn._session = _snc_sess
         conn._snc_mode = True
     else:
@@ -3888,6 +3951,7 @@ def connect(
         _user = user
         _passwd = passwd
         _lang = lang
+        _strict = strict_params
         _sysnr = int(sysnr)
         _max_retries = max_retries
         _retry_delay = retry_delay
@@ -3909,6 +3973,7 @@ def connect(
                 retry_delay=_retry_delay,
                 tid_store=_tid_store,
                 unit_store=_unit_store,
+                strict_params=_strict,
             )
             await ac._handshake(
                 client=_client,
@@ -3979,10 +4044,14 @@ class AsyncConnection:
         retry_delay: float = 1.0,
         tid_store: TidStore | None = None,
         unit_store: UnitStore | None = None,
+        strict_params: bool = False,
     ) -> None:
         self._transport = transport
         self._session = Session()
         self._lock = asyncio.Lock()
+        # Unknown-parameter policy (issue #24) - see Connection.__init__.
+        self._strict_params = strict_params
+        self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self._cache = MetadataCache()
         self._struct_desc_cache: dict[str, TypeDesc] = {}
         # Retry + durable-store attributes (D-01/D-02/D-03/D-03b)
@@ -4261,8 +4330,15 @@ class AsyncConnection:
                         self._cache.put(sys_id, desc)
 
                 # Classic GW-framed invoke.
-                request_tlv = build_invoke_request(func_name, desc, dict(params))
-                dm_names = dm_table_ids(desc, dict(params))
+                call_params = _filter_call_params(
+                    func_name,
+                    desc,
+                    dict(params),
+                    strict=self._strict_params,
+                    seen=self._dropped_params_seen,
+                )
+                request_tlv = build_invoke_request(func_name, desc, call_params)
+                dm_names = dm_table_ids(desc, call_params)
                 handle = self._session.handle or b"        "
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 try:
@@ -4765,6 +4841,7 @@ async def connect_async(
     passwd: str,
     *,
     lang: str = _DEFAULT_LANG,
+    strict_params: bool = False,
     timeout: float | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
@@ -4795,8 +4872,10 @@ async def connect_async(
         tid_store:    Pluggable TidStore for durable tRFC/qRFC parking (D-03b).
         unit_store:   Pluggable UnitStore for durable bgRFC parking (D-03b).
 
-    ``lang`` is the logon language as the one-character SAP code, matching
-    saprfclib.connect(); two-character ISO codes raise ValueError.
+    ``lang`` is the logon language — one-character SAP code or two-character ISO
+    code, matching saprfclib.connect(). ``strict_params`` likewise mirrors
+    saprfclib.connect(): False (default) drops undeclared keyword arguments with a
+    warning, True raises.
     """
     if snc_lib is not None or wshost is not None:
         raise NotImplementedError(
@@ -4834,6 +4913,7 @@ async def connect_async(
         retry_delay=retry_delay,
         tid_store=tid_store,
         unit_store=unit_store,
+        strict_params=strict_params,
     )
     await conn._handshake(
         client=client,

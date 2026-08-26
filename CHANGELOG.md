@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `connect(strict_params=...)` and `connect_async(strict_params=...)` control what
+  `call()` does with a keyword argument the function interface does not declare.
+  The default, `False`, drops it and logs a warning so code ported from `pyrfc` that
+  passes a superset of kwargs keeps working; `True` raises `ValueError`. Note that
+  both `pyrfc` and the SAP NW RFC SDK raise in this situation — the lenient default is
+  a deliberate convenience, and a dropped argument changes what the call does (#24).
+
+### Fixed
+
+- The invoke-frame footer packed the TLV body length as a 16-bit integer, so any
+  request body over 64 KB raised `struct.error` — a real ABAP program submitted
+  through `/SAPDS/RFC_ABAP_INSTALL_RUN` is enough to hit it. The field is 32-bit;
+  verified against all nine request fixtures, whose footers are unchanged (#27).
+
 ## [0.1.1] - 2026-08-26
 
 Bug-fix release. Every fix below is verified against a live SAP S/4HANA system

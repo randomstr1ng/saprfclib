@@ -163,6 +163,22 @@ def tlv_record(tag: int, data: bytes = b"") -> bytes:
 # --------------------------------------------------------------------------- #
 
 
+def unknown_parameters(desc: FunctionDesc, params: dict[str, Any]) -> list[str]:
+    """Return the caller-supplied names the function interface does not declare.
+
+    Names are matched case-insensitively, as ``build_invoke_request`` matches them.
+    Returned in sorted order so messages are stable.
+    """
+    known = {f.name.upper() for f in desc.parameters}
+    return sorted(name for name in params if name.upper() not in known)
+
+
+def drop_unknown_parameters(desc: FunctionDesc, params: dict[str, Any]) -> dict[str, Any]:
+    """Return ``params`` without the names the function interface does not declare."""
+    known = {f.name.upper() for f in desc.parameters}
+    return {name: value for name, value in params.items() if name.upper() in known}
+
+
 def dm_table_ids(desc: FunctionDesc, params: dict[str, Any]) -> dict[int, str]:
     """Return ``{dm_table_id: param_name}`` for the tables this call sends with rows.
 
@@ -254,12 +270,12 @@ def build_invoke_request(
     # would simply never reach it — the value would be dropped from the request with
     # no diagnostic, and the server would run the function without it. Fail loudly
     # instead: silently omitting an argument the caller passed is the worst outcome.
-    known = {f.name.upper() for f in desc.parameters}
-    unknown = sorted(set(params_upper) - known)
+    unknown = unknown_parameters(desc, params)
     if unknown:
         raise ValueError(
             f"{func_name}: parameter(s) {', '.join(unknown)} are not in the function "
-            f"interface; known parameters are {', '.join(sorted(known)) or '(none)'}"
+            f"interface; known parameters are "
+            f"{', '.join(sorted(f.name for f in desc.parameters)) or '(none)'}"
         )
     # DM table IDs assigned by the shared helper so the response parser can map
     # tag 0x0335 back to a parameter name (see dm_table_ids).

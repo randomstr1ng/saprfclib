@@ -18,6 +18,7 @@ table tag sequence 0x0301 / 0x0330 / 0x0302 / 0x0304, never as 0x0203 values.
 
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
 
@@ -957,3 +958,101 @@ def test_int4_encoder_reproduces_the_captured_bytes() -> None:
     field = FieldDesc("START_VALUE", 8, 4, 0, 4, 0, 0, direction=RFC_IMPORT)
     assert encode(8, 10, field) == bytes.fromhex("0a000000")
     assert encode(8, 1, field) == bytes.fromhex("01000000")
+
+
+# --------------------------------------------------------------------------- #
+# strict_params — unknown keyword arguments (issue #24)
+# --------------------------------------------------------------------------- #
+
+
+def _sxpg_desc() -> FunctionDesc:
+    return FunctionDesc(
+        "SXPG_STEP_XPG_START",
+        [FieldDesc("COMMANDNAME", RFCTYPE_CHAR, 10, 0, 20, 0, 0, direction=RFC_IMPORT)],
+    )
+
+
+def test_lenient_mode_drops_undeclared_parameters() -> None:
+    """Default policy: the call proceeds without the unrecognised argument."""
+    from saprfclib.connection import _filter_call_params
+
+    out = _filter_call_params(
+        "SXPG_STEP_XPG_START",
+        _sxpg_desc(),
+        {"COMMANDNAME": "LIST_DB2DUMP", "MXROW": 100},
+        strict=False,
+        seen=set(),
+    )
+    assert out == {"COMMANDNAME": "LIST_DB2DUMP"}
+
+
+def test_strict_mode_leaves_params_for_the_builder_to_reject() -> None:
+    """strict=True passes them through so build_invoke_request names them."""
+    from saprfclib.connection import _filter_call_params
+
+    params = {"COMMANDNAME": "LIST_DB2DUMP", "MXROW": 100}
+    assert (
+        _filter_call_params(
+            "SXPG_STEP_XPG_START", _sxpg_desc(), dict(params), strict=True, seen=set()
+        )
+        == params
+    )
+    with pytest.raises(ValueError, match="MXROW"):
+        build_invoke_request("SXPG_STEP_XPG_START", _sxpg_desc(), params)
+
+
+def test_dropping_warns_once_then_debugs(caplog: pytest.LogCaptureFixture) -> None:
+    """A dropped argument must be visible, without flooding a long-running loop.
+
+    Silent parameter loss is the failure mode that makes a call return results the
+    caller never asked for, so the first occurrence is a WARNING; repeats of the same
+    (function, names) combination fall to DEBUG.
+    """
+    from saprfclib.connection import _filter_call_params
+
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    params = {"COMMANDNAME": "X", "MXROW": 100}
+    with caplog.at_level(logging.DEBUG, logger="saprfclib.connection"):
+        for _ in range(3):
+            _filter_call_params(
+                "SXPG_STEP_XPG_START", _sxpg_desc(), dict(params), strict=False, seen=seen
+            )
+    levels = [r.levelno for r in caplog.records]
+    assert levels.count(logging.WARNING) == 1
+    assert levels.count(logging.DEBUG) == 2
+    assert "MXROW" in caplog.records[0].getMessage()
+
+
+def test_a_different_function_warns_again() -> None:
+    """Deduplication is per function and per set of names, not global."""
+    from saprfclib.connection import _filter_call_params
+
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for func in ("F_ONE", "F_TWO"):
+        _filter_call_params(func, _sxpg_desc(), {"MXROW": 1}, strict=False, seen=seen)
+    assert seen == {("F_ONE", ("MXROW",)), ("F_TWO", ("MXROW",))}
+
+
+def test_known_parameters_survive_both_modes() -> None:
+    """The policy must never touch an argument the interface declares."""
+    from saprfclib.connection import _filter_call_params
+
+    for strict in (True, False):
+        out = _filter_call_params(
+            "SXPG_STEP_XPG_START",
+            _sxpg_desc(),
+            {"commandname": "lower-case is fine"},
+            strict=strict,
+            seen=set(),
+        )
+        assert out == {"commandname": "lower-case is fine"}
+
+
+def test_strict_params_is_exposed_and_defaults_to_false() -> None:
+    """SDK-parity default; opt in to strictness."""
+    import inspect
+
+    from saprfclib.connection import connect, connect_async
+
+    for fn in (connect, connect_async):
+        assert inspect.signature(fn).parameters["strict_params"].default is False
