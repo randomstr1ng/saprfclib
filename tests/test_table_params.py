@@ -737,3 +737,85 @@ def test_exception_rows_are_recognised_deliberately() -> None:
         assert is_exception_row(_params_row(parameter=name, paramclass="X", exid=""))
     assert not is_exception_row(_params_row(parameter="FIELDS", paramclass="T", exid="u"))
     assert not is_exception_row(_params_row(parameter="QUERY_TABLE", paramclass="I", exid="C"))
+
+
+# --------------------------------------------------------------------------- #
+# Compressed function metadata
+# --------------------------------------------------------------------------- #
+#
+# The server compresses a table once it passes roughly 8 KB, so any function module
+# with enough parameters — most BAPIs — sends its PARAMS table as SAPCOMPRESS
+# fragments. Handling only the per-row form left every one of them with an empty
+# descriptor and no diagnostic.
+
+
+def _gfi_fixture() -> bytes:
+    return (GOLDEN / "gfi_compressed_params_response.bin").read_bytes()[80:]
+
+
+def test_compressed_params_table_yields_every_row() -> None:
+    """All 44 rows of BAPI_USER_GET_DETAIL's metadata are recovered."""
+    from saprfclib.connection import _parse_gfi_params_rows
+
+    rows = _parse_gfi_params_rows(_gfi_fixture(), unicode_mode=True)
+    assert len(rows) == 44
+    assert rows[0]["PARAMETER"] == "ADDRESS"
+    assert rows[0]["TABNAME"] == "BAPIADDR3"
+
+
+def test_compressed_params_rows_all_parse_into_field_descs() -> None:
+    """Row slicing is aligned — a wrong stride would corrupt every row after the first."""
+    from saprfclib.connection import _parse_gfi_params_rows
+
+    rows = _parse_gfi_params_rows(_gfi_fixture(), unicode_mode=True)
+    descs = [_parse_params_row(r) for r in rows]
+    assert len(descs) == 44
+    assert {d.name for d in descs} >= {"ADDRESS", "ADMINDATA", "ALIAS", "COMPANY"}
+
+
+def test_compressed_rows_are_sliced_by_the_declared_stride() -> None:
+    """0x0302 declares 404 for a 402-byte layout; the stride comes from the wire."""
+    from saprfclib.connection import _GFI_ROW_BYTES, _table_row_buffers
+
+    buffers = _table_row_buffers(_gfi_fixture(), _GFI_ROW_BYTES, "PARAMS")
+    assert len(buffers) == 44
+    assert len(buffers[0]) == 404  # not the documented 402
+    assert sum(len(b) for b in buffers) == 404 * 44
+
+
+def test_lz_records_are_fragments_of_one_stream() -> None:
+    """Each 0x0305 record decompresses to nothing on its own; joined they decode.
+
+    Guards the specific mistake of treating every record as a self-contained block,
+    which is what the reader used to do.
+    """
+    from saprfclib.invoke import decompress_table_stream
+
+    chunks = [val for tag, val in _walk_tlv(_gfi_fixture()) if tag == 0x0305]
+    assert len(chunks) == 8
+    assert all(len(c) == 250 for c in chunks)
+    with pytest.raises(ValueError):
+        decompress_table_stream(chunks[:1], "PARAMS")
+    assert len(decompress_table_stream(chunks, "PARAMS")) == 17776
+
+
+def test_per_row_records_are_not_resliced() -> None:
+    """Uncompressed rows keep their own boundaries even when 0x0302 is wider.
+
+    A structure-definition response declared row_size 140 with 138-byte records;
+    re-slicing by the stride would misalign everything after the first row.
+    """
+    from saprfclib.connection import _GFI_ROW_BYTES, _table_row_buffers
+    from saprfclib.invoke import tlv_record
+
+    row = b"\x00" * 402
+    stream = (
+        tlv_record(0x0301, "PARAMS".encode("utf-16-le"))
+        + tlv_record(0x0302, struct.pack(">II", 404, 3))  # stride wider than records
+        + tlv_record(0x0303, row)
+        + tlv_record(0x0303, row)
+        + tlv_record(0x0303, row)
+        + struct.pack(">HH", 0xFFFF, 0)
+    )
+    buffers = _table_row_buffers(stream, _GFI_ROW_BYTES, "PARAMS")
+    assert [len(b) for b in buffers] == [402, 402, 402]

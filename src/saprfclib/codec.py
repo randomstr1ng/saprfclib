@@ -373,8 +373,9 @@ def _decode_structure(
             )
         span = data[offset : offset + length]
         if child.rfctype == RFCTYPE_STRUCTURE:
-            assert child.type_desc is not None
-            result[child.name] = _decode_structure(span, child.type_desc, unicode_mode)
+            result[child.name] = _decode_structure(
+                span, _require_type_desc(child, "decode"), unicode_mode
+            )
         elif child.rfctype == RFCTYPE_TABLE:
             result[child.name] = _decode_table(span, child)
         else:
@@ -392,8 +393,7 @@ def _decode_table(
     by an attacker-controlled count (threat T-02-06). Each row is decoded as a
     STRUCTURE over its memoryview slice (Pattern 3, D-11 zero-copy).
     """
-    assert field.type_desc is not None
-    type_desc = field.type_desc
+    type_desc = _require_type_desc(field, "decode")
     row_size = _row_size(type_desc, field.unicode_mode)
     if row_size <= 0:
         raise ValueError(f"TABLE row size must be positive, got {row_size}")
@@ -402,6 +402,26 @@ def _decode_table(
         _decode_structure(mv[i : i + row_size], type_desc, field.unicode_mode)
         for i in range(0, len(mv) - row_size + 1, row_size)
     ]
+
+
+def _require_type_desc(field: FieldDesc, action: str) -> TypeDesc:
+    """Return the field's layout, or explain precisely what is missing.
+
+    A STRUCTURE or TABLE field cannot be encoded or decoded without the layout of
+    its row, which the client fetches separately via RFC_GET_STRUCTURE_DEFINITION.
+    When that lookup fails the descriptor arrives with ``type_desc=None`` and the
+    failure used to surface here as a bare AssertionError naming nothing — no field,
+    no structure, no cause. Say which parameter and which DDIC type are missing so
+    the real problem is findable.
+    """
+    if field.type_desc is None:
+        kind = "TABLE" if field.rfctype == RFCTYPE_TABLE else "STRUCTURE"
+        raise ValueError(
+            f"cannot {action} {kind} parameter {field.name!r}: its row layout was "
+            f"never resolved (type_desc is None). The RFC_GET_STRUCTURE_DEFINITION "
+            f"lookup for its DDIC type did not complete."
+        )
+    return field.type_desc
 
 
 def _encode_structure(
@@ -436,8 +456,7 @@ def _encode_structure(
                 continue
             child_value = _default_field_value(child)
         if child.rfctype == RFCTYPE_STRUCTURE:
-            assert child.type_desc is not None
-            raw = _encode_structure(child_value, child.type_desc, unicode_mode)
+            raw = _encode_structure(child_value, _require_type_desc(child, "encode"), unicode_mode)
         elif child.rfctype == RFCTYPE_TABLE:
             raw = _encode_table(child_value, child)
         else:
@@ -454,8 +473,7 @@ def _encode_table(value: list[dict[str, Any]], field: FieldDesc) -> bytes:
 
     No row delimiter — rows are fixed-size structures back-to-back (D-10).
     """
-    assert field.type_desc is not None
-    type_desc = field.type_desc
+    type_desc = _require_type_desc(field, "encode")
     out = bytearray()
     for row in value:
         out += _encode_structure(row, type_desc, field.unicode_mode)
@@ -530,8 +548,7 @@ def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc)
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return buf
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
-            assert field.type_desc is not None
-            return _decode_structure(buf, field.type_desc, field.unicode_mode)
+            return _decode_structure(buf, _require_type_desc(field, "decode"), field.unicode_mode)
         case rfctype if rfctype == RFCTYPE_TABLE:
             return _decode_table(buf, field)
         case _:
@@ -601,8 +618,7 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return bytes(value)
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
-            assert field.type_desc is not None
-            return _encode_structure(value, field.type_desc, field.unicode_mode)
+            return _encode_structure(value, _require_type_desc(field, "encode"), field.unicode_mode)
         case rfctype if rfctype == RFCTYPE_TABLE:
             return _encode_table(value, field)
         case _:

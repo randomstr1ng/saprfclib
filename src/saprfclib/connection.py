@@ -58,6 +58,7 @@ from saprfclib.invoke import (
     build_invoke_request,
     build_trfc_confirm_request,
     build_trfc_request,
+    decompress_table_stream,
     dm_table_ids,
     parse_invoke_response,
 )
@@ -1453,6 +1454,86 @@ def _strip_gw_header(resp: bytes) -> bytes:
     return resp
 
 
+_DFIES_ROW_BYTES = 138  # wire-confirmed DFIES row layout; the stride may be 140
+_GFI_ROW_BYTES = 402  # the documented 12-column PARAMS layout; the wire stride may
+# exceed it (alignment padding), so it is a minimum, never the stride itself.
+
+
+def _table_row_buffers(response: bytes, min_row_bytes: int, table: str = "") -> list[bytes]:
+    """Split a fixed-width result table out of a response into row buffers.
+
+    Shared by every reader of a fixed-width result table — the GFI PARAMS table and
+    the RFC_GET_STRUCTURE_DEFINITION FIELDS table both arrive this way, and both were
+    previously readable only in the uncompressed form.
+
+    The server uses two different shapes and they cannot be handled the same way:
+
+    * **Per-row records** (0x0303 / 0x0304) — each record is exactly one row, at the
+      row's *used* width. The 0x0302 stride may be larger: a structure-definition
+      response in the same session declared row_size 140 while every record was 138
+      bytes. Concatenating these and re-slicing by the declared stride would
+      misalign every row after the first, so each record is taken as-is.
+
+    * **One compressed stream** (0x0305) — the records are fragments of a single
+      SAPCOMPRESS stream and carry no row boundaries at all, so the decompressed
+      blob must be sliced by the stride from 0x0302. BAPI_USER_GET_DETAIL declares
+      row_size 404 for the 12-column layout that occupies 402 bytes; the extra 2
+      bytes are alignment padding, and the response reports the used width
+      separately in tag 0x0310.
+
+    The server switches to compression once a table passes roughly 8 KB, so this is
+    not an exotic path: it is every function module with enough parameters, which
+    includes most BAPIs. Handling only 0x0303 left all of them with an empty
+    descriptor and no diagnostic.
+    """
+    row_size = 0
+    per_record: list[bytes] = []
+    lz_chunks: list[bytes] = []
+
+    pos, n = 0, len(response)
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", response, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                break
+            length = struct.unpack_from(">I", response, pos)[0]
+            pos += 4
+        end = pos + length
+        if end > n:
+            break
+        data = response[pos:end]
+        pos = end
+        # Skip the optional repeated-tag suffix used in extended TLV format.
+        if pos + 2 <= n and struct.unpack_from(">H", response, pos)[0] == tag:
+            pos += 2
+
+        if tag == 0x0302 and length == 8:
+            row_size = struct.unpack_from(">I", data, 0)[0]
+        elif tag in (0x0303, 0x0304):
+            per_record.append(data)
+        elif tag == 0x0305:
+            lz_chunks.append(data)
+
+    if lz_chunks:
+        try:
+            blob = decompress_table_stream(lz_chunks, table)
+        except ValueError as exc:
+            _logger.warning(
+                "could not decompress the %s result table; metadata unavailable: %s",
+                table or "result",
+                exc,
+            )
+            return []
+        stride = row_size if row_size >= min_row_bytes else min_row_bytes
+        return [blob[i : i + stride] for i in range(0, len(blob) - stride + 1, stride)]
+
+    # Per-row records: one row each, at whatever width the server used.
+    return [r for r in per_record if len(r) >= min_row_bytes]
+
+
 def _parse_gfi_params_rows(
     response: bytes,
     *,
@@ -1490,41 +1571,12 @@ def _parse_gfi_params_rows(
     # Strip GW header if the response is a raw GW frame (live server path).
     response = _strip_gw_header(response)
 
-    # 0x0303 wire-captured from stfc_connection + stfc_structure + stfc_changing
-    # captures 2026-06-28 (docs/protocol/framing.md §"TABLE encoding tags").
-    _TAG_PARAMS_ROW = 0x0303
-    _TAG_TERM = 0xFFFF
-    _ROW_BYTES = 402
-
     # EXID char-like codes whose width depends on the connection's character size.
     # Mirror of metadata._CHAR_LIKE_TYPES keyed by EXID string codes.
     _CHAR_LIKE_EXID = frozenset("CDTNg")
 
     rows: list[dict[str, Any]] = []
-    pos, n = 0, len(response)
-    while pos + 4 <= n:
-        tag = struct.unpack_from(">H", response, pos)[0]
-        length = struct.unpack_from(">H", response, pos + 2)[0]
-        if tag == _TAG_TERM:
-            break
-        pos += 4
-        if length == 0xFFFF:
-            if pos + 4 > n:
-                break
-            length = struct.unpack_from(">I", response, pos)[0]
-            pos += 4
-        end = pos + length
-        if end > n:
-            break
-        data = response[pos:end]
-        pos = end
-        # Skip optional close-tag suffix (TLV records have open+close markers).
-        if pos + 2 <= n and struct.unpack_from(">H", response, pos)[0] == tag:
-            pos += 2
-
-        if tag != _TAG_PARAMS_ROW or len(data) != _ROW_BYTES:
-            continue
-
+    for data in _table_row_buffers(response, _GFI_ROW_BYTES, "PARAMS"):
         try:
             off = 0
 
@@ -1620,34 +1672,9 @@ def _parse_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
     Skips rows with unknown EXID or parse errors.
     """
     response = _strip_gw_header(response)
-    _TAG_ROW = 0x0303
-    _TAG_TERM = 0xFFFF
-    _ROW_BYTES = 138  # wire-confirmed: 138B per DFIES row (not 140)
 
     rows: list[tuple[Any, ...]] = []
-    pos, n = 0, len(response)
-    while pos + 4 <= n:
-        tag = struct.unpack_from(">H", response, pos)[0]
-        length = struct.unpack_from(">H", response, pos + 2)[0]
-        if tag == _TAG_TERM:
-            break
-        pos += 4
-        if length == 0xFFFF:
-            if pos + 4 > n:
-                break
-            length = struct.unpack_from(">I", response, pos)[0]
-            pos += 4
-        end = pos + length
-        if end > n:
-            break
-        data = response[pos:end]
-        pos = end
-        if pos + 2 <= n and struct.unpack_from(">H", response, pos)[0] == tag:
-            pos += 2
-
-        if tag != _TAG_ROW or len(data) != _ROW_BYTES:
-            continue
-
+    for data in _table_row_buffers(response, _DFIES_ROW_BYTES, "FIELDS"):
         try:
             fieldname = data[60:120].decode("utf-16-le").rstrip(" \x00")
             position = struct.unpack_from("<H", data, 120)[0]
@@ -2521,6 +2548,17 @@ class Connection:
         # We use a direct walker rather than parse_invoke_response because we need
         # to interpret the raw bytes as PARAMS rows without a TypeDesc descriptor.
         rows = _parse_gfi_params_rows(response, unicode_mode=unicode_mode)
+        if not rows:
+            # A function module with no parameters at all is legal but rare, and it
+            # is indistinguishable here from a metadata response we failed to read.
+            # Either way the descriptor will be empty and every call will reject the
+            # caller's arguments, so say so rather than returning it silently.
+            _logger.warning(
+                "no parameter rows parsed from the %s metadata response (%d bytes); "
+                "the descriptor will be empty and calls will reject all arguments",
+                func_name.upper(),
+                len(response),
+            )
 
         # WS_PENDING 2-step (Track 2): if the INVOKE+GFI response yielded no rows,
         # the server accepted the LOGON (RFCPING, step 1) but failed to execute GFI
@@ -2587,8 +2625,16 @@ class Connection:
             if tabname not in self._struct_desc_cache:
                 try:
                     self._struct_desc_cache[tabname] = self._call_struct_bootstrap(tabname)
-                except Exception:
-                    pass  # leave type_desc=None; encode/decode will fail at call time
+                except Exception as exc:
+                    # Leaving type_desc=None makes encode/decode fail later with no
+                    # hint as to which lookup went wrong, so record it here.
+                    _logger.warning(
+                        "could not fetch the layout of DDIC type %r; parameter %r "
+                        "cannot be encoded or decoded: %s",
+                        tabname,
+                        fd.name,
+                        exc,
+                    )
             td = self._struct_desc_cache.get(tabname)
             if td is not None:
                 fd.type_desc = td
@@ -4057,6 +4103,17 @@ class AsyncConnection:
         response = await self._transport.recv_message()
 
         rows = _parse_gfi_params_rows(response, unicode_mode=unicode_mode)
+        if not rows:
+            # A function module with no parameters at all is legal but rare, and it
+            # is indistinguishable here from a metadata response we failed to read.
+            # Either way the descriptor will be empty and every call will reject the
+            # caller's arguments, so say so rather than returning it silently.
+            _logger.warning(
+                "no parameter rows parsed from the %s metadata response (%d bytes); "
+                "the descriptor will be empty and calls will reject all arguments",
+                func_name.upper(),
+                len(response),
+            )
 
         parameters: list[FieldDesc] = []
         struct_lookups: list[tuple[FieldDesc, str]] = []
@@ -4094,8 +4151,16 @@ class AsyncConnection:
             if tabname not in self._struct_desc_cache:
                 try:
                     self._struct_desc_cache[tabname] = await self._call_struct_bootstrap(tabname)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Leaving type_desc=None makes encode/decode fail later with no
+                    # hint as to which lookup went wrong, so record it here.
+                    _logger.warning(
+                        "could not fetch the layout of DDIC type %r; parameter %r "
+                        "cannot be encoded or decoded: %s",
+                        tabname,
+                        fd.name,
+                        exc,
+                    )
             td = self._struct_desc_cache.get(tabname)
             if td is not None:
                 fd.type_desc = td

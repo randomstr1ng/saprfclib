@@ -1,0 +1,59 @@
+{
+  "message_type": "GFI_COMPRESSED_PARAMS_RESPONSE",
+  "capture_source": "live capture 2026-08-26 at the transport seam; SAP A4H kernel 793 release 758, sysnr 00, unicode, codepage 4103. RFC_GET_FUNCTION_INTERFACE for BAPI_USER_GET_DETAIL. Sanitised preserving byte length: GW conversation handle at [40:48] and the 16-byte 0x0514 session token. No NI length prefix.",
+  "evidence": "return code 0x0420 == 0; the PARAMS table decompresses to exactly row_size x row_count and every row parses into a FieldDesc",
+  "ni_header_length": 0,
+  "notes": [
+    "The PARAMS table is COMPRESSED. The server switches to SAPCOMPRESS once a table passes roughly 8 KB (RfcTable::rfcSerialize compresses when row_size * row_count >= 0x2001 = 8193); here 404 x 44 = 17776.",
+    "The eight 0x0305 records are FRAGMENTS OF ONE STREAM, not independently compressed blocks. They must be concatenated (8 x 250 = 2000 bytes) before anything can be decompressed.",
+    "The joined payload begins with an 8-byte wrapper - [4B unidentified][4B BE compressed length = 1921] - and the SAPCOMPRESS stream starts at offset 8: [4B LE uncompressed length = 17776][algo byte 0x12 = LZH][2B magic 1f 9d][config]. The trailing bytes after the compressed stream are padding to the 250-byte record size.",
+    "0x0302 declares row_size 404 while the documented 12-column layout occupies 402; the extra 2 bytes are alignment padding. Tag 0x0310 carries the used width (402) separately. Slice the decompressed blob by the 0x0302 stride, not by a constant.",
+    "Contrast with the per-row form: when rows arrive as individual 0x0303/0x0304 records, each record is one row at its USED width and the 0x0302 stride may be larger (a structure-definition response in the same session declared 140 while every record was 138 bytes). Concatenating those and re-slicing by the stride would misalign every row, so the two shapes need different handling.",
+    "Before this was handled, any function module large enough to be compressed - which is most BAPIs - produced an empty FunctionDesc with no diagnostic."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "table_name": "PARAMS",
+    "row_size": 404,
+    "row_count": 44,
+    "used_row_width_tag_0x0310": 402,
+    "compressed_records": 8,
+    "compressed_record_size": 250,
+    "uncompressed_length": 17776,
+    "sapcompress_algo": "LZH",
+    "parameters_parsed": 44,
+    "first_parameters": [
+      "ADDRESS",
+      "ADMINDATA",
+      "ALIAS",
+      "COMPANY"
+    ],
+    "total_length": 2342
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    },
+    {
+      "offset": 76,
+      "length": 4,
+      "name": "rfc_marker",
+      "value": "00000002",
+      "type": "fixed",
+      "note": "server direction"
+    }
+  ]
+}

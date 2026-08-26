@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/golden/framing/rfcping_request.bin`, `rfcping_response.bin`) captured from a
   live kernel 793 system.
 
+- **Function metadata for large function modules is now readable at all.** The server
+  sends a table SAPCOMPRESS-compressed under tag `0x0305` once it exceeds roughly 8 KB,
+  and the reader accepted only uncompressed `0x0303` rows — so every function module
+  with enough parameters produced an empty `FunctionDesc` with no diagnostic. This
+  affects most BAPIs, `BAPI_USER_GET_DETAIL` among them. Compressed tables are now
+  decompressed (the `0x0305` records are fragments of one stream, not independent
+  blocks) and sliced by the row size the server declares rather than a hardcoded 402,
+  which is required because the compressed form uses a padded stride.
+- A metadata response that yields no parameter rows is now logged at WARNING instead
+  of silently producing an empty descriptor.
 - **Table parameters no longer abort the connection.** A request carrying table rows
   emitted a `0x0306` end tag that the SAP RFC SDK never writes and no capture contains.
   The server responded by tearing down the gateway conversation: the call returned an

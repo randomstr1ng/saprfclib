@@ -378,6 +378,57 @@ Note the response RFC marker is `00000002` here, where the STFC_CONNECTION respo
 above shows `00000004`. The marker value varies; the 80-byte strip keys off the
 leading `0x06` GW-frame byte and is unaffected either way.
 
+### Compressed tables — CONFIRMED (2026-08-26)
+
+A table larger than roughly 8 KB is sent SAPCOMPRESS-compressed under tag `0x0305`
+instead of one `0x0303`/`0x0304` record per row. The switch happens when
+`row_size × row_count >= 0x2001` (8193). This is not a rare path: it is every
+function module with enough parameters, so `RFC_GET_FUNCTION_INTERFACE` metadata for
+most BAPIs arrives compressed.
+
+Golden fixture: `tests/golden/framing/gfi_compressed_params_response.bin` — the GFI
+response for `BAPI_USER_GET_DETAIL` (44 parameters, 404 × 44 = 17776 bytes).
+
+```
+0x0301  len=12         table name "PARAMS" (UTF-16LE)
+0x0330  len=4          DM table id
+0x0302  len=8          [BE row_size=404][BE row_count=44]
+0x0310  len=4          used row width (402) — the layout width without padding
+0x0305  len=250        compressed fragment  } eight fragments of
+0x0305  len=250        compressed fragment  } ONE stream, 2000 bytes joined
+...
+0x0306  len=0          table end
+```
+
+The `0x0305` records are **fragments of a single stream**, not independently
+compressed blocks — decompressing one on its own fails. Concatenate them all first.
+The joined payload then carries an 8-byte wrapper before the SAPCOMPRESS stream:
+
+```
+[0:4]   unidentified
+[4:8]   BE uint32 — length of the compressed stream (1921 here)
+[8:]    SAPCOMPRESS stream:
+        [0:4] LE uint32 uncompressed length (17776)
+        [4]   algorithm byte (0x12 → LZH)
+        [5:7] magic 1f 9d
+        [7]   config
+```
+
+Trailing bytes after the compressed stream pad the last record to its fixed size.
+
+!!! warning "Two row shapes, two slicing rules"
+    Per-row records and a compressed blob cannot be handled the same way.
+
+    * **Per-row `0x0303`/`0x0304`** — each record is one row at its *used* width. The
+      `0x0302` stride may be larger: a structure-definition response declared
+      `row_size=140` while every record was 138 bytes.
+    * **Compressed `0x0305`** — the decompressed blob carries no row boundaries, so
+      it must be sliced by the `0x0302` stride.
+
+    Slicing per-row records by the declared stride misaligns every row after the
+    first; slicing a decompressed blob by the record length is impossible. The
+    `0x0302` row size is authoritative only for the compressed form.
+
 ### Exception Response (server → client when ABAP exception raised)
 
 Confirmed from live STFC_EXCEPTION call capture (2026-06-28). Golden fixture:

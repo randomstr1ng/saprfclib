@@ -108,6 +108,9 @@ _TAG_TABLE_END = 0x0306  # table-stream end marker. Accepted when reading; never
 _TAG_TABLE_DELTA = 0x0335
 _TAG_TABLE_DELTA_END = 0x0336
 _DELTA_OPCODE = 10  # first uint32 of the 0x0335 header; only value observed
+_SAPCOMPRESS_MAGIC = b"\x1f\x9d"  # compress.py header magic, at stream offset 5
+_SAPCOMPRESS_HDR = 8  # [4B LE uncompressed length][algo][2B magic][config]
+_LZ_WRAPPER = 8  # bytes preceding the SAPCOMPRESS stream in a joined 0x0305 payload
 _TAG_DM_TABLE_ID = 0x0330  # 4B BE uint32 DM table tracking ID (getNextDMTableId counter)
 
 # Response-only tags (confirmed from golden response fixture)
@@ -832,6 +835,48 @@ def _parse_tlv_stream(data: bytes) -> dict[int, bytes]:
     return out
 
 
+def decompress_table_stream(chunks: list[bytes], param_name: str = "") -> bytes:
+    """Decompress the SAPCOMPRESS stream carried by a table's 0x0305 records.
+
+    The records are FRAGMENTS OF ONE STREAM, not independently compressed blocks:
+    they must be concatenated before anything can be decompressed. The joined
+    payload then begins with an 8-byte wrapper — [4B unidentified][4B BE length of
+    the compressed stream] — followed by the SAPCOMPRESS stream itself, whose own
+    8-byte header is [4B LE uncompressed length][algo byte][2B magic 1f 9d][config].
+
+    Confirmed live (kernel 793) from the RFC_GET_FUNCTION_INTERFACE response for
+    BAPI_USER_GET_DETAIL: eight 0x0305 records of 250 bytes join into 2000 bytes;
+    the wrapper reports a 1921-byte compressed stream starting at offset 8; the
+    SAPCOMPRESS header there declares 17776 uncompressed bytes, matching the 0x0302
+    record exactly (row_size 404 x row_count 44), and LZH decompression yields
+    precisely that.
+
+    The wrapper is located by the magic rather than assumed, so a stream that
+    arrives without one still decodes.
+    """
+    blob = b"".join(chunks)
+    if len(blob) < _SAPCOMPRESS_HDR:
+        raise ValueError(
+            f"SAPCOMPRESS payload for TABLE param {param_name!r} is too short: {len(blob)} byte(s)"
+        )
+    if blob[_LZ_WRAPPER + 5 : _LZ_WRAPPER + 7] == _SAPCOMPRESS_MAGIC:
+        stream = blob[_LZ_WRAPPER:]
+    elif blob[5:7] == _SAPCOMPRESS_MAGIC:
+        stream = blob
+    else:
+        raise ValueError(
+            f"SAPCOMPRESS header not found for TABLE param {param_name!r}: "
+            f"no 1f9d magic at offset 5 or {_LZ_WRAPPER + 5}"
+        )
+    uncomp_len = struct.unpack_from("<I", stream, 0)[0]
+    try:
+        return sapcompress_decompress(stream, uncomp_len)
+    except DecompressError as exc:
+        raise ValueError(
+            f"SAPCOMPRESS decompression failed for TABLE param {param_name!r}: {exc}"
+        ) from exc
+
+
 def _extract_name_value_pairs(
     data: bytes, dm_table_names: dict[int, str] | None = None
 ) -> list[tuple[str, bytes]]:
@@ -868,6 +913,13 @@ def _extract_name_value_pairs(
     current_name: str | None = None
     in_table: bool = False
     table_rows: bytearray = bytearray()
+    table_lz: list[bytes] = []  # 0x0305 fragments of one compressed stream
+
+    def _payload() -> bytes:
+        """Row bytes for the table just finished, decompressing 0x0305 if used."""
+        if table_lz:
+            return decompress_table_stream(table_lz, current_name or "")
+        return bytes(table_rows)
 
     while pos + 4 <= n:
         tag = struct.unpack_from(">H", data, pos)[0]
@@ -905,9 +957,11 @@ def _extract_name_value_pairs(
         if tag == _TAG_PARAM_NAME:  # 0x0201
             # Finalize any in-progress table that was missing its 0x0306 end tag
             if in_table and current_name is not None:
-                pairs.append((current_name, bytes(table_rows)))
+                pairs.append((current_name, _payload()))
                 in_table = False
                 table_rows = bytearray()
+                table_lz = []
+            table_lz = []
             current_name = _decode_utf16le(value)
         elif tag == _TAG_PARAM_VALUE and current_name is not None and not in_table:  # 0x0203
             pairs.append((current_name, value))
@@ -920,12 +974,13 @@ def _extract_name_value_pairs(
         # name and 0x0301 is empty (begin marker only) — tolerates older captures.
         elif tag == _TAG_TABLE_NAME:  # 0x0301
             if in_table and current_name is not None:
-                pairs.append((current_name, bytes(table_rows)))
+                pairs.append((current_name, _payload()))
             if value:  # new format: name in 0x0301 value
                 current_name = _decode_utf16le(value)
             # else: legacy format — name already set by preceding 0x0201; keep it
             in_table = True
             table_rows = bytearray()
+            table_lz = []
 
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
@@ -934,20 +989,15 @@ def _extract_name_value_pairs(
             # CONFIRMED: both tags carry raw uncompressed row bytes (the deserializer path)
             table_rows.extend(value)
         elif tag == _TAG_TABLE_CONTENT_LZ and in_table:  # 0x0305
-            if len(value) >= 8:
-                uncomp_len = struct.unpack_from("<I", value, 0)[0]
-                try:
-                    table_rows.extend(sapcompress_decompress(value, uncomp_len))
-                except DecompressError as exc:
-                    raise ValueError(
-                        f"SAPCOMPRESS decompression failed for TABLE param "
-                        f"{current_name!r} tag 0x{tag:04x}: {exc}"
-                    ) from exc
+            # One record is a fragment, never a self-contained block — collect and
+            # decompress once the table ends (see decompress_table_stream).
+            table_lz.append(value)
         elif tag == _TAG_TABLE_DELTA:  # 0x0335 — table identified by DM id
             if in_table and current_name is not None:
-                pairs.append((current_name, bytes(table_rows)))
+                pairs.append((current_name, _payload()))
             current_name = None
             table_rows = bytearray()
+            table_lz = []
             in_table = False
             if len(value) >= 12:
                 _, dm_id, _ = struct.unpack_from(">III", value, 0)
@@ -960,14 +1010,15 @@ def _extract_name_value_pairs(
         elif (  # 0x0306 / 0x0336
             tag in (_TAG_TABLE_END, _TAG_TABLE_DELTA_END) and in_table and current_name is not None
         ):
-            pairs.append((current_name, bytes(table_rows)))
+            pairs.append((current_name, _payload()))
             current_name = None
             in_table = False
             table_rows = bytearray()
+            table_lz = []
 
     # Finalize any unterminated table at end of stream
     if in_table and current_name is not None:
-        pairs.append((current_name, bytes(table_rows)))
+        pairs.append((current_name, _payload()))
 
     return pairs
 
