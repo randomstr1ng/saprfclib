@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-26
+
+Bug-fix release. Every fix below is verified against a live SAP S/4HANA system
+(kernel 793, release 758) unless noted otherwise.
+
 ### Added
 
 - `connect()` and `connect_async()` accept `lang`, the logon language. Takes either the
@@ -136,5 +141,6 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/randomstr1ng/saprfclib/releases/tag/v0.1.0
