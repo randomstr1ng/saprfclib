@@ -81,6 +81,14 @@ RFCTYPE_CDAY = 40
 # INT8/UTCLONG/UTCSECOND/UTCMINUTE share the INT8 8-byte group in the serializer
 # (dispatch cases 7/0x1f-0x22); DTDAY-TSECOND share INT4 group (0x23-0x26);
 # TMINUTE/CDAY share INT2 group (0x27-0x28). All confirmed LE by grouping.
+# INT4 little-endian is CONFIRMED, not inferred: the STFC_CHANGING golden pair
+# settles it by arithmetic. The request carries START_VALUE=0a000000 and
+# COUNTER=01000000; the response carries RESULT=0b000000 and COUNTER=02000000. The
+# function returns START_VALUE + COUNTER and increments COUNTER, so read
+# little-endian that is 10 + 1 = 11 and 1 -> 2 — exactly right. Big-endian would make
+# the inputs 167772160 and 16777216 and no reading of the response fits.
+# Sources: tests/golden/framing/stfc_changing_request.bin / stfc_changing_response.bin
+# (see tests/test_table_params.py::test_int4_params_are_little_endian_on_the_wire).
 _INT_FORMATS: dict[int, str] = {
     RFCTYPE_INT: "<i",  # signed 32-bit
     RFCTYPE_INT2: "<h",  # signed 16-bit

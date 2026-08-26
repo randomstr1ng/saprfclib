@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decompressed (the `0x0305` records are fragments of one stream, not independent
   blocks) and sliced by the row size the server declares rather than a hardcoded 402,
   which is required because the compressed form uses a padded stride.
+- **The RFC server serialized TABLE outputs as scalar values.** Every output parameter
+  was emitted as a `0x0201`/`0x0203` pair, tables included — the server-direction twin
+  of the client-side mistyping that produced `CALL_FUNCTION_ILLEGAL_P_TYPE`. Tables now
+  use the table protocol (`0x0301`/`0x0330`/`0x0302`/`0x0304`), matching the shape a
+  real SAP server uses in the golden captures.
+- Structure and table layouts that failed to resolve now raise a `ValueError` naming the
+  parameter and explaining that the `RFC_GET_STRUCTURE_DEFINITION` lookup did not
+  complete, instead of a bare `AssertionError` naming nothing. Assertions also vanish
+  under `python -O`, which turned the same condition into a corrupt encode.
+- Failures to fetch a DDIC type layout are logged at WARNING instead of being discarded.
 - A metadata response that yields no parameter rows is now logged at WARNING instead
   of silently producing an empty descriptor.
 - **Table parameters no longer abort the connection.** A request carrying table rows
