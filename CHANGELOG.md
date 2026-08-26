@@ -33,10 +33,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoded at their type's initial value — blank-padded for character fields, zero-padded
   for numeric — instead of raising `KeyError`. This is how most SAP function modules expect
   to be called; `RFC_READ_TABLE`'s `FIELDS` rows are the common case (#11).
-- `ping()` no longer raises `ValueError` on responses from live systems. The RFCPING
-  response parser did not strip the gateway frame header, did not handle extended-length
-  records, and did not skip the repeated close tag that follows each record — the last of
-  which desynchronised the walk by two bytes and misread every subsequent tag (#7).
+- `ping()` works against live systems. Two independent defects (#7):
+  the RFCPING **request** was sent as a bare TLV body with no gateway framing, so the
+  server read the function name where it expected a 76-byte GW header and answered with a
+  plain-text error; and the **response** parser did not strip the gateway frame header,
+  did not handle extended-length records, and did not skip the repeated close tag that
+  follows each record — the last of which desynchronised the walk by two bytes and misread
+  every subsequent tag. The probe is now built through the same capture-confirmed invoke
+  path as any other call, and both frames are now golden fixtures
+  (`tests/golden/framing/rfcping_request.bin`, `rfcping_response.bin`) captured from a
+  live kernel 793 system.
+
+- **Table parameters no longer abort the connection.** A request carrying table rows
+  emitted a `0x0306` end tag that the SAP RFC SDK never writes and no capture contains.
+  The server responded by tearing down the gateway conversation: the call returned an
+  80-byte header-only frame and every later call on that connection failed with
+  "Conversation NNN not found". Verified live on kernel 793 — removing the tag is the
+  single change that turns the failure into a success.
+- Tables the caller passes as input are returned by the server under `0x0335`/`0x0336`,
+  identified by the DM table ID the client assigned in `0x0330` rather than by name.
+  These were previously unrecognised, so such parameters were missing from the result.
+- Parameter widths from `RFC_GET_FUNCTION_INTERFACE` are no longer double-scaled on a
+  Unicode connection. `OFFSET`/`INTLENGTH` already arrive as Unicode byte counts;
+  doubling them emitted values at twice their declared width, which the server
+  discarded — `RFC_READ_TABLE` raised `TABLE_NOT_AVAILABLE` because `QUERY_TABLE` never
+  arrived intact.
+- An RFC response carrying no return code now raises `CommunicationError` instead of
+  being reported as an empty successful result. An aborted call used to surface much
+  later as a missing key in caller code, leaving a dead connection in use.
+- Passing a parameter the function interface does not declare now raises `ValueError`.
+  The value was previously dropped from the request without any diagnostic, and the
+  server ran the function without it.
+- Function metadata rows that cannot be parsed are logged at WARNING instead of being
+  discarded in silence. `PARAMCLASS='X'` exception rows are now recognised deliberately
+  rather than being dropped as a side effect of their blank `EXID`.
 
 ## [0.1.0] - 2026-08-20
 
