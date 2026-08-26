@@ -164,23 +164,45 @@ def test_non_tables_structure_param_stays_a_structure() -> None:
     assert fd.rfctype == RFCTYPE_STRUCTURE
 
 
-def test_nested_field_row_keeps_its_exid_type() -> None:
-    """Nested rows (non-blank FIELDNAME) describe fields inside the row structure.
+def test_fieldname_does_not_gate_the_promotion() -> None:
+    """FIELDNAME names the DDIC source field, not a nesting level.
 
-    They repeat the parent's PARAMCLASS, so promoting on direction alone would
-    retype a plain CHAR column as a table.
+    Live GFI rows on kernel 793 show plain top-level parameters carrying a
+    FIELDNAME: DELIMITER is SONV-FLAG, QUERY_TABLE is DD02L-TABNAME. Gating the
+    TABLES promotion on a blank FIELDNAME would therefore fail for any TABLES
+    parameter whose line type derives from a data element, silently restoring the
+    STRUCTURE mistyping this promotion exists to fix.
     """
     fd = _parse_params_row(
         _params_row(
-            parameter="FIELDS",
+            parameter="SOMETABLE",
             paramclass="T",
+            exid="u",
+            tabname="SOMESTRUCT",
+            fieldname="SOMEFIELD",
+        )
+    )
+    assert fd.rfctype == RFCTYPE_TABLE
+
+
+def test_scalar_param_with_a_fieldname_is_unaffected() -> None:
+    """A top-level CHAR parameter keeps CHAR even though FIELDNAME is set.
+
+    Mirrors the live DELIMITER row: PARAMCLASS 'I', EXID 'C', TABNAME 'SONV',
+    FIELDNAME 'FLAG'.
+    """
+    fd = _parse_params_row(
+        _params_row(
+            parameter="DELIMITER",
+            paramclass="I",
             exid="C",
-            intlength=60,
-            tabname="RFC_DB_FLD",
-            fieldname="FIELDNAME",
+            intlength=2,
+            tabname="SONV",
+            fieldname="FLAG",
         )
     )
     assert fd.rfctype == RFCTYPE_CHAR
+    assert fd.uc_length == 2
 
 
 def test_tables_param_emits_table_tlv_tags_not_a_scalar_value() -> None:
@@ -200,7 +222,6 @@ def test_tables_param_emits_table_tlv_tags_not_a_scalar_value() -> None:
     assert 0x0301 in tags, "table name tag missing"
     assert 0x0302 in tags, "table info tag missing"
     assert 0x0303 in tags, "table row tag missing"
-    assert 0x0306 in tags, "table end tag missing"
 
     # The FIELDS row must not also appear as a scalar 0x0203 value.
     names = [val for tag, val in _walk_tlv(req) if tag == 0x0201]
@@ -435,3 +456,284 @@ def test_export_table_param_is_declared_but_not_sent_as_data() -> None:
     tags = {tag for tag, _ in _walk_tlv(req)}
     assert 0x0205 in tags
     assert 0x0301 not in tags
+
+
+# --------------------------------------------------------------------------- #
+# GFI parameter widths — no double-scaling on a Unicode connection
+# --------------------------------------------------------------------------- #
+#
+# OFFSET / INTLENGTH arrive in the character width the connection uses. On a
+# Unicode connection they are already Unicode byte counts; scaling them again
+# emitted parameter values at twice their declared width. The server discarded
+# them silently — observed live on kernel 793 as RFC_READ_TABLE raising
+# TABLE_NOT_AVAILABLE because QUERY_TABLE never arrived intact.
+
+
+def _gfi_row(parameter: str, exid: str, intlength: int) -> bytes:
+    """One 402-byte GFI PARAMS row as the server puts it on the wire."""
+
+    def pad(text: str, chars: int) -> bytes:
+        enc = text.encode("utf-16-le")[: chars * 2]
+        return enc + b"\x00\x00" * (chars - len(enc) // 2)
+
+    row = bytearray()
+    row += pad("I", 1)  # PARAMCLASS
+    row += pad(parameter, 30)
+    row += pad("", 30)  # TABNAME
+    row += pad("", 30)  # FIELDNAME
+    row += pad(exid, 1)
+    row += struct.pack("<I", 1)  # POSITION
+    row += struct.pack("<I", 0)  # OFFSET
+    row += struct.pack("<I", intlength)
+    row += struct.pack("<I", 0)  # DECIMALS
+    row += pad("", 21) + pad("", 79) + pad("", 1)
+    assert len(row) == 402
+    return bytes(row)
+
+
+def _gfi_response(rows: list[bytes]) -> bytes:
+    from saprfclib.invoke import tlv_record
+
+    body = b"".join(tlv_record(0x0303, r) for r in rows)
+    body += struct.pack(">HH", 0xFFFF, 0) + struct.pack(">H", 0xFFFF)
+    return b"\x06\xcb" + b"\x00" * 78 + body
+
+
+@pytest.mark.parametrize(("exid", "wire_length"), [("C", 60), ("C", 2), ("N", 8), ("D", 16)])
+def test_unicode_gfi_lengths_are_not_rescaled(exid: str, wire_length: int) -> None:
+    """A Unicode connection reports uc bytes; they must survive unchanged."""
+    from saprfclib.connection import _parse_gfi_params_rows
+
+    rows = _parse_gfi_params_rows(
+        _gfi_response([_gfi_row("P", exid, wire_length)]), unicode_mode=True
+    )
+    assert rows[0]["INTLENGTH"] == wire_length
+
+
+def test_query_table_encodes_to_the_golden_width() -> None:
+    """DD02L-TABNAME is CHAR(30); the golden capture's 0x0203 value is 60 bytes.
+
+    Source: tests/golden/framing/rfc_read_table_request.bin.
+    """
+    from saprfclib.connection import _parse_gfi_params_rows
+
+    rows = _parse_gfi_params_rows(
+        _gfi_response([_gfi_row("QUERY_TABLE", "C", 60)]), unicode_mode=True
+    )
+    fd = _parse_params_row(rows[0])
+    assert fd.uc_length == 60
+    assert len(encode(fd.rfctype, "T000", fd)) == 60
+
+
+def test_delimiter_encodes_to_the_golden_width() -> None:
+    """SONV-FLAG is CHAR(1); the golden capture's 0x0203 value is 2 bytes."""
+    from saprfclib.connection import _parse_gfi_params_rows
+
+    rows = _parse_gfi_params_rows(_gfi_response([_gfi_row("DELIMITER", "C", 2)]), unicode_mode=True)
+    fd = _parse_params_row(rows[0])
+    assert fd.uc_length == 2
+    assert len(encode(fd.rfctype, "|", fd)) == 2
+
+
+def test_golden_request_scalar_widths_are_the_oracle() -> None:
+    """Read the widths straight out of the capture so the numbers above are pinned."""
+    raw = (GOLDEN / "rfc_read_table_request.bin").read_bytes()
+    body = raw[4:][80:]
+    widths: dict[str, int] = {}
+    name = None
+    for tag, val in _walk_tlv(body):
+        if tag == 0x0201:
+            name = val.decode("utf-16-le")
+        elif tag == 0x0203 and name is not None:
+            widths[name] = len(val)
+            name = None
+    assert widths["QUERY_TABLE"] == 60
+    assert widths["DELIMITER"] == 2
+
+
+def test_no_end_tag_after_table_rows() -> None:
+    """A request must not carry 0x0306. Verified live on kernel 793.
+
+    The SDK's table serializer writes name, DM id, info and rows and nothing else,
+    and neither golden capture contains 0x0306 in a request. Sending one makes the
+    server abort: the call comes back as an 80-byte header-only frame and every later
+    call on that connection fails with "Conversation NNN not found". Dropping the tag
+    is the single change that turns the same call into a success.
+    """
+    desc = _read_table_desc()
+    req = build_invoke_request(
+        "RFC_READ_TABLE",
+        desc,
+        {"QUERY_TABLE": "T000", "FIELDS": [{"FIELDNAME": "MANDT"}]},
+        version="754",
+    )
+    assert 0x0306 not in {tag for tag, _ in _walk_tlv(req)}
+
+
+def test_client_sent_table_returns_under_the_delta_tag() -> None:
+    """A table the client sent comes back under 0x0335, keyed by DM table ID.
+
+    Source: tests/golden/framing/rfc_read_table_delta_response.bin. DATA and OPTIONS —
+    tables the client did not send — arrive under 0x0301 with their names; FIELDS,
+    which the client did send with dm_table_id 1, arrives under 0x0335 instead.
+    """
+    from saprfclib.invoke import _extract_name_value_pairs
+
+    body = (GOLDEN / "rfc_read_table_delta_response.bin").read_bytes()[80:]
+    pairs = dict(_extract_name_value_pairs(body, {1: "FIELDS"}))
+    assert set(pairs) == {"DATA", "OPTIONS", "FIELDS"}
+    assert len(pairs["FIELDS"]) == 4 * 206  # four rows of RFC_DB_FLD
+
+
+def test_delta_header_is_opcode_dm_id_and_row_count() -> None:
+    """0x0335 carries three BE uint32: [10, dm_table_id, row_count] — not a name.
+
+    Reading it as a UTF-16LE name is a trap: the header is 12 bytes, exactly the
+    width of "FIELDS" encoded UTF-16LE, so a length check alone cannot tell them
+    apart. Confirmed by varying the row count against a fixed DM id.
+    """
+    body = (GOLDEN / "rfc_read_table_delta_response.bin").read_bytes()[80:]
+    header = next(val for tag, val in _walk_tlv(body) if tag == 0x0335)
+    assert len(header) == 12
+    opcode, dm_id, row_count = struct.unpack(">III", header)
+    assert (opcode, dm_id, row_count) == (10, 1, 4)
+
+
+def test_delta_table_is_skipped_when_the_dm_id_is_unknown() -> None:
+    """Without the mapping we cannot name the table, so its rows are not guessed."""
+    from saprfclib.invoke import _extract_name_value_pairs
+
+    body = (GOLDEN / "rfc_read_table_delta_response.bin").read_bytes()[80:]
+    pairs = dict(_extract_name_value_pairs(body))  # no dm_table_names
+    assert "FIELDS" not in pairs
+    assert set(pairs) == {"DATA", "OPTIONS"}
+
+
+def test_dm_table_ids_numbers_only_tables_that_carry_rows() -> None:
+    """IDs run from 1 in parameter order, skipping empty and EXPORT-only tables."""
+    from saprfclib.invoke import dm_table_ids
+
+    desc = _read_table_desc()
+    params = {"QUERY_TABLE": "T000", "FIELDS": [{"FIELDNAME": "MANDT"}]}
+    assert dm_table_ids(desc, params) == {1: "FIELDS"}
+    # DATA is declared before FIELDS; supplying rows for it takes id 1.
+    both = {"DATA": [{"WA": "x"}], "FIELDS": [{"FIELDNAME": "MANDT"}]}
+    assert dm_table_ids(desc, both) == {1: "DATA", 2: "FIELDS"}
+    assert dm_table_ids(desc, {"FIELDS": []}) == {}
+
+
+def test_request_dm_id_matches_what_the_response_echoes() -> None:
+    """The id we write in 0x0330 is the id the server sends back in 0x0335.
+
+    Sources: rfc_read_table_delta_request.bin / rfc_read_table_delta_response.bin.
+    """
+    req = (GOLDEN / "rfc_read_table_delta_request.bin").read_bytes()[80:]
+    resp = (GOLDEN / "rfc_read_table_delta_response.bin").read_bytes()[80:]
+    sent_dm = struct.unpack(">I", next(v for t, v in _walk_tlv(req) if t == 0x0330))[0]
+    _, echoed_dm, _ = struct.unpack(">III", next(v for t, v in _walk_tlv(resp) if t == 0x0335))
+    assert sent_dm == echoed_dm == 1
+
+
+def test_golden_delta_request_carries_no_end_tag() -> None:
+    """The capture of a successful table-bearing call contains no 0x0306."""
+    req = (GOLDEN / "rfc_read_table_delta_request.bin").read_bytes()[80:]
+    tags = [tag for tag, _ in _walk_tlv(req)]
+    assert 0x0301 in tags and 0x0330 in tags and 0x0303 in tags
+    assert 0x0306 not in tags
+
+
+# --------------------------------------------------------------------------- #
+# Silent-failure guards
+# --------------------------------------------------------------------------- #
+#
+# Each of these turned a wire-level fault into a confusing error in caller code
+# during the live debugging of this module.
+
+
+def test_response_without_a_return_code_raises() -> None:
+    """An aborted call must not read as an empty successful result.
+
+    Live shape: the gateway tears down the conversation and answers with an
+    80-byte frame carrying no TLV body at all. That used to reach the caller as
+    ``{}``, so the real failure surfaced later as a KeyError on a missing
+    parameter — and the dead connection stayed in use.
+    """
+    from saprfclib.exceptions import CommunicationError
+
+    with pytest.raises(CommunicationError, match="no return-code TLV"):
+        parse_invoke_response(b"", _read_table_desc())
+
+
+def test_response_with_only_a_terminator_raises() -> None:
+    """A syntactically valid but empty TLV stream is still not a result."""
+    from saprfclib.exceptions import CommunicationError
+
+    with pytest.raises(CommunicationError, match="no return-code TLV"):
+        parse_invoke_response(struct.pack(">HH", 0xFFFF, 0), _read_table_desc())
+
+
+def test_exception_response_is_still_classified_before_the_return_code_check() -> None:
+    """An ABAP exception carries no 0x0420 — it must raise the typed error, not
+    the malformed-response error."""
+    from saprfclib.exceptions import AbapApplicationError
+    from saprfclib.invoke import tlv_record
+
+    resp = (
+        tlv_record(0x0500)
+        + tlv_record(0x0417, "131".encode("utf-16-le"))
+        + tlv_record(0x0401, "TABLE_NOT_AVAILABLE".encode("utf-16-le"))
+        + struct.pack(">HH", 0xFFFF, 0)
+    )
+    with pytest.raises(AbapApplicationError):
+        parse_invoke_response(resp, _read_table_desc())
+
+
+def test_success_response_with_no_output_params_is_an_empty_dict() -> None:
+    """rc=0 and nothing else is a legitimate empty result, not an error."""
+    from saprfclib.invoke import tlv_record
+
+    resp = tlv_record(0x0420, struct.pack(">I", 0)) + struct.pack(">HH", 0xFFFF, 0)
+    assert parse_invoke_response(resp, _read_table_desc()) == {}
+
+
+def test_unknown_parameter_name_is_rejected_not_dropped() -> None:
+    """Passing an argument the interface does not declare must fail loudly.
+
+    The builder iterates the descriptor, so an unknown name simply never matched
+    and the value vanished from the request — the server then ran the function
+    without it and returned nothing for it.
+    """
+    with pytest.raises(ValueError, match="not in the function interface"):
+        build_invoke_request(
+            "RFC_READ_TABLE", _read_table_desc(), {"QUERY_TABLE": "T000", "NOSUCHPARAM": "x"}
+        )
+
+
+def test_known_parameters_are_still_accepted() -> None:
+    """The guard must not reject valid names, in any case form."""
+    req = build_invoke_request(
+        "RFC_READ_TABLE",
+        _read_table_desc(),
+        {"query_table": "T000", "FIELDS": [{"FIELDNAME": "MANDT"}]},
+    )
+    assert 0x0301 in {tag for tag, _ in _walk_tlv(req)}
+
+
+def test_exception_rows_are_recognised_deliberately() -> None:
+    """PARAMCLASS 'X' rows describe exceptions, not parameters.
+
+    Live names from RFC_READ_TABLE on kernel 793.
+    """
+    from saprfclib.metadata import is_exception_row
+
+    for name in (
+        "DATA_BUFFER_EXCEEDED",
+        "FIELD_NOT_VALID",
+        "NOT_AUTHORIZED",
+        "OPTION_NOT_VALID",
+        "TABLE_NOT_AVAILABLE",
+        "TABLE_WITHOUT_DATA",
+    ):
+        assert is_exception_row(_params_row(parameter=name, paramclass="X", exid=""))
+    assert not is_exception_row(_params_row(parameter="FIELDS", paramclass="T", exid="u"))
+    assert not is_exception_row(_params_row(parameter="QUERY_TABLE", paramclass="I", exid="C"))

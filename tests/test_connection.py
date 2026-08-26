@@ -1349,3 +1349,142 @@ def test_golden_logon_fixture_carries_the_language_on_both_tags() -> None:
     tlv = fixture.raw_bytes[96:]
     assert _tlv_ext_value(tlv, 0x0115) == b"E"
     assert _tlv_ext_value(tlv, 0x0011) == b"E"
+
+
+# --------------------------------------------------------------------------- #
+# RFCPING request framing (issue #7, second defect)
+# --------------------------------------------------------------------------- #
+#
+# The probe must be a fully framed invoke, identical in shape to any other call.
+# It used to be a bare TLV body sent straight to the transport, which reaches the
+# gateway as a malformed frame: the server reads the function name where it expects
+# a 76-byte GW header and answers with a plain-text error instead of a response.
+# Offline tests missed it because MockTransport never validated what was sent.
+
+
+def test_ping_sends_a_gw_framed_invoke() -> None:
+    """The bytes on the wire must carry GW header, RFC marker, TLV body and footer."""
+    conn, transport = _ready_connection(extra=[_rfcping_ok()])
+    before = len(transport.sent)
+    conn.ping()
+
+    frame = transport.sent[before]
+    assert frame[0:2] == b"\x06\xcb", "missing GW frame type"
+    assert frame[2:4] == b"\x02\x00", "missing GW version"
+    # Omitting the APPC header version draws an immediate 0x06CE rejection.
+    assert struct.unpack_from(">I", frame, 24)[0] == 8
+    assert frame[76:80] == b"\xff\xff\x00\x04", "missing RFC marker"
+    assert len(frame) > 80, "frame carries no TLV body"
+
+
+def test_ping_request_tlv_matches_the_invoke_layout() -> None:
+    """Same record sequence as the golden invoke request, minus params.
+
+    Golden rfc_read_table_request.bin opens 0x0502 → 0x000b → 0x0102 → 0x0512 and
+    then carries its parameters; RFCPING takes none, so it terminates right after.
+    """
+    tlv = Connection._rfcping_request_tlv()
+    tags = [tag for tag, _ in _walk_invoke_tlv(tlv)]
+    assert tags == [0x0502, 0x000B, 0x0102, 0x0512]
+
+    values = dict(_walk_invoke_tlv(tlv))
+    assert values[0x0102].decode("utf-16-le") == "RFCPING"
+    assert values[0x000B].decode("utf-16-le") == "754"
+
+
+def test_ping_function_name_is_utf16le_not_ascii() -> None:
+    """The old probe sent b"RFCPING" raw; the invoke TLV is UTF-16LE throughout."""
+    tlv = Connection._rfcping_request_tlv()
+    assert b"R\x00F\x00C\x00P\x00I\x00N\x00G\x00" in tlv
+    assert b"RFCPING" not in tlv
+
+
+def test_ping_frame_footer_declares_the_tlv_length() -> None:
+    """Invoke footer is 0x0000 | len(tlv) BE16 | 0x0000 | 0x8500."""
+    tlv = Connection._rfcping_request_tlv()
+    frame = Connection._build_invoke_frame(b"12345678", tlv)
+    footer = frame[-8:]
+    assert struct.unpack_from(">H", footer, 2)[0] == len(tlv)
+    assert footer[6:8] == b"\x85\x00"
+
+
+def _walk_invoke_tlv(data: bytes) -> list[tuple[int, bytes]]:
+    """Walk an invoke TLV body, skipping close tags, stopping at the terminator."""
+    out: list[tuple[int, bytes]] = []
+    pos, n = 0, len(data)
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", data, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            length = struct.unpack_from(">I", data, pos)[0]
+            pos += 4
+        val = data[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", data, pos)[0] == tag:
+            pos += 2
+        out.append((tag, val))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# RFCPING golden replay (issue #7)
+# --------------------------------------------------------------------------- #
+#
+# Captured from a live A4H system (kernel 793 / release 758) at the transport seam,
+# so these frames carry no NI length prefix — they start at the GW header.
+# Sanitised preserving byte length: GW handle and session token substituted.
+
+FRAMING_DIR = GOLDEN_ROOT / "framing"
+
+
+def test_rfcping_request_matches_the_golden_capture_byte_for_byte() -> None:
+    """Our invoke builder reproduces the live RFCPING request exactly."""
+    fixture = load_fixture(FRAMING_DIR, "rfcping_request")
+    handle = fixture.raw_bytes[40:48]  # sanitised handle, preserved in place
+    built = Connection._build_invoke_frame(handle, Connection._rfcping_request_tlv())
+    assert built == fixture.raw_bytes
+
+
+def test_rfcping_golden_response_parses_as_success() -> None:
+    """The live response reports rc=0, and _rfcping_ok reads it."""
+    fixture = load_fixture(FRAMING_DIR, "rfcping_response")
+    assert Connection._rfcping_ok(fixture.raw_bytes) is True
+
+
+def test_rfcping_golden_response_puts_the_return_code_fourth() -> None:
+    """The property that broke the old parser.
+
+    0x0420 sits behind 0x0500, 0x0503 and a 16-byte 0x0514 session token, each
+    followed by a repeated close tag. Skipping the close tag is what keeps the walk
+    aligned long enough to reach the return code.
+    """
+    fixture = load_fixture(FRAMING_DIR, "rfcping_response")
+    tags = [tag for tag, _ in _walk_invoke_tlv(fixture.raw_bytes[80:])]
+    assert tags[:4] == [0x0500, 0x0503, 0x0514, 0x0420]
+
+
+def test_rfcping_golden_response_uses_the_server_direction_marker() -> None:
+    """Responses carry 00000002 at [76:80], not the client's ffff0004.
+
+    The 80-byte strip keys off the leading 0x06 GW byte, so it is unaffected.
+    """
+    fixture = load_fixture(FRAMING_DIR, "rfcping_response")
+    assert fixture.raw_bytes[0] == 0x06
+    assert fixture.raw_bytes[76:80] == b"\x00\x00\x00\x02"
+    request = load_fixture(FRAMING_DIR, "rfcping_request")
+    assert request.raw_bytes[76:80] == b"\xff\xff\x00\x04"
+
+
+def test_unstripped_gw_header_is_what_issue_7_reported() -> None:
+    """Reading the GW header as TLV yields 'length 512' — gw_version 0x0200.
+
+    Pins the exact failure signature from the issue report, so a regression is
+    recognisable rather than just red.
+    """
+    fixture = load_fixture(FRAMING_DIR, "rfcping_response")
+    raw = fixture.raw_bytes
+    assert struct.unpack_from(">H", raw, 2)[0] == 512  # the bogus "length"
+    # With the header stripped the same bytes parse cleanly.
+    assert Connection._rfcping_ok(raw) is True

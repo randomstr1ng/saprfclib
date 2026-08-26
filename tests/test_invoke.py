@@ -484,10 +484,16 @@ def _options_table_desc() -> FunctionDesc:
 
 
 def test_build_invoke_request_table_with_rows_uses_0x0301_protocol():
-    """Non-empty TABLE param emits 0x0301(name)+0x0330(dm_id)+0x0302(info)+0x0303(rows)+0x0306.
+    """Non-empty TABLE param emits 0x0301(name)+0x0330(dm_id)+0x0302(info)+0x0303(rows).
 
     CONFIRMED: the parameter layer::the serializer (writeRfcString tag=0x301) +
     RfcTable::the serializer (0x0330 DM ID + writeRfcTableInfo 0x302 + row data 0x303).
+
+    Note what the sequence does NOT contain: an 0x0306 end tag. The serializer writes
+    name, DM id, info and rows and stops; neither golden capture carries 0x0306 in a
+    request. This test previously asserted one was emitted, which went beyond the
+    source cited above — and emitting it makes a live server tear down the gateway
+    conversation (see test_no_end_tag_after_table_rows).
     """
     from saprfclib.invoke import build_invoke_request
 
@@ -542,8 +548,8 @@ def test_build_invoke_request_table_with_rows_uses_0x0301_protocol():
     assert 0x0303 in tag_ids, "0x0303 row content must be emitted"
     assert len(vals[0x0303]) == 144, "row must be padded to uc_size=144 bytes"
 
-    # End tag 0x0306
-    assert 0x0306 in tag_ids, "0x0306 end tag must be emitted"
+    # NO end tag — see the docstring.
+    assert 0x0306 not in tag_ids, "0x0306 must NOT be emitted on a request"
 
     # Protocol order: 0x0205 before 0x0301
     assert tag_ids.index(0x0205) < tag_ids.index(0x0301), "0x0205 decl before 0x0301 data"
