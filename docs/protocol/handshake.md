@@ -191,6 +191,25 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 function call — it is the protocol-level logon probe. The server processes the credentials and
 returns the logon response (frame 15). `RFCPING` means "validate this connection".
 
+**Note on the logon language (tags 0x0011 / 0x0115):** the wire carries the **one-character
+SAP language code** as a single ASCII byte — `"E"` in this capture. `saprfclib.connect(lang=…)`
+takes that one-character code and sends it verbatim.
+
+Two-character ISO codes are rejected rather than translated. The SAP RFC SDK does accept them
+on its `LANG` option, but only as a client-side convenience: it converts a code longer than one
+character to the same one-character SAP code through the SAP kernel's language table before the
+logon frame is built, and raises `RFC_INVALID_PARAMETER` when the code will not map. That
+mapping is not derivable by rule — `EN` maps to `E` and `DE` to `D`, but `ES` maps to `S` — and
+the table itself is SAP material this project does not carry, so `saprfclib` requires the SAP
+code directly.
+
+**Note on parsing the RFCPING response:** it is an ordinary RFC response and uses the full wire
+dialect — a GW frame, records that may use the extended-length form, and a repeated close tag
+after each record. A reader that skips the close-tag suffix desynchronises by two bytes after
+the first record and misreads every tag and length thereafter, which surfaces as a spurious
+"length exceeds remaining payload". A response that happens to place the return code `0x0420`
+first will hide the bug, because the walk returns before it can drift.
+
 **Note on COM_HEAD:** Only present in this logon frame. All subsequent RFC call frames (STFC_CONNECTION, STFC_STRUCTURE, etc.) have NO COM_HEAD — the TLV stream starts directly at NI payload offset 80.
 
 ### Server Logon Response TLV Tags (frame 15)

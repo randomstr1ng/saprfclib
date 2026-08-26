@@ -732,6 +732,42 @@ single-character type code (`'C'` = CHAR, `'I'` = INT4, …); `INTLENGTH` and `O
 Unicode byte counts, not character counts — the usual 2× trap. Parsed by `_parse_params_row`
 in `metadata.py`, live-verified.
 
+#### TABLES params: the direction types the parameter, not EXID — CONFIRMED
+
+A TABLES parameter is declared with the `EXID` of its **row structure**, not of the table.
+`RFC_READ_TABLE`'s `DATA`, `FIELDS` and `OPTIONS` all come back as `PARAMCLASS='T'` with
+`EXID='u'` (structure) and `TABNAME` naming the row type (`TAB512`, `RFC_DB_FLD`,
+`RFC_DB_OPT`). Typing the parameter from `EXID` alone therefore mistypes every TABLES param
+as a bare structure.
+
+`PARAMCLASS` is what decides. `'T'` means the wire carries a table, and
+`tests/golden/framing/rfc_read_table_response.bin` shows it directly: all three params are
+transported with the table tag sequence `0x0301 / 0x0330 / 0x0302 / 0x0304`, never as a
+`0x0203` scalar value. `_parse_params_row` promotes `PARAMCLASS='T'` rows to `RFCTYPE_TABLE`
+on that basis.
+
+The promotion applies only to top-level rows (blank `FIELDNAME`). Nested rows describe fields
+*inside* the row structure and repeat the parent's `PARAMCLASS`, so they keep their `EXID`
+type.
+
+Consequence of getting this wrong, both directions: the request emits the scalar
+`0x0201`/`0x0203` pair and the server rejects the call with `CALL_FUNCTION_ILLEGAL_P_TYPE`;
+the response decodes concatenated row bytes as a single work area, silently dropping every
+row past the first.
+
+A TABLES param also needs its row layout attached — the secondary
+`RFC_GET_STRUCTURE_DEFINITION` lookup keyed on `TABNAME` runs for `RFCTYPE_TABLE` as well as
+`RFCTYPE_STRUCTURE`, otherwise the descriptor reaches the encoder with `type_desc=None` and
+no rows can be laid out.
+
+#### Unset fields in a structure or table row
+
+ABAP initialises a work area before an RFC fills it, so callers routinely supply only the
+fields they care about — `RFC_READ_TABLE`'s `FIELDS` rows are the canonical case, where only
+`FIELDNAME` is set. Fields absent from a row dict are encoded at their type's initial value
+rather than skipped: fixed-width character fields must land blank-padded and numeric fields
+zero-padded, so leaving the buffer's NUL fill in place would put the wrong bytes on the wire.
+
 ### Logon password scrambling (tag 0x0117) — CONFIRMED
 
 Tag `0x0117` (17 bytes) is not a hash. It is a reversible byte cipher over the password:

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `connect()` and `connect_async()` accept `lang`, the logon language, sent on logon TLV
+  tag 0x0011. Takes the one-character SAP code (`"E"`, `"D"`, `"S"`, …), which is what the
+  wire carries; two-character ISO codes raise `ValueError` (#8).
+
+### Fixed
+
+- **TABLES parameters are no longer mistyped as structures.** `RFC_GET_FUNCTION_INTERFACE`
+  declares a TABLES param with the `EXID` of its row structure, so typing from `EXID` alone
+  gave every TABLES param `RFCTYPE_STRUCTURE`. Requests then emitted the scalar
+  0x0201/0x0203 pair and the server rejected the call with `CALL_FUNCTION_ILLEGAL_P_TYPE`;
+  responses decoded concatenated row bytes as a single work area and dropped every row past
+  the first. `PARAMCLASS='T'` now decides the type. Affects every function module with
+  TABLES parameters — `RFC_READ_TABLE`, `BAPI_USER_GET_DETAIL`, and so on (#9, #10).
+- The metadata bootstrap now fetches the row layout for TABLE parameters as well as
+  STRUCTURE parameters, so a correctly typed TABLES param reaches the encoder with its
+  `type_desc` attached instead of failing to encode its rows (#12).
+- Structure and table rows may be supplied as partial dicts. Fields the caller omits are
+  encoded at their type's initial value — blank-padded for character fields, zero-padded
+  for numeric — instead of raising `KeyError`. This is how most SAP function modules expect
+  to be called; `RFC_READ_TABLE`'s `FIELDS` rows are the common case (#11).
+- `ping()` no longer raises `ValueError` on responses from live systems. The RFCPING
+  response parser did not strip the gateway frame header, did not handle extended-length
+  records, and did not skip the repeated close tag that follows each record — the last of
+  which desynchronised the walk by two bytes and misread every subsequent tag (#7).
+
 ## [0.1.0] - 2026-08-20
 
 First public release. Beta: the offline test suite passes against byte-exact golden
