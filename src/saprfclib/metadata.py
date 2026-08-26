@@ -145,6 +145,7 @@ BOOTSTRAP_GET_FUNCTION_INTERFACE: FunctionDesc = FunctionDesc(
 # nuc values derived: char-like types halve (UTF-16 = 2x); binary types same.
 _COL_PARAMETER = "PARAMETER"  # parameter name
 _COL_PARAMCLASS = "PARAMCLASS"  # direction class: 'I'=IMPORT, 'E'=EXPORT, 'C'=CHANGING, 'T'=TABLES
+_COL_FIELDNAME = "FIELDNAME"  # field name inside a structure; blank for top-level params
 _COL_EXID = "EXID"  # type code string: 'C'=CHAR, 'I'=INT4, etc.
 _COL_INTLENGTH = "INTLENGTH"  # unicode byte length (confirmed from live capture)
 _COL_OFFSET = "OFFSET"  # unicode byte offset (confirmed from live capture)
@@ -210,6 +211,22 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     char-like types (CHAR/DATE/TIME/NUM/STRING) halve the unicode width; binary
     types keep the same size. type_desc is left None; _build_type_desc attaches
     nested layout for STRUCTURE/TABLE fields.
+
+    TABLES-direction promotion: GFI declares a TABLES parameter with the EXID of
+    its *row structure* (``EXID='u'`` → STRUCTURE) and ``PARAMCLASS='T'``.  EXID
+    alone therefore mistypes every TABLES param as a bare structure, which routes
+    it through the scalar 0x0201/0x0203 TLV pair instead of the table protocol and
+    makes the server reject the call with CALL_FUNCTION_ILLEGAL_P_TYPE.  The
+    direction is what decides: PARAMCLASS 'T' means the wire carries a table.
+
+    Source: golden fixture tests/golden/framing/rfc_read_table_response.bin —
+    RFC_READ_TABLE's DATA / FIELDS / OPTIONS params (all PARAMCLASS 'T') are
+    transported as 0x0301(name) 0x0330(dm_id) 0x0302(row_size,row_count)
+    0x0304(rows)…, i.e. the TABLE tag sequence, never as a 0x0203 scalar value.
+
+    The promotion is restricted to top-level rows (blank FIELDNAME).  Nested rows
+    describe fields *inside* the row structure and must keep their EXID type even
+    though they repeat the parent's PARAMCLASS.
     """
     name = row.get(_COL_PARAMETER)
     if not isinstance(name, str) or not name:
@@ -222,6 +239,10 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     direction = _PARAMCLASS_TO_DIRECTION.get(str(paramclass))
     if direction is None:
         raise ValueError(f"malformed PARAMS row: unknown PARAMCLASS code {paramclass!r}")
+    # A TABLES-direction top-level param is a table on the wire regardless of the
+    # EXID naming its row structure (see docstring — golden rfc_read_table_response).
+    if direction == RFC_TABLES and not str(row.get(_COL_FIELDNAME, "")).strip():
+        rfctype = RFCTYPE_TABLE
     intlength = _coerce_int(row, _COL_INTLENGTH)
     offset = _coerce_int(row, _COL_OFFSET)
     decimals = _coerce_int(row, _COL_DECIMALS)
