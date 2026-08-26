@@ -819,3 +819,141 @@ def test_per_row_records_are_not_resliced() -> None:
     )
     buffers = _table_row_buffers(stream, _GFI_ROW_BYTES, "PARAMS")
     assert [len(b) for b in buffers] == [402, 402, 402]
+
+
+# --------------------------------------------------------------------------- #
+# Server-direction TABLE output (SERVER-04)
+# --------------------------------------------------------------------------- #
+#
+# The server used to serialize every output parameter as a 0x0201/0x0203 pair,
+# tables included — the server-direction twin of the client mistyping that produced
+# CALL_FUNCTION_ILLEGAL_P_TYPE.
+
+
+def _server_desc() -> FunctionDesc:
+    return FunctionDesc(
+        name="Z_TEST",
+        parameters=[
+            FieldDesc("ECHOTEXT", RFCTYPE_CHAR, 10, 0, 20, 0, 0, direction=RFC_EXPORT),
+            FieldDesc(
+                "ROWS",
+                RFCTYPE_TABLE,
+                0,
+                0,
+                0,
+                0,
+                0,
+                direction=RFC_TABLES,
+                type_desc=_rfc_db_fld(),
+            ),
+        ],
+    )
+
+
+def test_server_emits_tables_with_the_table_protocol() -> None:
+    """A TABLE output must use 0x0301/0x0330/0x0302/0x0304, never a 0x0203 value."""
+    from saprfclib.server import RfcServer
+
+    body = RfcServer._build_response(
+        RfcServer, _server_desc(), {"ECHOTEXT": "hi", "ROWS": [{"FIELDNAME": "MANDT"}]}
+    )
+    tags = [tag for tag, _ in _walk_tlv(body)]
+    assert 0x0301 in tags and 0x0330 in tags and 0x0302 in tags and 0x0304 in tags
+    # The scalar pair is still used for ECHOTEXT, and only for it.
+    assert tags.count(0x0201) == 1
+    assert tags.count(0x0203) == 1
+
+
+def test_server_table_row_info_matches_the_rows() -> None:
+    """0x0302 must declare the real row size and count."""
+    from saprfclib.server import RfcServer
+
+    rows = [{"FIELDNAME": "MANDT"}, {"FIELDNAME": "MTEXT"}]
+    body = RfcServer._build_response(RfcServer, _server_desc(), {"ROWS": rows})
+    info = next(val for tag, val in _walk_tlv(body) if tag == 0x0302)
+    row_size, row_count = struct.unpack(">II", info)
+    assert (row_size, row_count) == (206, 2)
+    payloads = [val for tag, val in _walk_tlv(body) if tag == 0x0304]
+    assert [len(p) for p in payloads] == [206, 206]
+
+
+def test_server_round_trips_through_the_client_reader() -> None:
+    """What the server writes, the client's own extractor must read back."""
+    from saprfclib.invoke import _extract_name_value_pairs
+    from saprfclib.server import RfcServer
+
+    rows = [{"FIELDNAME": "MANDT"}, {"FIELDNAME": "MTEXT"}]
+    body = RfcServer._build_response(RfcServer, _server_desc(), {"ECHOTEXT": "hi", "ROWS": rows})
+    pairs = dict(_extract_name_value_pairs(body))
+    assert pairs["ROWS"] == encode(RFCTYPE_TABLE, rows, _server_desc().parameters[1])
+
+
+def test_server_empty_table_is_declared_without_a_data_block() -> None:
+    """An empty table needs its name only, mirroring the client side."""
+    from saprfclib.server import RfcServer
+
+    body = RfcServer._build_response(RfcServer, _server_desc(), {"ROWS": []})
+    tags = [tag for tag, _ in _walk_tlv(body)]
+    assert 0x0301 in tags
+    assert 0x0302 not in tags and 0x0304 not in tags
+
+
+def test_encoding_a_table_without_a_layout_names_the_parameter() -> None:
+    """The old bare assert said nothing and vanished under python -O."""
+    desc = _read_table_desc()
+    for f in desc.parameters:
+        if f.name == "FIELDS":
+            f.type_desc = None
+    with pytest.raises(ValueError, match="FIELDS.*row layout"):
+        build_invoke_request("RFC_READ_TABLE", desc, {"FIELDS": [{"FIELDNAME": "MANDT"}]})
+
+
+# --------------------------------------------------------------------------- #
+# INT4 wire byte order — CONFIRMED
+# --------------------------------------------------------------------------- #
+
+
+def test_int4_params_are_little_endian_on_the_wire() -> None:
+    """STFC_CHANGING's captured exchange settles INT4 byte order by arithmetic.
+
+    The function returns RESULT = START_VALUE + COUNTER and increments COUNTER.
+    The request carries START_VALUE=0a000000 and COUNTER=01000000; the response
+    carries RESULT=0b000000 and COUNTER=02000000. Read little-endian that is
+    10 + 1 = 11 and 1 -> 2, exactly what the function does. Read big-endian the
+    inputs would be 167772160 and 16777216, and no reading of the response makes
+    the arithmetic work — so the server decoded our bytes as little-endian.
+
+    Sources: tests/golden/framing/stfc_changing_request.bin and
+    stfc_changing_response.bin.
+    """
+    values: dict[str, dict[str, int]] = {}
+    for which in ("request", "response"):
+        raw = (GOLDEN / f"stfc_changing_{which}.bin").read_bytes()
+        if struct.unpack_from(">I", raw, 0)[0] == len(raw) - 4:
+            raw = raw[4:]
+        body = raw[80:] if raw[:1] == b"\x06" else raw
+        found: dict[str, int] = {}
+        name = None
+        for tag, val in _walk_tlv(body):
+            if tag == 0x0201:
+                name = val.decode("utf-16-le").rstrip("\x00 ")
+            elif tag == 0x0203 and name is not None and len(val) == 4:
+                found[name] = struct.unpack("<i", val)[0]
+                name = None
+        values[which] = found
+
+    start_value = values["request"]["START_VALUE"]
+    counter_in = values["request"]["COUNTER"]
+    result = values["response"]["RESULT"]
+    counter_out = values["response"]["COUNTER"]
+
+    assert (start_value, counter_in) == (10, 1)
+    assert result == start_value + counter_in  # 11
+    assert counter_out == counter_in + 1  # 2
+
+
+def test_int4_encoder_reproduces_the_captured_bytes() -> None:
+    """encode() must emit exactly what the capture shows for the same values."""
+    field = FieldDesc("START_VALUE", 8, 4, 0, 4, 0, 0, direction=RFC_IMPORT)
+    assert encode(8, 10, field) == bytes.fromhex("0a000000")
+    assert encode(8, 1, field) == bytes.fromhex("01000000")

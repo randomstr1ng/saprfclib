@@ -278,9 +278,16 @@ def build_invoke_request(
             rows: list[Any] = value if value else []
             if not rows:
                 continue
-            assert field.type_desc is not None, (
-                f"TABLE param {field.name!r} has no type_desc — cannot encode rows"
-            )
+            if field.type_desc is None:
+                # Not an assert: assertions vanish under `python -O`, and this one
+                # guards a real runtime condition — the RFC_GET_STRUCTURE_DEFINITION
+                # lookup for the row type failed, so there is no layout to encode to.
+                raise ValueError(
+                    f"cannot encode TABLE parameter {field.name!r}: its row layout "
+                    f"was never resolved (type_desc is None). The "
+                    f"RFC_GET_STRUCTURE_DEFINITION lookup for its DDIC type did not "
+                    f"complete."
+                )
             all_row_bytes = encode(_RFCTYPE_TABLE, rows, field)
             row_size = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
             row_count = len(rows)
