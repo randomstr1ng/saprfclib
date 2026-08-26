@@ -1,0 +1,122 @@
+{
+  "message_type": "RFCPING_RESPONSE",
+  "capture_source": "live capture 2026-08-26 at the transport seam; SAP A4H kernel 793 release 758, sysnr 00, gateway port 3300, unicode, codepage 4103",
+  "evidence": "recorded by wrapping Transport.recv_message around a single Connection.ping(); return code 0x0420 == 0, ping() returned True",
+  "ni_header_length": 0,
+  "notes": [
+    "Captured ABOVE the NI layer \u2014 no 4-byte NI length prefix; the frame starts at the GW header.",
+    "The server-direction RFC marker at [76:80] is 00000002, NOT the client-direction ffff0004. The 80-byte strip is driven by the leading 0x06 GW-frame byte, so it is unaffected by the marker value.",
+    "The GW header carries the negotiated codepage as ASCII '4103' at offset 69.",
+    "Regression guard for issue #7: the return code 0x0420 is the FOURTH record, not the first. Preceded by 0x0500, 0x0503 and a 16-byte 0x0514 session token, each followed by a repeated close tag. A reader that does not skip the close tag desynchronises by two bytes before reaching 0x0420; one that does not strip the GW header reads gw_version (0x0200 = 512) as a TLV length, which is the 'length 512 exceeds remaining payload' signature reported in issue #7.",
+    "Sanitised, byte length preserved: the GW conversation handle at [40:48] replaced with '00000000', and the 16-byte 0x0514 session token value at [96:112] replaced with bytes 0x00..0x0f. Nothing else altered; no credentials or hostnames present.",
+    "Tag 0x0667 carries the call duration as a little-endian IEEE-754 double in microseconds (138.0 in this capture). Requests carry the 8-byte invoke footer in the same position; responses carry this instead."
+  ],
+  "expected_parse": {
+    "gw_type": "0x06cb",
+    "rfc_marker": "00000002",
+    "rfc_marker_direction": "server",
+    "return_code": 0,
+    "codepage": "4103",
+    "handling_program": "SAPLSYSU",
+    "total_length": 236,
+    "call_duration_micros": 138.0
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, original length preserved"
+    },
+    {
+      "offset": 69,
+      "length": 4,
+      "name": "codepage",
+      "value": "4103",
+      "type": "fixed",
+      "note": "ASCII; negotiated codepage in the GW header"
+    },
+    {
+      "offset": 76,
+      "length": 4,
+      "name": "rfc_marker",
+      "value": "00000002",
+      "type": "fixed",
+      "note": "server direction \u2014 differs from the client ffff0004"
+    },
+    {
+      "offset": 80,
+      "length": 6,
+      "name": "tlv_0500",
+      "value": "",
+      "type": "fixed",
+      "note": "call start, empty, + close tag"
+    },
+    {
+      "offset": 86,
+      "length": 6,
+      "name": "tlv_0503",
+      "value": "",
+      "type": "fixed",
+      "note": "empty, purpose [ASSUMED] \u2014 present in every observed response"
+    },
+    {
+      "offset": 92,
+      "length": 22,
+      "name": "tlv_0514",
+      "value": "session token",
+      "type": "variable",
+      "note": "16-byte binary session token; SANITISED"
+    },
+    {
+      "offset": 114,
+      "length": 10,
+      "name": "tlv_0420",
+      "value": "00000000",
+      "type": "fixed",
+      "note": "full TLV record: tag 0x0420 | BE16 len=4 | value 00000000 (at offset 118) | repeated close tag"
+    },
+    {
+      "offset": 124,
+      "length": 6,
+      "name": "tlv_0512",
+      "value": "",
+      "type": "fixed",
+      "note": "empty"
+    },
+    {
+      "offset": 130,
+      "length": 86,
+      "name": "tlv_0130",
+      "value": "SAPLSYSU",
+      "type": "variable",
+      "note": "handling ABAP program, UTF-16LE space-padded to 40 chars"
+    },
+    {
+      "offset": 216,
+      "length": 14,
+      "name": "tlv_0667",
+      "value": "timing",
+      "type": "variable",
+      "note": "server-side call duration: IEEE-754 double, LITTLE-endian, in microseconds. This capture decodes to 138.0 us; big-endian yields a denormal (2.08e-317), so the byte order is unambiguous. Note the TLV tag and length are BIG-endian while this payload is little-endian - byte order is per-field, not per-connection."
+    },
+    {
+      "offset": 230,
+      "length": 6,
+      "name": "terminator",
+      "value": "ffff0000ffff",
+      "type": "fixed",
+      "note": ""
+    }
+  ]
+}
