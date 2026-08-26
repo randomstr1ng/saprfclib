@@ -1164,3 +1164,171 @@ class TestV1NgtMapping:
         assert _V1_NGT[30] == 25  # XSTRING
         assert _V1_NGT[31] == 4  # INT8
         assert _V1_NGT[32] == 29  # UTCLONG → ngrfc_type 0x1d ( case 0x20)
+
+
+# --------------------------------------------------------------------------- #
+# RFCPING response parsing (issue #7)
+# --------------------------------------------------------------------------- #
+#
+# _rfcping_ok reads the same wire dialect as every other TLV reader in the tree:
+# live responses arrive as GW frames, records may use the extended-length form,
+# and each record is followed by a repeated close tag. The synthetic fixture at
+# the top of this module happens to place 0x0420 first in a simple-format stream,
+# which is why the pre-fix parser passed while failing on real responses.
+
+
+def _tlv_closed(tag: int, value: bytes) -> bytes:
+    """Extended TLV record: tag + len + value + repeated tag (live server format)."""
+    return struct.pack(">HH", tag, len(value)) + value + struct.pack(">H", tag)
+
+
+def _gw_frame(tlv_body: bytes) -> bytes:
+    """Wrap a TLV stream in a GW frame: 76-byte header + 4-byte RFC marker."""
+    return b"\x06\xcb" + b"\x00" * 74 + b"\xff\xff\x00\x01" + tlv_body
+
+
+def test_rfcping_ok_reads_return_code_after_leading_records() -> None:
+    """0x0420 is not always first — the walk must survive records before it."""
+    body = (
+        _tlv_closed(0x0500, b"")
+        + _tlv_closed(0x0503, b"")
+        + _tlv_closed(0x0514, b"\x11" * 16)
+        + _tlv_closed(0x0420, struct.pack(">I", 0))
+        + _tlv_closed(0xFFFF, b"")
+    )
+    assert Connection._rfcping_ok(body) is True
+
+
+def test_rfcping_ok_strips_the_gw_header() -> None:
+    """A live response is a GW frame; parsing it raw reads header bytes as tags."""
+    body = (
+        _tlv_closed(0x0500, b"")
+        + _tlv_closed(0x0420, struct.pack(">I", 0))
+        + _tlv_closed(0xFFFF, b"")
+    )
+    assert Connection._rfcping_ok(_gw_frame(body)) is True
+
+
+def test_rfcping_ok_handles_extended_length_records() -> None:
+    """A record >= 0xFFFF bytes uses the 0xFFFF marker + 4-byte BE length."""
+    big = b"\x5a" * 0x10000
+    body = (
+        struct.pack(">HH", 0x0402, 0xFFFF)
+        + struct.pack(">I", len(big))
+        + big
+        + struct.pack(">H", 0x0402)
+        + _tlv_closed(0x0420, struct.pack(">I", 0))
+        + _tlv_closed(0xFFFF, b"")
+    )
+    assert Connection._rfcping_ok(_gw_frame(body)) is True
+
+
+def test_rfcping_reports_a_nonzero_return_code() -> None:
+    body = (
+        _tlv_closed(0x0500, b"")
+        + _tlv_closed(0x0420, struct.pack(">I", 163))
+        + _tlv_closed(0xFFFF, b"")
+    )
+    assert Connection._rfcping_ok(_gw_frame(body)) is False
+
+
+def test_rfcping_still_rejects_a_genuinely_truncated_record() -> None:
+    """Bounds checking stays in force — a real overrun must still raise."""
+    truncated = struct.pack(">HH", 0x0402, 512) + b"\x00" * 8
+    with pytest.raises(ValueError, match="exceeds remaining payload"):
+        Connection._rfcping_ok(truncated)
+
+
+def test_rfcping_raises_when_no_return_code_is_present() -> None:
+    body = _tlv_closed(0x0500, b"") + _tlv_closed(0xFFFF, b"")
+    with pytest.raises(ValueError, match="missing return-code"):
+        Connection._rfcping_ok(_gw_frame(body))
+
+
+# --------------------------------------------------------------------------- #
+# Logon language (issue #8)
+# --------------------------------------------------------------------------- #
+
+
+def test_logon_request_carries_the_requested_language() -> None:
+    """Tag 0x0011 holds the one-character SAP code as a single ASCII byte.
+
+    Source: golden fixture tests/golden/framing/logon_request.json (rfc_lang 'E').
+    """
+    tlv = Connection._build_logon_request(
+        client="001", user="DEVELOPER", passwd="secret", lang="D", seed=1
+    )
+    assert _tlv_ext_value(tlv, 0x0011) == b"D"
+
+
+def test_logon_language_defaults_to_english() -> None:
+    tlv = Connection._build_logon_request(client="001", user="DEVELOPER", passwd="secret", seed=1)
+    assert _tlv_ext_value(tlv, 0x0011) == b"E"
+
+
+def test_logon_language_is_uppercased() -> None:
+    tlv = Connection._build_logon_request(
+        client="001", user="DEVELOPER", passwd="secret", lang="d", seed=1
+    )
+    assert _tlv_ext_value(tlv, 0x0011) == b"D"
+
+
+@pytest.mark.parametrize("bad", ["EN", "", "DE", "ENG"])
+def test_two_character_iso_codes_are_rejected(bad: str) -> None:
+    """ISO codes need the SAP kernel language table, which this project does not carry."""
+    from saprfclib.connection import _encode_logon_language
+
+    with pytest.raises(ValueError, match="one-character SAP language code"):
+        _encode_logon_language(bad)
+
+
+def test_connect_accepts_lang_keyword() -> None:
+    """connect()/connect_async() expose lang so C SDK callers can migrate."""
+    import inspect
+
+    from saprfclib.connection import connect, connect_async
+
+    assert "lang" in inspect.signature(connect).parameters
+    assert "lang" in inspect.signature(connect_async).parameters
+
+
+def _tlv_ext_value(stream: bytes, want: int) -> bytes:
+    """Return the first value for `want` in an extended-format TLV stream."""
+    pos, n = 0, len(stream)
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", stream, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            length = struct.unpack_from(">I", stream, pos)[0]
+            pos += 4
+        val = stream[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", stream, pos)[0] == tag:
+            pos += 2
+        if tag == want:
+            return val
+    raise AssertionError(f"tag 0x{want:04x} not found")
+
+
+def test_logon_request_sets_language_on_both_tags() -> None:
+    """0x0115 and 0x0011 both carry the language byte.
+
+    Source: golden fixture tests/golden/framing/logon_request.bin — both tags hold
+    b"E" for a logon in English.
+    """
+    tlv = Connection._build_logon_request(
+        client="001", user="DEVELOPER", passwd="secret", lang="D", seed=1
+    )
+    assert _tlv_ext_value(tlv, 0x0115) == b"D"
+    assert _tlv_ext_value(tlv, 0x0011) == b"D"
+
+
+def test_golden_logon_fixture_carries_the_language_on_both_tags() -> None:
+    """Pin the expectation to the capture itself, not just to our builder."""
+    fixture = load_fixture(GOLDEN_ROOT / "framing", "logon_request")
+    # ni(4) + gw header(76) + rfc marker(4) + com_head(12) = 96
+    tlv = fixture.raw_bytes[96:]
+    assert _tlv_ext_value(tlv, 0x0115) == b"E"
+    assert _tlv_ext_value(tlv, 0x0011) == b"E"

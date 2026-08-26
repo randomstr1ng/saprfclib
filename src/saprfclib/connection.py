@@ -167,7 +167,7 @@ _TLV_CAPS = b"\x03\x01\x01\x01\x01\x01\x00\x00"  # tag 0x0101: RFC capability fl
 _TLV_VER = b"\x00\x00\x0e\x0b"  # tag 0x0103: RFC protocol version (14.11)
 _TLV_CP = b"\x04\x01\x00\x03\x00\x0a\x02\x00\x00\x00\x23"  # tag 0x0106: codepage descriptor
 _TLV_PROG = b"<unknown>"  # tag 0x0006: caller program name
-_TLV_LANG = b"E"  # tags 0x0115/0x0011: logon language
+_DEFAULT_LANG = "E"  # tags 0x0115/0x0011: logon language when the caller gives none
 _TLV_REL = b"754"  # tags 0x0012/0x0013/0x000B: SAP release
 
 # wRFC-specific static TLV values (pcap-verified frames 108/169; different from NI/TCP)
@@ -268,6 +268,36 @@ def _tlv(tag: int, value: bytes) -> bytes:
     return tag.to_bytes(2, "big") + len(value).to_bytes(2, "big") + value
 
 
+def _encode_logon_language(lang: str) -> bytes:
+    """Validate a logon language and return its wire bytes for tags 0x0011/0x0115.
+
+    The wire carries the one-character SAP language code as a single ASCII byte,
+    on both tags. Source: golden fixture
+    tests/golden/framing/logon_request.bin — 0x0115 and 0x0011 each hold b"E" for
+    a logon in English.
+
+    Two-character ISO codes are rejected rather than translated. The SAP RFC SDK
+    accepts them on its LANG option, but only by converting them to the same
+    one-character SAP code through the SAP kernel's language table before the
+    logon frame is built; that mapping is not derivable by rule (EN maps to E and
+    DE to D, but ES maps to S) and the table is SAP material this project does not
+    carry. Passing the SAP code directly is the supported form here.
+    """
+    if not isinstance(lang, str):
+        raise ValueError(f"lang must be a str, got {type(lang).__name__!r}")
+    code = lang.strip().upper()
+    if len(code) != 1:
+        raise ValueError(
+            f"lang must be the one-character SAP language code, got {lang!r}. "
+            f"Two-character ISO codes are not accepted — use 'E' for English, "
+            f"'D' for German, 'S' for Spanish, and so on."
+        )
+    try:
+        return code.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"lang must be an ASCII SAP language code, got {lang!r}") from exc
+
+
 def _tlv_ext(tag: int, value: bytes) -> bytes:
     """Extended TLV: tag(2B) + len(2B) + value + tag(2B) — live wire format."""
     t = tag.to_bytes(2, "big")
@@ -339,7 +369,7 @@ def _build_ws_logon_message(
     user: str,
     passwd: str,
     client: str,
-    lang: str = "E",
+    lang: str = _DEFAULT_LANG,
     local_ip: str = "127.0.0.1",
     local_port: int = 0,
     server_host: str,
@@ -1253,7 +1283,7 @@ def _build_ws_invoke_message(
     # legacy params accepted but unused (callers may still pass them)
     sysnr: str = "00",
     local_ip: str = "127.0.0.1",
-    lang: str = "E",
+    lang: str = _DEFAULT_LANG,
 ) -> bytes:
     """Build a subsequent wRFC function-invoke frame (pcap-verified structure).
 
@@ -1809,7 +1839,7 @@ class Connection:
         client: str,
         user: str,
         passwd: str,
-        lang: str = "E",
+        lang: str = _DEFAULT_LANG,
         sysnr: str = "00",
     ) -> None:
         """Store wRFC auth params and advance to WS_PENDING; no LOGON frame sent.
@@ -1851,7 +1881,7 @@ class Connection:
         client: str,
         user: str,
         passwd: str,
-        lang: str = "E",
+        lang: str = _DEFAULT_LANG,
         sysnr: str = "00",
     ) -> None:
         """Deferred wRFC LOGON setup: store auth, advance to WS_PENDING, wait for first call.
@@ -1914,6 +1944,7 @@ class Connection:
         passwd: str,
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
+        lang: str = _DEFAULT_LANG,
     ) -> None:
         """Drive the NI/GW/logon handshake to READY (or raise on failure).
 
@@ -1931,6 +1962,7 @@ class Connection:
                     client=client,
                     user=user,
                     passwd=passwd,
+                    lang=lang,
                     sysnr=f"{sysnr:02d}",
                 )
                 return
@@ -1963,6 +1995,7 @@ class Connection:
                 ashost=ashost,
                 sysnr=sysnr,
                 local_ip=local_ip,
+                lang=lang,
             ):
                 self._transport.send_message(req)
 
@@ -1989,6 +2022,7 @@ class Connection:
                     ashost=ashost,
                     sysnr=sysnr,
                     local_ip=local_ip,
+                    lang=lang,
                 ):
                     self._transport.send_message(req)
 
@@ -2002,6 +2036,7 @@ class Connection:
         ashost: str,
         sysnr: int,
         local_ip: str,
+        lang: str = _DEFAULT_LANG,
     ) -> list[bytes]:
         """Return the facade-owned frame(s) for the leg just advanced past.
 
@@ -2020,7 +2055,7 @@ class Connection:
                 ]
             case SessionState.GW_CONNECTED:
                 tlv = self._build_logon_request(
-                    client=client, user=user, passwd=passwd, local_ip=local_ip
+                    client=client, user=user, passwd=passwd, local_ip=local_ip, lang=lang
                 )
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
@@ -2253,6 +2288,7 @@ class Connection:
         seed: int | None = None,
         local_ip: str = "127.0.0.1",
         program_name: bytes = b"python3",
+        lang: str = _DEFAULT_LANG,
     ) -> bytes:
         """Build the RFC logon TLV body in extended wire format (tag+len+val+tag).
 
@@ -2277,10 +2313,12 @@ class Connection:
             _tlv_ext(_TAG_CLIENT, client.encode("ascii", "replace")),
             _tlv_ext(_TAG_USER, user.encode("ascii", "replace")),
             _tlv_ext(_TAG_PASSWORD, _scramble_password(passwd, seed=seed)),
-            _tlv_ext(0x0115, b""),
+            # 0x0115 and 0x0011 both carry the logon language in the capture
+            # (golden logon_request.bin: b"E" on each).
+            _tlv_ext(0x0115, _encode_logon_language(lang)),
             _tlv_ext(0x0501, b"\x01"),
             _tlv_ext(0x0007, b"127.0.0.1"),
-            _tlv_ext(0x0011, _TLV_LANG),
+            _tlv_ext(0x0011, _encode_logon_language(lang)),
             _tlv_ext(0x0012, _TLV_REL),
             _tlv_ext(0x0013, _TLV_REL),
             _tlv_ext(0x0008, hn),
@@ -2513,7 +2551,12 @@ class Connection:
             try:
                 fd = _parse_params_row(row)
                 parameters.append(fd)
-                if fd.rfctype == RFCTYPE_STRUCTURE:
+                # TABLE params need the row layout just as much as STRUCTURE params
+                # do: _parse_params_row promotes PARAMCLASS 'T' rows to RFCTYPE_TABLE
+                # (see metadata._parse_params_row), so gating this lookup on
+                # STRUCTURE alone would leave every TABLES param with type_desc=None
+                # and make build_invoke_request refuse to encode its rows.
+                if fd.rfctype in (RFCTYPE_STRUCTURE, RFCTYPE_TABLE):
                     tabname = row.get("TABNAME", "")
                     if tabname:
                         struct_lookups.append((fd, tabname))
@@ -2634,7 +2677,19 @@ class Connection:
 
     @staticmethod
     def _rfcping_ok(resp: bytes) -> bool:
-        """Parse the RFCPING response; True iff the return-code TLV 0x0420 == 0."""
+        """Parse the RFCPING response; True iff the return-code TLV 0x0420 == 0.
+
+        Walks the same wire dialect every other reader in the tree handles — a
+        live response is a GW frame, its records use the extended-length form for
+        payloads >= 0xFFFF, and each record is followed by a repeated close tag
+        (session._parse_tlv, invoke._extract_name_value_pairs,
+        _parse_gfi_params_rows all do this).  Skipping the close tag is not
+        optional: without it the walk desynchronises by two bytes after the first
+        record and every subsequent tag and length is read out of garbage, which
+        surfaces as a bogus "length exceeds remaining payload" on any response
+        that does not happen to put 0x0420 first.
+        """
+        resp = _strip_gw_header(resp)
         pos = 0
         n = len(resp)
         while pos + 4 <= n:
@@ -2643,6 +2698,15 @@ class Connection:
             pos += 4
             if tag == _TAG_TERMINATOR:
                 break
+            if length == 0xFFFF:
+                # Extended form: 4B BE length follows the 0xFFFF marker.
+                if pos + 4 > n:
+                    raise ValueError(
+                        f"malformed RFCPING response: tag 0x{tag:04x} extended form "
+                        f"but buffer too short for ext_len ({n - pos} bytes remain)"
+                    )
+                length = int.from_bytes(resp[pos : pos + 4], "big")
+                pos += 4
             end = pos + length
             if end > n:
                 raise ValueError(
@@ -2654,6 +2718,9 @@ class Connection:
                     raise ValueError(f"RFCPING return code TLV has length {length}, expected 4")
                 return int.from_bytes(resp[pos:end], "big") == 0
             pos = end
+            # Skip the optional repeated-tag suffix used in extended TLV format.
+            if pos + 2 <= n and int.from_bytes(resp[pos : pos + 2], "big") == tag:
+                pos += 2
         raise ValueError("RFCPING response missing return-code TLV 0x0420")
 
     def _ws_e163_classic_fallback(
@@ -3563,6 +3630,7 @@ def connect(
     user: str,
     passwd: str,
     *,
+    lang: str = _DEFAULT_LANG,
     timeout: float | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
@@ -3605,6 +3673,11 @@ def connect(
         ``snc_sso`` to False (D-12). ``wshost`` takes precedence: SNC-over-wRFC
         is out of scope for Phase 7.
       - direct: ``port = 3300 + int(sysnr)`` (gateway port), connect_tcp, handshake.
+
+    ``lang`` is the logon language as the one-character SAP code ('E' English,
+    'D' German, 'S' Spanish, …), sent on logon TLV tag 0x0011. Two-character ISO
+    codes raise ValueError — see _encode_logon_language for why the ISO mapping is
+    not performed here.
 
     The SAProuter and message-server wire bytes are [ASSUMED] (router.py) and
     gated behind the plan 03-03 blocking human-verify checkpoint. ``passwd``,
@@ -3716,6 +3789,7 @@ def connect(
         _client = client
         _user = user
         _passwd = passwd
+        _lang = lang
         _sysnr = int(sysnr)
         _max_retries = max_retries
         _retry_delay = retry_delay
@@ -3744,6 +3818,7 @@ def connect(
                 passwd=_passwd,
                 ashost=_ashost,
                 sysnr=_sysnr,
+                lang=_lang,
             )
             return ac
 
@@ -3761,7 +3836,9 @@ def connect(
         hops = parse_route_string(saprouter)
         transport.send_message(build_ni_route(hops, ashost, str(port)))
 
-    conn._handshake(client=client, user=user, passwd=passwd, ashost=ashost, sysnr=int(sysnr))
+    conn._handshake(
+        client=client, user=user, passwd=passwd, ashost=ashost, sysnr=int(sysnr), lang=lang
+    )
     return conn
 
 
@@ -3828,6 +3905,7 @@ class AsyncConnection:
         passwd: str,
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
+        lang: str = _DEFAULT_LANG,
     ) -> None:
         """Drive the NI/GW/logon handshake to READY (classic TCP path, async).
 
@@ -3876,6 +3954,7 @@ class AsyncConnection:
                             user=user,
                             passwd=passwd,
                             local_ip=local_ip,
+                            lang=lang,
                         )
                         await self._transport.send_message(
                             Connection._build_logon_frame(handle, tlv)
@@ -3942,7 +4021,12 @@ class AsyncConnection:
             try:
                 fd = _parse_params_row(row)
                 parameters.append(fd)
-                if fd.rfctype == RFCTYPE_STRUCTURE:
+                # TABLE params need the row layout just as much as STRUCTURE params
+                # do: _parse_params_row promotes PARAMCLASS 'T' rows to RFCTYPE_TABLE
+                # (see metadata._parse_params_row), so gating this lookup on
+                # STRUCTURE alone would leave every TABLES param with type_desc=None
+                # and make build_invoke_request refuse to encode its rows.
+                if fd.rfctype in (RFCTYPE_STRUCTURE, RFCTYPE_TABLE):
                     tabname = row.get("TABNAME", "")
                     if tabname:
                         struct_lookups.append((fd, tabname))
@@ -4543,6 +4627,7 @@ async def connect_async(
     user: str,
     passwd: str,
     *,
+    lang: str = _DEFAULT_LANG,
     timeout: float | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
@@ -4572,6 +4657,9 @@ async def connect_async(
         retry_delay:  Base backoff delay in seconds; doubles each attempt (default 1.0).
         tid_store:    Pluggable TidStore for durable tRFC/qRFC parking (D-03b).
         unit_store:   Pluggable UnitStore for durable bgRFC parking (D-03b).
+
+    ``lang`` is the logon language as the one-character SAP code, matching
+    saprfclib.connect(); two-character ISO codes raise ValueError.
     """
     if snc_lib is not None or wshost is not None:
         raise NotImplementedError(
@@ -4616,5 +4704,6 @@ async def connect_async(
         passwd=passwd,
         ashost=ashost,
         sysnr=int(sysnr),
+        lang=lang,
     )
     return conn
