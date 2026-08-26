@@ -58,6 +58,7 @@ from saprfclib.invoke import (
     build_invoke_request,
     build_trfc_confirm_request,
     build_trfc_request,
+    dm_table_ids,
     parse_invoke_response,
 )
 from saprfclib.language import normalize_logon_language
@@ -70,6 +71,7 @@ from saprfclib.metadata import (
     MetadataCache,
     _parse_params_row,
     get_function_desc,
+    is_exception_row,
 )
 from saprfclib.session import ConnectionAttributes, Session, SessionState
 from saprfclib.stores import TidStore, UnitState, UnitStore
@@ -1475,10 +1477,12 @@ def _parse_gfi_params_rows(
         OPTIONAL    1 char  (2 B)   — 'X' if optional
         Total: 402 bytes
 
-    Wire encoding note: POSITION/OFFSET/INTLENGTH are NUC (non-unicode, 1-byte-per-char)
-    counts. For char-like EXID codes (C D T N g), multiply by 2 to get unicode byte
-    width before passing to _parse_params_row, which expects uc (unicode byte) values.
-    Binary/numeric types (I b B 8 F P X u h v e) are already byte counts — no scaling.
+    Wire encoding note: OFFSET/INTLENGTH arrive in the character width the connection
+    itself uses. On a Unicode connection they are already Unicode byte counts and are
+    passed straight to _parse_params_row, which expects uc (unicode byte) values;
+    scaling them again produced parameter values twice their declared width, which the
+    server silently discarded. Binary/numeric types (I b B 8 F P X u h v e) are byte
+    counts either way.
 
     Falls back to an empty list on any parse error (DoS guard: rogue peer returns
     malformed rows — skip them rather than crash).
@@ -1492,7 +1496,7 @@ def _parse_gfi_params_rows(
     _TAG_TERM = 0xFFFF
     _ROW_BYTES = 402
 
-    # EXID char-like codes that need ×2 to convert NUC count → unicode byte count.
+    # EXID char-like codes whose width depends on the connection's character size.
     # Mirror of metadata._CHAR_LIKE_TYPES keyed by EXID string codes.
     _CHAR_LIKE_EXID = frozenset("CDTNg")
 
@@ -1551,8 +1555,22 @@ def _parse_gfi_params_rows(
         except Exception:
             continue  # skip malformed row
 
-        # Convert NUC counts → unicode byte counts for char-like types.
-        if exid in _CHAR_LIKE_EXID:
+        # OFFSET / INTLENGTH arrive in the character width the *connection* uses, so
+        # on a Unicode connection they are already Unicode byte counts and must be
+        # passed through untouched. _parse_params_row expects uc_* values and derives
+        # the nuc_* pair by halving char-like types.
+        #
+        # Source: golden fixture tests/golden/framing/rfc_read_table_request.bin —
+        # RFC_READ_TABLE.QUERY_TABLE is DD02L-TABNAME, CHAR(30), and the captured
+        # 0x0203 value is 60 bytes (30 chars); DELIMITER is SONV-FLAG, CHAR(1), and
+        # its captured value is 2 bytes. A Unicode-connection GFI reports 60 and 2 for
+        # those, so doubling them emitted 120- and 4-byte values, which the server
+        # rejected (observed live on kernel 793: RFC_READ_TABLE raised
+        # TABLE_NOT_AVAILABLE because QUERY_TABLE never arrived intact).
+        if exid in _CHAR_LIKE_EXID and not unicode_mode:
+            # [ASSUMED] Non-Unicode connections are expected to report NUC counts,
+            # which need doubling to reach the uc_* representation the codec uses.
+            # No non-Unicode capture exists to confirm this branch.
             uc_length = intlen_nuc * 2
             uc_offset = offset_nuc * 2
         else:
@@ -2545,8 +2563,22 @@ class Connection:
                     tabname = row.get("TABNAME", "")
                     if tabname:
                         struct_lookups.append((fd, tabname))
-            except ValueError:
-                continue  # skip malformed rows defensively
+            except ValueError as exc:
+                # Exception rows are expected here and are not parameters.
+                if is_exception_row(row):
+                    continue
+                # A parameter we cannot parse is a real problem: it will be missing
+                # from the descriptor, so build_invoke_request will reject any value
+                # the caller passes for it and the server will never return it.
+                # Never drop one without saying so (T-03-META: the row is untrusted,
+                # so keep parsing the rest rather than aborting the whole call).
+                _logger.warning(
+                    "ignoring unparseable metadata row for %s parameter %r: %s",
+                    func_name.upper(),
+                    row.get("PARAMETER", "<unnamed>"),
+                    exc,
+                )
+                continue
 
         # Secondary bootstrap: fetch TypeDesc for each STRUCTURE param's row layout.
         # Uses _call_struct_bootstrap which calls RFC_GET_STRUCTURE_DEFINITION.
@@ -2639,13 +2671,28 @@ class Connection:
         dfies_rows = _parse_dfies_rows(response)
         return _build_type_desc_from_dfies(tabname, dfies_rows)
 
+    @staticmethod
+    def _rfcping_request_tlv() -> bytes:
+        """Build the RFCPING invoke TLV body.
+
+        RFCPING is an ordinary zero-parameter function call, not a special frame —
+        the logon TLV itself ends with one (tag 0x0102, see handshake.md). Building
+        it through ``build_invoke_request`` keeps it on the capture-confirmed invoke
+        path instead of hand-rolling a second TLV writer.
+        """
+        return build_invoke_request("RFCPING", FunctionDesc(name="RFCPING", parameters=[]), {})
+
     def ping(self) -> bool:
         """Issue an RFC-level RFCPING and report liveness (TRANS-05).
 
         Under the single-in-flight lock: require READY, flip to IN_CALL, send the
-        RFCPING probe frame, read the response, and check the return-code TLV
+        RFCPING invoke frame, read the response, and check the return-code TLV
         (0x0420 == 0). Always restores READY in ``finally`` (TRANS-04).
         Delegates to the async core via _LoopThread for classic TCP connections (D-07).
+
+        The probe is a fully framed invoke — GW header, RFC marker, TLV body and
+        footer — exactly like any other call. A bare TLV body reaches the gateway as
+        a malformed frame and draws a plain-text error back instead of a response.
         """
         if self._async_conn is not None and self._loop_thread is not None:
             return bool(self._loop_thread.run(self._async_conn.ping()))
@@ -2653,8 +2700,18 @@ class Connection:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
-                probe = b"".join([_tlv(_TAG_FUNCTION, _RFCPING_NAME), _tlv(_TAG_TERMINATOR, b"")])
-                self._transport.send_message(probe)
+                request_tlv = self._rfcping_request_tlv()
+                if self._is_ws():
+                    frame = _build_ws_invoke_message(
+                        "RFCPING",
+                        FunctionDesc(name="RFCPING", parameters=[]),
+                        {},
+                        session_key=self._next_ws_invoke_key(),
+                    )
+                    self._transport.send_message(frame)
+                else:
+                    handle = self._session.handle or b"        "
+                    self._send_invoke_frame(self._build_invoke_frame(handle, request_tlv))
                 resp = self._transport.recv_message()
                 return self._rfcping_ok(resp)
             finally:
@@ -2910,6 +2967,7 @@ class Connection:
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
                     request_tlv = build_invoke_request(func_name, desc, dict(params))
+                    dm_names = dm_table_ids(desc, dict(params))
                     handle = self._session.handle or b"        "
                     request = self._build_invoke_frame(handle, request_tlv)
                     try:
@@ -2918,7 +2976,7 @@ class Connection:
                     except (OSError, EOFError) as exc:
                         raise CommunicationError(str(exc), original_exception=exc) from exc
                     tlv_response = _strip_gw_header(response)
-                    result = parse_invoke_response(tlv_response, desc)
+                    result = parse_invoke_response(tlv_response, desc, dm_names)
 
                 result = _convert_date_time_fields(result, desc)
                 return result
@@ -4015,7 +4073,21 @@ class AsyncConnection:
                     tabname = row.get("TABNAME", "")
                     if tabname:
                         struct_lookups.append((fd, tabname))
-            except ValueError:
+            except ValueError as exc:
+                # Exception rows are expected here and are not parameters.
+                if is_exception_row(row):
+                    continue
+                # A parameter we cannot parse is a real problem: it will be missing
+                # from the descriptor, so build_invoke_request will reject any value
+                # the caller passes for it and the server will never return it.
+                # Never drop one without saying so (T-03-META: the row is untrusted,
+                # so keep parsing the rest rather than aborting the whole call).
+                _logger.warning(
+                    "ignoring unparseable metadata row for %s parameter %r: %s",
+                    func_name.upper(),
+                    row.get("PARAMETER", "<unnamed>"),
+                    exc,
+                )
                 continue
 
         for fd, tabname in struct_lookups:
@@ -4116,6 +4188,7 @@ class AsyncConnection:
 
                 # Classic GW-framed invoke.
                 request_tlv = build_invoke_request(func_name, desc, dict(params))
+                dm_names = dm_table_ids(desc, dict(params))
                 handle = self._session.handle or b"        "
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 try:
@@ -4125,7 +4198,7 @@ class AsyncConnection:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
 
                 tlv_response = _strip_gw_header(response)
-                result = parse_invoke_response(tlv_response, desc)
+                result = parse_invoke_response(tlv_response, desc, dm_names)
                 result = _convert_date_time_fields(result, desc)
                 return result
             finally:
@@ -4133,14 +4206,19 @@ class AsyncConnection:
                     self._session.mark_ready()
 
     async def ping(self) -> bool:
-        """Issue an async RFC-level RFCPING and report liveness (TRANS-05 parity)."""
+        """Issue an async RFC-level RFCPING and report liveness (TRANS-05 parity).
+
+        Sends the same fully framed invoke as Connection.ping(); see there for why a
+        bare TLV body does not reach the gateway intact.
+        """
         async with self._lock:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
-                probe = b"".join([_tlv(_TAG_FUNCTION, _RFCPING_NAME), _tlv(_TAG_TERMINATOR, b"")])
+                handle = self._session.handle or b"        "
+                frame = Connection._build_invoke_frame(handle, Connection._rfcping_request_tlv())
                 try:
-                    await self._transport.send_message(probe)
+                    await self._transport.send_message(frame)
                     resp = await self._transport.recv_message()
                 except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc

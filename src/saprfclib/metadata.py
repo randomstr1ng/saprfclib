@@ -145,7 +145,6 @@ BOOTSTRAP_GET_FUNCTION_INTERFACE: FunctionDesc = FunctionDesc(
 # nuc values derived: char-like types halve (UTF-16 = 2x); binary types same.
 _COL_PARAMETER = "PARAMETER"  # parameter name
 _COL_PARAMCLASS = "PARAMCLASS"  # direction class: 'I'=IMPORT, 'E'=EXPORT, 'C'=CHANGING, 'T'=TABLES
-_COL_FIELDNAME = "FIELDNAME"  # field name inside a structure; blank for top-level params
 _COL_EXID = "EXID"  # type code string: 'C'=CHAR, 'I'=INT4, etc.
 _COL_INTLENGTH = "INTLENGTH"  # unicode byte length (confirmed from live capture)
 _COL_OFFSET = "OFFSET"  # unicode byte offset (confirmed from live capture)
@@ -160,6 +159,22 @@ _PARAMCLASS_TO_DIRECTION: dict[str, int] = {
     "C": RFC_CHANGING,
     "T": RFC_TABLES,
 }
+
+# PARAMCLASS 'X' rows describe the function's EXCEPTIONS, not its parameters: they
+# carry the exception name in PARAMETER and leave EXID blank. They belong in no
+# FunctionDesc.parameters list and must be recognised deliberately — they used to be
+# discarded only as a side effect of the blank EXID raising, which meant a genuinely
+# unparseable *parameter* was thrown away just as quietly.
+# Confirmed live (kernel 793): RFC_READ_TABLE returns 6 such rows —
+# DATA_BUFFER_EXCEEDED, FIELD_NOT_VALID, NOT_AUTHORIZED, OPTION_NOT_VALID,
+# TABLE_NOT_AVAILABLE, TABLE_WITHOUT_DATA.
+_PARAMCLASS_EXCEPTION = "X"
+
+
+def is_exception_row(row: dict[str, Any]) -> bool:
+    """True if this PARAMS row describes an exception rather than a parameter."""
+    return str(row.get(_COL_PARAMCLASS, "")).strip().upper() == _PARAMCLASS_EXCEPTION
+
 
 # EXID single-char code → RFCTYPE integer (SDK type definitions / confirmed by live capture).
 _EXID_TO_RFCTYPE: dict[str, int] = {
@@ -224,9 +239,16 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     transported as 0x0301(name) 0x0330(dm_id) 0x0302(row_size,row_count)
     0x0304(rows)…, i.e. the TABLE tag sequence, never as a 0x0203 scalar value.
 
-    The promotion is restricted to top-level rows (blank FIELDNAME).  Nested rows
-    describe fields *inside* the row structure and must keep their EXID type even
-    though they repeat the parent's PARAMCLASS.
+    PARAMCLASS alone decides. The GFI PARAMS table is flat — it lists the function's
+    parameters and its exceptions, never the fields inside a parameter's row
+    structure (that layout is fetched separately via RFC_GET_STRUCTURE_DEFINITION).
+    Confirmed live on kernel 793: RFC_READ_TABLE returned exactly 11 parameter rows
+    for its 11 parameters, plus 6 PARAMCLASS='X' exception rows, and no field rows.
+
+    In particular, do NOT gate this on FIELDNAME being blank. FIELDNAME names the
+    DDIC field a parameter's type is derived from, not a nesting level: the live
+    rows show DELIMITER with FIELDNAME='FLAG' and QUERY_TABLE with
+    FIELDNAME='TABNAME', both plain top-level parameters.
     """
     name = row.get(_COL_PARAMETER)
     if not isinstance(name, str) or not name:
@@ -239,9 +261,9 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     direction = _PARAMCLASS_TO_DIRECTION.get(str(paramclass))
     if direction is None:
         raise ValueError(f"malformed PARAMS row: unknown PARAMCLASS code {paramclass!r}")
-    # A TABLES-direction top-level param is a table on the wire regardless of the
-    # EXID naming its row structure (see docstring — golden rfc_read_table_response).
-    if direction == RFC_TABLES and not str(row.get(_COL_FIELDNAME, "")).strip():
+    # A TABLES-direction param is a table on the wire regardless of the EXID naming
+    # its row structure (see docstring — golden rfc_read_table_response.bin).
+    if direction == RFC_TABLES:
         rfctype = RFCTYPE_TABLE
     intlength = _coerce_int(row, _COL_INTLENGTH)
     offset = _coerce_int(row, _COL_OFFSET)

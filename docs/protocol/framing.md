@@ -281,7 +281,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
 | 0x0513    | analysis          | Function call begin (type B)                                         |
 | 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
-| 0x0667    | capture     | Float64 LE field [UNKNOWN purpose; value varies by session]          |
+| 0x0667    | capture     | Server call duration: float64 LITTLE-endian, microseconds            |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
@@ -325,9 +325,58 @@ NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
     0x0203  ext len=510    result param value (CHAR(255) UTF-16LE, space-padded)
     ...                    (one name/value pair per output param)
     0x0130  len=80         calling program name "SAPLSTFC" (UTF-16LE padded)
-    0x0667  len=8          [UNKNOWN]
+    0x0667  len=8          server call duration — float64 LE, microseconds
     0xFFFF  len=0          TLV stream terminator
 ```
+
+### RFCPING — CONFIRMED (2026-08-26)
+
+`RFCPING` is an ordinary zero-parameter function call, not a special frame. It needs
+the same GW header, RFC marker, TLV body and invoke footer as any other call; a bare
+TLV body is rejected by the gateway, which reads the function name where it expects
+the 76-byte header and answers with a plain-text error beginning `*ERR`.
+
+Golden fixtures: `tests/golden/framing/rfcping_request.bin` (138 B),
+`rfcping_response.bin` (236 B). Both were captured above the NI layer, so — unlike
+the other framing fixtures — they carry **no 4-byte NI length prefix** and start at
+the GW header. Captured from A4H kernel 793 / release 758, unicode, codepage 4103.
+
+```
+Request (client → server), 138 B total
+APPC header (76B) + RFC marker ffff0004 (4B)
+└── TLV stream (50 B):
+    0x0502  len=0          call-begin marker
+    0x000b  len=6          RFC version "754" (UTF-16LE)
+    0x0102  len=14         function name "RFCPING" (UTF-16LE)
+    0x0512  len=0          end of the call-begin block
+    0xFFFF  len=0          TLV stream terminator
++ invoke footer (8B): 0x0000 | BE16 len(tlv)=0x32 | 0x0000 | 0x8500
+
+Response (server → client), 236 B total
+APPC header (76B) + RFC marker 00000002 (4B)
+└── TLV stream:
+    0x0500  len=0          response-start marker
+    0x0503  len=0          response flag [UNKNOWN]
+    0x0514  len=16         session token (16B binary)
+    0x0420  len=4          return code uint32 BE (0 = success)
+    0x0512  len=0          parameter section start (no parameters follow)
+    0x0130  len=80         handling program "SAPLSYSU" (UTF-16LE, padded to 40 chars)
+    0x0667  len=8          call duration — float64 LE, microseconds (138.0 here)
+    0xFFFF  len=0          TLV stream terminator
+```
+
+Every record above is followed by its repeated close tag. Two consequences for any
+reader, both of which produced real bugs (issue #7):
+
+* **Strip the 80-byte GW header first.** Parsing from offset 0 reads `gw_version`
+  (0x0200) as a TLV length, which surfaces as `length 512 exceeds remaining payload`.
+* **Skip the repeated close tag.** The return code `0x0420` is the *fourth* record,
+  not the first. A walk that does not skip close tags desynchronises by two bytes
+  before it gets there and misreads every subsequent tag.
+
+Note the response RFC marker is `00000002` here, where the STFC_CONNECTION response
+above shows `00000004`. The marker value varies; the 80-byte strip keys off the
+leading `0x06` GW-frame byte and is unaffected either way.
 
 ### Exception Response (server → client when ABAP exception raised)
 
@@ -426,7 +475,7 @@ Server → client (response: COUNTER=2, RESULT=11):
     0x0201  len=14         'COUNTER'    ← CHANGING param (new value)
     0x0203  len=4          02 00 00 00  ← value = 2 (INT4 LE)
     0x0130  len=80         'SAPLMRFC' (program name)
-    0x0667  len=8          [UNKNOWN]
+    0x0667  len=8          server call duration — float64 LE, microseconds
     0xFFFF  len=0          terminator
 ```
 

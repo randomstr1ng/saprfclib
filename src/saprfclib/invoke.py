@@ -37,7 +37,7 @@ from typing import Any
 
 from saprfclib.codec import decode, encode
 from saprfclib.compress import DecompressError, sapcompress_decompress
-from saprfclib.exceptions import AbapApplicationError, AbapSystemFailure
+from saprfclib.exceptions import AbapApplicationError, AbapSystemFailure, CommunicationError
 from saprfclib.types import (
     RFC_CHANGING,
     RFC_EXPORT,
@@ -91,7 +91,23 @@ _TAG_TABLE_CONTENT_ALT = 0x0304  # raw row data, alternate tag (RFCID_TableCompr
 _TAG_TABLE_CONTENT_LZ = (
     0x0305  # SAPCOMPRESS compressed rows (RFCID_TableContLZ; rfcDeserializeCompressed)
 )
-_TAG_TABLE_END = 0x0306  # marks end of TABLE parameter stream
+_TAG_TABLE_END = 0x0306  # table-stream end marker. Accepted when reading; never
+# written on a request — see build_invoke_request. No capture in this repo shows it
+# in either direction, so the read-side handling is defensive, not evidence-backed.
+# Server-returned form of a table the CLIENT supplied as input. The table is
+# identified by the DM table ID the client assigned it in 0x0330 — NOT by name.
+#
+# 0x0335 value is 12 bytes: three BE uint32 [opcode=10, dm_table_id, row_count],
+# followed by the usual 0x0302 info record and 0x0304 row records, terminated by
+# 0x0336 (4 bytes).  Confirmed live (kernel 793) by varying the row count while
+# holding the DM id fixed:
+#   FIELDS sent with dm_id=1, 2 rows -> 0x0335 = [10, 1, 2]
+#   FIELDS sent with dm_id=1, 4 rows -> 0x0335 = [10, 1, 4]
+# In the same responses DATA and OPTIONS — tables the client did NOT send — come
+# back under 0x0301 carrying their names, with server-assigned 0x0330 ids.
+_TAG_TABLE_DELTA = 0x0335
+_TAG_TABLE_DELTA_END = 0x0336
+_DELTA_OPCODE = 10  # first uint32 of the 0x0335 header; only value observed
 _TAG_DM_TABLE_ID = 0x0330  # 4B BE uint32 DM table tracking ID (getNextDMTableId counter)
 
 # Response-only tags (confirmed from golden response fixture)
@@ -142,6 +158,32 @@ def tlv_record(tag: int, data: bytes = b"") -> bytes:
 # --------------------------------------------------------------------------- #
 # Request builder
 # --------------------------------------------------------------------------- #
+
+
+def dm_table_ids(desc: FunctionDesc, params: dict[str, Any]) -> dict[int, str]:
+    """Return ``{dm_table_id: param_name}`` for the tables this call sends with rows.
+
+    The client assigns each outgoing TABLE parameter a DM table ID (tag 0x0330),
+    numbered from 1 in parameter order, counting only tables that actually carry
+    rows.  The server uses that ID — not the parameter name — to identify the table
+    when it sends the data back (tag 0x0335), so the caller must keep the mapping to
+    make sense of the response.
+
+    Shares its assignment rule with ``build_invoke_request`` by construction: the
+    builder calls this function rather than counting separately.
+    """
+    params_upper = {k.upper(): v for k, v in params.items()}
+    assigned: dict[int, str] = {}
+    next_id = 0
+    for field in desc.parameters:
+        if field.direction == RFC_EXPORT:
+            continue
+        value = params_upper.get(field.name.upper())
+        if field.rfctype != _RFCTYPE_TABLE or not value:
+            continue
+        next_id += 1
+        assigned[next_id] = field.name
+    return assigned
 
 
 def build_invoke_request(
@@ -204,7 +246,21 @@ def build_invoke_request(
 
     # Emit param values for caller-supplied IMPORTING/CHANGING/TABLES params.
     params_upper = {k.upper(): v for k, v in params.items()}
-    _dm_id = 0  # per-call DM table ID counter (getNextDMTableId equivalent)
+
+    # A parameter the descriptor does not know cannot be encoded, and the loop below
+    # would simply never reach it — the value would be dropped from the request with
+    # no diagnostic, and the server would run the function without it. Fail loudly
+    # instead: silently omitting an argument the caller passed is the worst outcome.
+    known = {f.name.upper() for f in desc.parameters}
+    unknown = sorted(set(params_upper) - known)
+    if unknown:
+        raise ValueError(
+            f"{func_name}: parameter(s) {', '.join(unknown)} are not in the function "
+            f"interface; known parameters are {', '.join(sorted(known)) or '(none)'}"
+        )
+    # DM table IDs assigned by the shared helper so the response parser can map
+    # tag 0x0335 back to a parameter name (see dm_table_ids).
+    _dm_ids = {name: dm for dm, name in dm_table_ids(desc, params).items()}
     for field in desc.parameters:
         if field.direction == RFC_EXPORT:
             continue  # server fills EXPORT params; we only declare, not supply data
@@ -225,14 +281,20 @@ def build_invoke_request(
             all_row_bytes = encode(_RFCTYPE_TABLE, rows, field)
             row_size = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
             row_count = len(rows)
-            _dm_id += 1
             parts.append(tlv_record(_TAG_TABLE_NAME, field.name.encode("utf-16-le")))
-            parts.append(tlv_record(_TAG_DM_TABLE_ID, struct.pack(">I", _dm_id)))
+            parts.append(tlv_record(_TAG_DM_TABLE_ID, struct.pack(">I", _dm_ids[field.name])))
             parts.append(tlv_record(_TAG_TABLE_INFO, struct.pack(">II", row_size, row_count)))
             for i in range(row_count):
                 row_slice = all_row_bytes[i * row_size : (i + 1) * row_size]
                 parts.append(tlv_record(_TAG_TABLE_CONTENT, row_slice))
-            parts.append(tlv_record(_TAG_TABLE_END))
+            # NO end tag. A client-written table is terminated by the next record,
+            # not by 0x0306 — the SDK's table serializer emits name, DM id, info and
+            # rows and nothing else, and neither golden capture contains 0x0306 in a
+            # request. Emitting one makes the server tear down the gateway
+            # conversation: the call returns an 80-byte header-only frame and every
+            # subsequent call on that connection fails with
+            # "Conversation NNN not found" (verified live on kernel 793 — removing
+            # the tag is the single change that turns the failure into a success).
         else:
             # Scalar / structure: 0x0201(name) + 0x0203(value)
             encoded = encode(field.rfctype, value, field)
@@ -609,7 +671,9 @@ def build_bgrfc_state_request(
 # --------------------------------------------------------------------------- #
 
 
-def parse_invoke_response(resp: bytes, desc: FunctionDesc) -> dict[str, Any]:
+def parse_invoke_response(
+    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str] | None = None
+) -> dict[str, Any]:
     """Parse a RFC invoke response TLV stream and return a native-typed dict.
 
     Walks the TLV stream with bounds-checking (T-04-RESP, mirrors session._parse_tlv).
@@ -621,6 +685,11 @@ def parse_invoke_response(resp: bytes, desc: FunctionDesc) -> dict[str, Any]:
     Pitfall 4: 0x0420 return code is 4B BE uint32 (use struct.unpack('>I')).
     Pitfall 2: value bytes from 0x0203 are passed directly to codec.decode — let
     the codec handle type-specific length/encoding (UTF-16 code-unit math, BCD, etc.).
+
+    ``dm_table_names`` maps DM table IDs to parameter names for tables the caller
+    sent as input; the server returns those under tag 0x0335 keyed by ID rather than
+    by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
+    parameters are absent from the result.
     """
     tags = _parse_tlv_stream(resp)
 
@@ -648,8 +717,20 @@ def parse_invoke_response(resp: bytes, desc: FunctionDesc) -> dict[str, Any]:
             message=message or None,
         )
 
-    # Return-code check (Pitfall 4: 4B BE uint32).
+    # Every genuine invoke response carries the return code; only an exception
+    # response omits it, and that is raised above. Its absence means the call did not
+    # complete — most commonly the gateway aborted the conversation and replied with a
+    # bare header (observed live: an 80-byte frame with no TLV body at all, after
+    # which every further call on the connection fails with "Conversation NNN not
+    # found"). Reporting that as an empty successful result hides a dead connection
+    # and surfaces later as a confusing KeyError in caller code.
     rc_bytes = tags.get(_TAG_RETURN_CODE)
+    if rc_bytes is None:
+        raise CommunicationError(
+            f"malformed RFC response: no return-code TLV 0x{_TAG_RETURN_CODE:04x} and no "
+            f"exception tags in {len(resp)} byte(s) of response payload — the server "
+            f"aborted the call; this connection should be discarded"
+        )
     if rc_bytes is not None:
         if len(rc_bytes) != 4:
             raise ValueError(f"return-code TLV 0x0420 has length {len(rc_bytes)}, expected 4")
@@ -686,7 +767,7 @@ def parse_invoke_response(resp: bytes, desc: FunctionDesc) -> dict[str, Any]:
 
     result: dict[str, object] = {}
     # Walk the ordered tag list to pick up 0x0201+0x0203 pairs
-    for name, value in _extract_name_value_pairs(resp):
+    for name, value in _extract_name_value_pairs(resp, dm_table_names):
         name_upper = name.upper()
         match_field: FieldDesc | None = param_map.get(name_upper)
         if match_field is None:
@@ -751,7 +832,9 @@ def _parse_tlv_stream(data: bytes) -> dict[int, bytes]:
     return out
 
 
-def _extract_name_value_pairs(data: bytes) -> list[tuple[str, bytes]]:
+def _extract_name_value_pairs(
+    data: bytes, dm_table_names: dict[int, str] | None = None
+) -> list[tuple[str, bytes]]:
     """Walk TLV stream and return ordered (name_str, value_bytes) pairs.
 
     Handles both scalar params and TABLE params:
@@ -763,6 +846,17 @@ def _extract_name_value_pairs(data: bytes) -> list[tuple[str, bytes]]:
       0x0302(info)  ← 8B [BE row_size][BE row_count] (informational; ignored here)
       {0x0303|0x0304|0x0305}* rows  ← uncompressed or SAPCOMPRESS compressed
       0x0306(end)   ← yields (name, concatenated_row_bytes) pair
+
+    A table the CLIENT supplied as input comes back under a second tag pair,
+    0x0335 … 0x0336, and is identified by the DM table ID the client assigned it in
+    0x0330 rather than by name — the 0x0335 value is three BE uint32
+    [opcode=10, dm_table_id, row_count].  ``dm_table_names`` maps those IDs back to
+    parameter names; build it with ``dm_table_ids(desc, params)`` for the same call.
+    Without it such tables cannot be identified and their rows are skipped.
+
+    Observed live (kernel 793): RFC_READ_TABLE called with FIELDS populated returns
+    DATA and OPTIONS under 0x0301 with their names, and FIELDS — the table we sent —
+    under 0x0335 with dm_table_id 1.
 
     For TABLE params the yielded value is concatenated flat row bytes
     (uncompressed; 0x0304/0x0305 chunks decompressed on the fly).
@@ -849,7 +943,23 @@ def _extract_name_value_pairs(data: bytes) -> list[tuple[str, bytes]]:
                         f"SAPCOMPRESS decompression failed for TABLE param "
                         f"{current_name!r} tag 0x{tag:04x}: {exc}"
                     ) from exc
-        elif tag == _TAG_TABLE_END and in_table and current_name is not None:  # 0x0306
+        elif tag == _TAG_TABLE_DELTA:  # 0x0335 — table identified by DM id
+            if in_table and current_name is not None:
+                pairs.append((current_name, bytes(table_rows)))
+            current_name = None
+            table_rows = bytearray()
+            in_table = False
+            if len(value) >= 12:
+                _, dm_id, _ = struct.unpack_from(">III", value, 0)
+                name = (dm_table_names or {}).get(dm_id)
+                if name is not None:
+                    current_name = name
+                    in_table = True
+            # An unknown DM id means we cannot say which parameter this belongs to;
+            # its rows are skipped rather than attached to the wrong name.
+        elif (  # 0x0306 / 0x0336
+            tag in (_TAG_TABLE_END, _TAG_TABLE_DELTA_END) and in_table and current_name is not None
+        ):
             pairs.append((current_name, bytes(table_rows)))
             current_name = None
             in_table = False
