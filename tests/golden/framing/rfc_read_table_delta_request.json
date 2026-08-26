@@ -1,0 +1,46 @@
+{
+  "message_type": "RFC_READ_TABLE_DELTA_REQUEST",
+  "capture_source": "live capture 2026-08-26 at the transport seam; SAP A4H kernel 793 release 758, sysnr 00, unicode, codepage 4103. Sanitised preserving byte length: the 8-ASCII-digit GW conversation handle at [40:48], and the 16-byte 0x0514 session token where present. No NI length prefix - captured above the NI layer.",
+  "evidence": "recorded around Connection.call('RFC_READ_TABLE', QUERY_TABLE='T000', DELIMITER='|', ROWCOUNT=10, FIELDS=[MANDT, MTEXT, ORT01, MWAER]); the call succeeded",
+  "ni_header_length": 0,
+  "notes": [
+    "A TABLE parameter carrying rows emits 0x0301(name) 0x0330(dm id) 0x0302(row_size,row_count) then one 0x0303 per row - and NOTHING after. There is no 0x0306 end tag.",
+    "Emitting 0x0306 here makes the server tear down the gateway conversation: the call returns an 80-byte header-only frame and every later call on that connection fails with 'Conversation NNN not found'. Verified live by bisect - removing the tag is the single change that turns the failure into a success.",
+    "The client assigns the DM table ID in 0x0330, numbered from 1 in parameter order over the tables that carry rows. FIELDS is the only such table here, so it gets id 1. The server uses that ID, not the name, to return the table (see the paired response fixture)."
+  ],
+  "expected_parse": {
+    "function_name": "RFC_READ_TABLE",
+    "table_param": "FIELDS",
+    "dm_table_id": 1,
+    "row_size": 206,
+    "row_count": 4,
+    "end_tag_present": false,
+    "total_length": 1272
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    },
+    {
+      "offset": 76,
+      "length": 4,
+      "name": "rfc_marker",
+      "value": "ffff0004",
+      "type": "fixed",
+      "note": "client direction"
+    }
+  ]
+}

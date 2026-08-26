@@ -284,6 +284,16 @@ wire_bytes = struct.pack('<d', value)
 
 **Confirmed from live capture 2026-06-26:** RFCINT4=65536 was serialized as `00 00 01 00` — 4-byte little-endian signed integer. IMPORTSTRUCT offset 24 in STFC_STRUCTURE frame.
 
+**Independently confirmed by arithmetic (STFC_CHANGING golden pair).** The request
+carries `START_VALUE`=`0a000000` and `COUNTER`=`01000000`; the response carries
+`RESULT`=`0b000000` and `COUNTER`=`02000000`. STFC_CHANGING returns
+`RESULT = START_VALUE + COUNTER` and increments `COUNTER`, so read little-endian the
+exchange is 10 + 1 = 11 and 1 → 2 — exactly the documented behaviour. Read big-endian
+the inputs would be 167772160 and 16777216 and no reading of the response fits, so the
+server demonstrably decoded the bytes as little-endian. This covers *parameter* INT4
+values on the wire, not just an integer embedded in a structure.
+Fixtures: `tests/golden/framing/stfc_changing_request.bin`, `stfc_changing_response.bin`.
+
 **Python encode/decode:**
 ```python
 import struct

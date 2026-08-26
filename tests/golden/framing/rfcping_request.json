@@ -1,0 +1,95 @@
+{
+  "message_type": "RFCPING_REQUEST",
+  "capture_source": "live capture 2026-08-26 at the transport seam; SAP A4H kernel 793 release 758, sysnr 00, gateway port 3300, unicode, codepage 4103",
+  "evidence": "recorded by wrapping Transport.send_message around a single Connection.ping(); the library's own invoke builder reproduces these bytes exactly",
+  "ni_header_length": 0,
+  "notes": [
+    "Captured ABOVE the NI layer, so unlike the other framing fixtures there is NO 4-byte NI length prefix \u2014 the frame starts at the GW header.",
+    "RFCPING is an ordinary zero-parameter function call, not a special frame. The TLV record sequence is identical to rfc_read_table_request.bin (0x0502, 0x000b, 0x0102, 0x0512) and simply terminates where that one continues into 0x0205 export declarations and 0x0201/0x0203 parameter values.",
+    "Sanitised, byte length preserved: the 8-ASCII-digit GW conversation handle at [40:48] was replaced with '00000000'. Nothing else was altered; the frame contains no credentials or hostnames.",
+    "Regression guard for issue #7: ping() previously sent only the TLV body (offsets 80 onward) with no GW header, RFC marker or footer. The gateway read the function name where it expects the header and replied with a plain-text error beginning '*ERR'."
+  ],
+  "expected_parse": {
+    "gw_type": "0x06cb",
+    "rfc_marker": "ffff0004",
+    "rfc_marker_direction": "client",
+    "function_name": "RFCPING",
+    "rfc_version": "754",
+    "tlv_body_length": 50,
+    "total_length": 138
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 2,
+      "length": 2,
+      "name": "gw_version",
+      "value": "0x0200",
+      "type": "fixed",
+      "note": "CONV_PROTO"
+    },
+    {
+      "offset": 4,
+      "length": 4,
+      "name": "gw_flags",
+      "value": "ffff0000",
+      "type": "fixed",
+      "note": ""
+    },
+    {
+      "offset": 24,
+      "length": 4,
+      "name": "appc_header_version",
+      "value": "0x00000008",
+      "type": "fixed",
+      "note": "must be 8 for NW 7.x; omitting it draws an immediate 80-byte 0x06CE rejection"
+    },
+    {
+      "offset": 28,
+      "length": 4,
+      "name": "cpic_max_length",
+      "value": "0x0000050c",
+      "type": "fixed",
+      "note": "1292"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "8 ASCII digits; SANITISED, original length preserved"
+    },
+    {
+      "offset": 76,
+      "length": 4,
+      "name": "rfc_marker",
+      "value": "ffff0004",
+      "type": "fixed",
+      "note": "client direction"
+    },
+    {
+      "offset": 80,
+      "length": 50,
+      "name": "tlv_body",
+      "value": "variable",
+      "type": "variable",
+      "note": "0x0502 / 0x000b '754' / 0x0102 'RFCPING' UTF-16LE / 0x0512 / 0xFFFF terminator, every record followed by its repeated close tag"
+    },
+    {
+      "offset": 130,
+      "length": 8,
+      "name": "invoke_footer",
+      "value": "0000003200008500",
+      "type": "fixed",
+      "note": "0x0000 | BE16 len(tlv_body)=0x32=50 | 0x0000 | 0x8500"
+    }
+  ]
+}

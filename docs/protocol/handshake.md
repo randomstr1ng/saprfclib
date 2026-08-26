@@ -191,6 +191,34 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 function call — it is the protocol-level logon probe. The server processes the credentials and
 returns the logon response (frame 15). `RFCPING` means "validate this connection".
 
+**Note on the logon language (tags 0x0011 / 0x0115):** the wire carries the **one-character
+SAP language code** as a single ASCII byte — `"E"` on both tags in this capture. That single
+character is the whole of what the protocol transports; there is no two-character form on the
+wire.
+
+`saprfclib.connect(lang=…)` accepts either the one-character SAP code or the two-character ISO
+code, matching the SDK's `LANG` connection option. A one-character code is passed through
+untouched; a two-character code is converted to its SAP code first. Both end up as one byte in
+the frame.
+
+The SDK behaves the same way. Its `LANG` handling converts any input longer than one character
+through the SAP kernel's language routine before the logon frame is built, and refuses the
+connection with `RFC_INVALID_PARAMETER` when the code will not map. `pyrfc` adds nothing here —
+it hands `LANG` straight to `RfcOpenConnection` and lets the SDK convert, while re-exporting the
+SDK's two public conversion calls as `language_iso_to_sap` / `language_sap_to_iso`.
+
+The mapping is not derivable by rule. `EN`→`E` and `DE`→`D` look like a first-letter rule, but
+`ES`→`S`, `DA`→`K`, `FI`→`U`, `EL`→`G` and `ZH`→`1` are not. saprfclib carries the table in
+`saprfclib.language` and exposes the same two helper names pyrfc uses. See that module's header
+for how the mapping was established and why an unknown code raises there but not in the SDK.
+
+**Note on parsing the RFCPING response:** it is an ordinary RFC response and uses the full wire
+dialect — a GW frame, records that may use the extended-length form, and a repeated close tag
+after each record. A reader that skips the close-tag suffix desynchronises by two bytes after
+the first record and misreads every tag and length thereafter, which surfaces as a spurious
+"length exceeds remaining payload". A response that happens to place the return code `0x0420`
+first will hide the bug, because the walk returns before it can drift.
+
 **Note on COM_HEAD:** Only present in this logon frame. All subsequent RFC call frames (STFC_CONNECTION, STFC_STRUCTURE, etc.) have NO COM_HEAD — the TLV stream starts directly at NI payload offset 80.
 
 ### Server Logon Response TLV Tags (frame 15)

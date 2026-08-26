@@ -1,0 +1,53 @@
+{
+  "message_type": "RFC_READ_TABLE_DELTA_RESPONSE",
+  "capture_source": "live capture 2026-08-26 at the transport seam; SAP A4H kernel 793 release 758, sysnr 00, unicode, codepage 4103. Sanitised preserving byte length: the 8-ASCII-digit GW conversation handle at [40:48], and the 16-byte 0x0514 session token where present. No NI length prefix - captured above the NI layer.",
+  "evidence": "paired response to rfc_read_table_delta_request.bin; return code 0x0420 == 0",
+  "ni_header_length": 0,
+  "notes": [
+    "Shows BOTH ways a table comes back. DATA and OPTIONS - tables the client did not send - arrive under 0x0301 carrying their names, with server-assigned 0x0330 ids (6 and 7 here).",
+    "FIELDS - the table the client DID send - arrives under 0x0335 instead, identified by the DM table ID the client assigned it, not by name. The 0x0335 value is 12 bytes: three BE uint32 [opcode=10, dm_table_id=1, row_count=4]. It is followed by the usual 0x0302 info record and one 0x0304 per row, terminated by 0x0336 (4 bytes).",
+    "Confirmed by varying the row count against a fixed DM id: sending 2 rows yields 0x0335 = [10, 1, 2]; sending 4 rows (this capture) yields [10, 1, 4].",
+    "A reader that recognises only 0x0301 drops such parameters from the result entirely - which surfaces to callers as a missing key rather than an error.",
+    "Tag 0x0331 (4 bytes, value 1) precedes the parameter section in delta-bearing responses. Purpose [ASSUMED] - not needed to parse the tables."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "tables_by_name": [
+      "DATA",
+      "OPTIONS"
+    ],
+    "tables_by_dm_id": {
+      "1": "FIELDS"
+    },
+    "delta_opcode": 10,
+    "delta_row_count": 4,
+    "fields_row_size": 206,
+    "total_length": 3341
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    },
+    {
+      "offset": 76,
+      "length": 4,
+      "name": "rfc_marker",
+      "value": "00000002",
+      "type": "fixed",
+      "note": "server direction"
+    }
+  ]
+}

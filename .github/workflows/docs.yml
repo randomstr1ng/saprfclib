@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Hatch
-        run: pip install hatch "hatchling>=1.21,<1.32"
+        run: pip install hatch "hatchling>=1.21,<1.33"
 
       - name: Build docs
         run: hatch run docs:build

@@ -281,7 +281,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
 | 0x0513    | analysis          | Function call begin (type B)                                         |
 | 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
-| 0x0667    | capture     | Float64 LE field [UNKNOWN purpose; value varies by session]          |
+| 0x0667    | capture     | Server call duration: float64 LITTLE-endian, microseconds            |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
@@ -325,9 +325,109 @@ NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
     0x0203  ext len=510    result param value (CHAR(255) UTF-16LE, space-padded)
     ...                    (one name/value pair per output param)
     0x0130  len=80         calling program name "SAPLSTFC" (UTF-16LE padded)
-    0x0667  len=8          [UNKNOWN]
+    0x0667  len=8          server call duration — float64 LE, microseconds
     0xFFFF  len=0          TLV stream terminator
 ```
+
+### RFCPING — CONFIRMED (2026-08-26)
+
+`RFCPING` is an ordinary zero-parameter function call, not a special frame. It needs
+the same GW header, RFC marker, TLV body and invoke footer as any other call; a bare
+TLV body is rejected by the gateway, which reads the function name where it expects
+the 76-byte header and answers with a plain-text error beginning `*ERR`.
+
+Golden fixtures: `tests/golden/framing/rfcping_request.bin` (138 B),
+`rfcping_response.bin` (236 B). Both were captured above the NI layer, so — unlike
+the other framing fixtures — they carry **no 4-byte NI length prefix** and start at
+the GW header. Captured from A4H kernel 793 / release 758, unicode, codepage 4103.
+
+```
+Request (client → server), 138 B total
+APPC header (76B) + RFC marker ffff0004 (4B)
+└── TLV stream (50 B):
+    0x0502  len=0          call-begin marker
+    0x000b  len=6          RFC version "754" (UTF-16LE)
+    0x0102  len=14         function name "RFCPING" (UTF-16LE)
+    0x0512  len=0          end of the call-begin block
+    0xFFFF  len=0          TLV stream terminator
++ invoke footer (8B): 0x0000 | BE16 len(tlv)=0x32 | 0x0000 | 0x8500
+
+Response (server → client), 236 B total
+APPC header (76B) + RFC marker 00000002 (4B)
+└── TLV stream:
+    0x0500  len=0          response-start marker
+    0x0503  len=0          response flag [UNKNOWN]
+    0x0514  len=16         session token (16B binary)
+    0x0420  len=4          return code uint32 BE (0 = success)
+    0x0512  len=0          parameter section start (no parameters follow)
+    0x0130  len=80         handling program "SAPLSYSU" (UTF-16LE, padded to 40 chars)
+    0x0667  len=8          call duration — float64 LE, microseconds (138.0 here)
+    0xFFFF  len=0          TLV stream terminator
+```
+
+Every record above is followed by its repeated close tag. Two consequences for any
+reader, both of which produced real bugs (issue #7):
+
+* **Strip the 80-byte GW header first.** Parsing from offset 0 reads `gw_version`
+  (0x0200) as a TLV length, which surfaces as `length 512 exceeds remaining payload`.
+* **Skip the repeated close tag.** The return code `0x0420` is the *fourth* record,
+  not the first. A walk that does not skip close tags desynchronises by two bytes
+  before it gets there and misreads every subsequent tag.
+
+Note the response RFC marker is `00000002` here, where the STFC_CONNECTION response
+above shows `00000004`. The marker value varies; the 80-byte strip keys off the
+leading `0x06` GW-frame byte and is unaffected either way.
+
+### Compressed tables — CONFIRMED (2026-08-26)
+
+A table larger than roughly 8 KB is sent SAPCOMPRESS-compressed under tag `0x0305`
+instead of one `0x0303`/`0x0304` record per row. The switch happens when
+`row_size × row_count >= 0x2001` (8193). This is not a rare path: it is every
+function module with enough parameters, so `RFC_GET_FUNCTION_INTERFACE` metadata for
+most BAPIs arrives compressed.
+
+Golden fixture: `tests/golden/framing/gfi_compressed_params_response.bin` — the GFI
+response for `BAPI_USER_GET_DETAIL` (44 parameters, 404 × 44 = 17776 bytes).
+
+```
+0x0301  len=12         table name "PARAMS" (UTF-16LE)
+0x0330  len=4          DM table id
+0x0302  len=8          [BE row_size=404][BE row_count=44]
+0x0310  len=4          used row width (402) — the layout width without padding
+0x0305  len=250        compressed fragment  } eight fragments of
+0x0305  len=250        compressed fragment  } ONE stream, 2000 bytes joined
+...
+0x0306  len=0          table end
+```
+
+The `0x0305` records are **fragments of a single stream**, not independently
+compressed blocks — decompressing one on its own fails. Concatenate them all first.
+The joined payload then carries an 8-byte wrapper before the SAPCOMPRESS stream:
+
+```
+[0:4]   unidentified
+[4:8]   BE uint32 — length of the compressed stream (1921 here)
+[8:]    SAPCOMPRESS stream:
+        [0:4] LE uint32 uncompressed length (17776)
+        [4]   algorithm byte (0x12 → LZH)
+        [5:7] magic 1f 9d
+        [7]   config
+```
+
+Trailing bytes after the compressed stream pad the last record to its fixed size.
+
+!!! warning "Two row shapes, two slicing rules"
+    Per-row records and a compressed blob cannot be handled the same way.
+
+    * **Per-row `0x0303`/`0x0304`** — each record is one row at its *used* width. The
+      `0x0302` stride may be larger: a structure-definition response declared
+      `row_size=140` while every record was 138 bytes.
+    * **Compressed `0x0305`** — the decompressed blob carries no row boundaries, so
+      it must be sliced by the `0x0302` stride.
+
+    Slicing per-row records by the declared stride misaligns every row after the
+    first; slicing a decompressed blob by the record length is impossible. The
+    `0x0302` row size is authoritative only for the compressed form.
 
 ### Exception Response (server → client when ABAP exception raised)
 
@@ -426,7 +526,7 @@ Server → client (response: COUNTER=2, RESULT=11):
     0x0201  len=14         'COUNTER'    ← CHANGING param (new value)
     0x0203  len=4          02 00 00 00  ← value = 2 (INT4 LE)
     0x0130  len=80         'SAPLMRFC' (program name)
-    0x0667  len=8          [UNKNOWN]
+    0x0667  len=8          server call duration — float64 LE, microseconds
     0xFFFF  len=0          terminator
 ```
 
@@ -731,6 +831,42 @@ EXID, POSITION, OFFSET, INTLENGTH, DECIMALS, DEFAULT, PARAMTEXT, OPTIONAL`. `EXI
 single-character type code (`'C'` = CHAR, `'I'` = INT4, …); `INTLENGTH` and `OFFSET` are
 Unicode byte counts, not character counts — the usual 2× trap. Parsed by `_parse_params_row`
 in `metadata.py`, live-verified.
+
+#### TABLES params: the direction types the parameter, not EXID — CONFIRMED
+
+A TABLES parameter is declared with the `EXID` of its **row structure**, not of the table.
+`RFC_READ_TABLE`'s `DATA`, `FIELDS` and `OPTIONS` all come back as `PARAMCLASS='T'` with
+`EXID='u'` (structure) and `TABNAME` naming the row type (`TAB512`, `RFC_DB_FLD`,
+`RFC_DB_OPT`). Typing the parameter from `EXID` alone therefore mistypes every TABLES param
+as a bare structure.
+
+`PARAMCLASS` is what decides. `'T'` means the wire carries a table, and
+`tests/golden/framing/rfc_read_table_response.bin` shows it directly: all three params are
+transported with the table tag sequence `0x0301 / 0x0330 / 0x0302 / 0x0304`, never as a
+`0x0203` scalar value. `_parse_params_row` promotes `PARAMCLASS='T'` rows to `RFCTYPE_TABLE`
+on that basis.
+
+The promotion applies only to top-level rows (blank `FIELDNAME`). Nested rows describe fields
+*inside* the row structure and repeat the parent's `PARAMCLASS`, so they keep their `EXID`
+type.
+
+Consequence of getting this wrong, both directions: the request emits the scalar
+`0x0201`/`0x0203` pair and the server rejects the call with `CALL_FUNCTION_ILLEGAL_P_TYPE`;
+the response decodes concatenated row bytes as a single work area, silently dropping every
+row past the first.
+
+A TABLES param also needs its row layout attached — the secondary
+`RFC_GET_STRUCTURE_DEFINITION` lookup keyed on `TABNAME` runs for `RFCTYPE_TABLE` as well as
+`RFCTYPE_STRUCTURE`, otherwise the descriptor reaches the encoder with `type_desc=None` and
+no rows can be laid out.
+
+#### Unset fields in a structure or table row
+
+ABAP initialises a work area before an RFC fills it, so callers routinely supply only the
+fields they care about — `RFC_READ_TABLE`'s `FIELDS` rows are the canonical case, where only
+`FIELDNAME` is set. Fields absent from a row dict are encoded at their type's initial value
+rather than skipped: fixed-width character fields must land blank-padded and numeric fields
+zero-padded, so leaving the buffer's NUL fill in place would put the wrong bytes on the wire.
 
 ### Logon password scrambling (tag 0x0117) — CONFIRMED
 

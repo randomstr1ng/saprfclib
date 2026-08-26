@@ -48,7 +48,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from saprfclib.codec import decode, encode
+from saprfclib.codec import RFCTYPE_TABLE, decode, encode
 from saprfclib.connection import (
     _TAG_PASSWORD,
     _TAG_USER,
@@ -88,6 +88,12 @@ __all__ = ["RfcServer", "AsyncRfcServer"]
 _TAG_FUNC_NAME = 0x0102  # function name UTF-16LE (invoke._TAG_FUNC_NAME)
 _TAG_PARAM_NAME = 0x0201  # IN/CHANGING/TABLE param name (invoke._TAG_PARAM_NAME)
 _TAG_PARAM_VALUE = 0x0203  # param value bytes (invoke._TAG_PARAM_VALUE)
+# Server-direction TABLE records — same tags the client uses, with 0x0304 for rows
+# (the tag a real SAP server uses in every captured response).
+_TAG_TABLE_NAME = 0x0301
+_TAG_TABLE_INFO = 0x0302
+_TAG_TABLE_ROW = 0x0304
+_TAG_DM_TABLE_ID = 0x0330
 _TAG_TERMINATOR = 0xFFFF  # stream terminator (invoke._TAG_TERMINATOR)
 
 # Response-only tags (invoke._TAG_RESPONSE_START / _TAG_RETURN_CODE; OQ-3/A4).
@@ -1200,15 +1206,28 @@ class RfcServer:
         """Serialize a handler return dict to the response TLV stream (SERVER-04).
 
         Mirror of ``invoke.build_invoke_request`` with directions flipped: emit the
-        0x0500 response-start marker, the 0x0420 return code (0 = success), then a
-        0x0201/0x0203 name+value pair for every EXPORTING/CHANGING/TABLE param the
-        handler returned, then the 0xFFFF terminator. Reuses ``tlv_record`` +
-        ``codec.encode`` — NO second TLV writer (RESEARCH Anti-Pattern).
+        0x0500 response-start marker, the 0x0420 return code (0 = success), then one
+        record group per EXPORTING/CHANGING/TABLE param the handler returned, then
+        the 0xFFFF terminator. Reuses ``tlv_record`` + ``codec.encode`` — NO second
+        TLV writer (RESEARCH Anti-Pattern).
+
+        Scalars and structures use the 0x0201(name)/0x0203(value) pair. A TABLE
+        parameter must NOT: it needs the table protocol, exactly as the client side
+        does. Emitting a table as a scalar 0x0203 value is the server-direction twin
+        of the mistyping that made client calls fail with
+        CALL_FUNCTION_ILLEGAL_P_TYPE.
+
+        Server-direction table shape, from the golden captures of a real SAP server
+        (tests/golden/framing/rfc_read_table_response.bin, and the compressed
+        metadata response): 0x0301(name) 0x0330(dm id) 0x0302(row_size,row_count)
+        then one 0x0304 per row. No 0x0306 end tag — in that capture each table runs
+        straight into the next 0x0301.
 
         When ``func_desc`` is ``None`` (handler registered without a descriptor),
         only the success header and terminator are emitted — no output params.
         """
         result_upper = {k.upper(): v for k, v in result.items()}
+        dm_ids: list[str] = []  # DM table ids run from 1 in emission order
         parts: list[bytes] = [
             tlv_record(_TAG_RESPONSE_START),
             tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_OK)),
@@ -1220,11 +1239,40 @@ class RfcServer:
                 name_upper = field.name.upper()
                 if name_upper not in result_upper:
                     continue  # handler did not supply this output — skip (optional)
-                encoded = encode(field.rfctype, result_upper[name_upper], field)
+                value = result_upper[name_upper]
+                if field.rfctype == RFCTYPE_TABLE:
+                    parts.extend(self._build_table_records(field, value, len(dm_ids) + 1))
+                    dm_ids.append(field.name)
+                    continue
+                encoded = encode(field.rfctype, value, field)
                 parts.append(tlv_record(_TAG_PARAM_NAME, field.name.encode("utf-16-le")))
                 parts.append(tlv_record(_TAG_PARAM_VALUE, encoded))
         parts.append(tlv_record(_TAG_TERMINATOR))
         return b"".join(parts)
+
+    @staticmethod
+    def _build_table_records(field: FieldDesc, rows: Any, dm_id: int) -> list[bytes]:
+        """Serialize one TABLE output parameter using the table protocol.
+
+        An empty table is declared by name only, matching the client side where an
+        empty table needs no data block.
+        """
+        if field.type_desc is None:
+            raise ValueError(
+                f"cannot encode TABLE parameter {field.name!r}: its row layout is "
+                f"missing (type_desc is None)"
+            )
+        row_list = list(rows) if rows else []
+        parts = [tlv_record(_TAG_TABLE_NAME, field.name.encode("utf-16-le"))]
+        if not row_list:
+            return parts
+        row_size = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
+        all_rows = encode(RFCTYPE_TABLE, row_list, field)
+        parts.append(tlv_record(_TAG_DM_TABLE_ID, struct.pack(">I", dm_id)))
+        parts.append(tlv_record(_TAG_TABLE_INFO, struct.pack(">II", row_size, len(row_list))))
+        for i in range(len(row_list)):
+            parts.append(tlv_record(_TAG_TABLE_ROW, all_rows[i * row_size : (i + 1) * row_size]))
+        return parts
 
     def _build_system_failure(self, message: str) -> bytes:
         """Serialize an RFC SYSTEM_FAILURE response (D-03 / T-05-C02).

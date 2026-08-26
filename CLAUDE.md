@@ -91,6 +91,21 @@ a `.json` describing the field breakdown.
 
 ---
 
+## What not to use
+
+| Don't use | Use instead | Why |
+|-----------|-------------|-----|
+| `websockets` (as a runtime dep) | `wsproto` + `h11` | `websockets` owns its I/O loop and fights the unified transport design. Fine as a test client. |
+| `aiohttp` | `wsproto` + `h11` over `asyncio` + `ssl` | Heavyweight, C-accelerated, owns its own loop. |
+| `cryptography` / `pyOpenSSL` as core dep | stdlib `ssl`, `asn1crypto`, `oscrypto` | Rust/C build step — violates the zero-native-dep constraint. Acceptable only as an optional extra. |
+| `python-gssapi` / `pykerberos` | `minikerberos` (pure Python) | Both require MIT/Heimdal C libraries at build and runtime. |
+| `numpy` for binary parsing | `struct` + `memoryview` + `bytearray` | Massive C dependency for what stdlib handles natively. |
+| `float` for ABAP decimal/BCD types | `decimal.Decimal` | Binary float can't represent base-10 exactly — corrupts financial data. |
+| bare `utf-16` codec | `utf-16-le` / `utf-16-be` | Bare `utf-16` emits and consumes a BOM the wire format does not have. |
+| `setup.py` / `setup.cfg` | `pyproject.toml` + Hatchling | Legacy packaging. No reason for it in a 3.12+ greenfield. |
+
+---
+
 ## Legal boundary — do not cross it
 
 This repository must contain **no SAP material**:
@@ -139,6 +154,17 @@ src/saprfclib/
 Layer discipline: `transport.py` owns the NI length prefix and nothing above it.
 `session.py` owns the handshake and the TLV stream. `connection.py` orchestrates; it
 should not parse bytes itself. Keep new protocol logic in the sans-I/O layer.
+
+### Key library choices
+
+| Area | Library | Notes |
+|------|---------|-------|
+| WebSocket framing | `wsproto` (sans-I/O) | Drives over our own `asyncio` + `ssl` transport. |
+| HTTP/1.1 upgrade | `h11` (sans-I/O) | Used for the WebSocket `Upgrade` handshake. |
+| Kerberos / SPNEGO | `minikerberos` (pure Python) | For SNC, when implemented. No C GSS binding. |
+| ASN.1 / X.509 | `asn1crypto` (pure Python) | SPNEGO tokens, cert parsing for SNC. |
+| ABAP decimals | stdlib `decimal.Decimal` | Exact base-10; never `float`. |
+| UTF-16 strings | stdlib `utf-16-le` / `utf-16-be` | Explicit codec — never bare `utf-16`. |
 
 ---
 
@@ -193,6 +219,7 @@ hatch run lint:type                   # mypy strict over src/
 - Environment variables keep the `SAPRFC_` prefix; they describe SAP connection
   parameters, not the library.
 - Version comes from git tags via `hatch-vcs`. Never hand-edit a version string.
+- `src/saprfclib/_version.py` is auto-generated at build time — never edit it manually.
 
 ---
 
@@ -202,5 +229,6 @@ hatch run lint:type                   # mypy strict over src/
   in the same PR when behaviour changes.
 - Prefer a narrow, well-evidenced change over a broad plausible one.
 - When a capture contradicts this document, the capture wins — and update this document.
-- Never commit or push on behalf of the maintainer unless explicitly asked in that
-  session.
+- Propose changes as PRs; don't push directly to `main`.
+- For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, SNC SSO2, async wRFC/SNC),
+  check the GitHub issues before starting — a capture requirement may be blocking.

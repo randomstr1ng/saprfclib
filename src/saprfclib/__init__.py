@@ -46,6 +46,7 @@ from saprfclib.exceptions import (
     TransactionalError,
     WebSocketError,
 )
+from saprfclib.language import language_iso_to_sap, language_sap_to_iso
 from saprfclib.pool import AsyncConnectionPool, ConnectionPool
 from saprfclib.server import AsyncRfcServer, RfcServer
 from saprfclib.stores import (
@@ -73,6 +74,9 @@ __all__ = [
     "__version__",
     "encode",
     "decode",
+    # Logon language helpers (SDK parity: RfcLanguageIsoToSap / RfcLanguageSapToIso)
+    "language_iso_to_sap",
+    "language_sap_to_iso",
     # Sync connection
     "connect",
     "ConnectionPool",

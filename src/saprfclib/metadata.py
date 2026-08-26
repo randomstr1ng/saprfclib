@@ -160,6 +160,22 @@ _PARAMCLASS_TO_DIRECTION: dict[str, int] = {
     "T": RFC_TABLES,
 }
 
+# PARAMCLASS 'X' rows describe the function's EXCEPTIONS, not its parameters: they
+# carry the exception name in PARAMETER and leave EXID blank. They belong in no
+# FunctionDesc.parameters list and must be recognised deliberately — they used to be
+# discarded only as a side effect of the blank EXID raising, which meant a genuinely
+# unparseable *parameter* was thrown away just as quietly.
+# Confirmed live (kernel 793): RFC_READ_TABLE returns 6 such rows —
+# DATA_BUFFER_EXCEEDED, FIELD_NOT_VALID, NOT_AUTHORIZED, OPTION_NOT_VALID,
+# TABLE_NOT_AVAILABLE, TABLE_WITHOUT_DATA.
+_PARAMCLASS_EXCEPTION = "X"
+
+
+def is_exception_row(row: dict[str, Any]) -> bool:
+    """True if this PARAMS row describes an exception rather than a parameter."""
+    return str(row.get(_COL_PARAMCLASS, "")).strip().upper() == _PARAMCLASS_EXCEPTION
+
+
 # EXID single-char code → RFCTYPE integer (SDK type definitions / confirmed by live capture).
 _EXID_TO_RFCTYPE: dict[str, int] = {
     "C": RFCTYPE_CHAR,
@@ -210,6 +226,29 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     char-like types (CHAR/DATE/TIME/NUM/STRING) halve the unicode width; binary
     types keep the same size. type_desc is left None; _build_type_desc attaches
     nested layout for STRUCTURE/TABLE fields.
+
+    TABLES-direction promotion: GFI declares a TABLES parameter with the EXID of
+    its *row structure* (``EXID='u'`` → STRUCTURE) and ``PARAMCLASS='T'``.  EXID
+    alone therefore mistypes every TABLES param as a bare structure, which routes
+    it through the scalar 0x0201/0x0203 TLV pair instead of the table protocol and
+    makes the server reject the call with CALL_FUNCTION_ILLEGAL_P_TYPE.  The
+    direction is what decides: PARAMCLASS 'T' means the wire carries a table.
+
+    Source: golden fixture tests/golden/framing/rfc_read_table_response.bin —
+    RFC_READ_TABLE's DATA / FIELDS / OPTIONS params (all PARAMCLASS 'T') are
+    transported as 0x0301(name) 0x0330(dm_id) 0x0302(row_size,row_count)
+    0x0304(rows)…, i.e. the TABLE tag sequence, never as a 0x0203 scalar value.
+
+    PARAMCLASS alone decides. The GFI PARAMS table is flat — it lists the function's
+    parameters and its exceptions, never the fields inside a parameter's row
+    structure (that layout is fetched separately via RFC_GET_STRUCTURE_DEFINITION).
+    Confirmed live on kernel 793: RFC_READ_TABLE returned exactly 11 parameter rows
+    for its 11 parameters, plus 6 PARAMCLASS='X' exception rows, and no field rows.
+
+    In particular, do NOT gate this on FIELDNAME being blank. FIELDNAME names the
+    DDIC field a parameter's type is derived from, not a nesting level: the live
+    rows show DELIMITER with FIELDNAME='FLAG' and QUERY_TABLE with
+    FIELDNAME='TABNAME', both plain top-level parameters.
     """
     name = row.get(_COL_PARAMETER)
     if not isinstance(name, str) or not name:
@@ -222,6 +261,10 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     direction = _PARAMCLASS_TO_DIRECTION.get(str(paramclass))
     if direction is None:
         raise ValueError(f"malformed PARAMS row: unknown PARAMCLASS code {paramclass!r}")
+    # A TABLES-direction param is a table on the wire regardless of the EXID naming
+    # its row structure (see docstring — golden rfc_read_table_response.bin).
+    if direction == RFC_TABLES:
+        rfctype = RFCTYPE_TABLE
     intlength = _coerce_int(row, _COL_INTLENGTH)
     offset = _coerce_int(row, _COL_OFFSET)
     decimals = _coerce_int(row, _COL_DECIMALS)

@@ -32,7 +32,12 @@ from saprfclib.exceptions import (  # noqa: E402
 )
 from saprfclib.session import ConnectionAttributes, SessionState  # noqa: E402
 from saprfclib.transport import AsyncTransport  # noqa: E402
-from saprfclib.types import FunctionDesc  # noqa: E402
+from saprfclib.types import (  # noqa: E402
+    RFC_EXPORT,
+    RFC_IMPORT,
+    FieldDesc,
+    FunctionDesc,
+)
 from tests._mocks import AsyncMockTransport  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -66,14 +71,36 @@ def _make_ready_conn(
     return conn, transport
 
 
-async def _stub_bootstrap(func_name: str) -> FunctionDesc:
-    """Async stub for _call_bootstrap: returns empty FunctionDesc without any I/O.
+def _stfc_desc(func_name: str = "STFC_CONNECTION") -> FunctionDesc:
+    """STFC_CONNECTION's parameter set, enough to exercise every direction.
 
-    Replaces the real bootstrap which sends RFC_GET_FUNCTION_INTERFACE over the
-    transport. With an empty FunctionDesc, build_invoke_request encodes no params
-    and parse_invoke_response returns {} for an empty response.
+    A descriptor must list the parameters a test passes: build_invoke_request now
+    rejects an argument the interface does not declare rather than dropping it
+    silently, which is what an empty stub descriptor used to rely on.
     """
-    return FunctionDesc(name=func_name.upper(), parameters=[])
+    return FunctionDesc(
+        name=func_name.upper(),
+        parameters=[
+            FieldDesc("REQUTEXT", 0, 255, 0, 510, 0, 0, direction=RFC_IMPORT),
+            FieldDesc("INTPARAM", 8, 4, 0, 4, 0, 0, direction=RFC_IMPORT),
+            FieldDesc("ECHOTEXT", 0, 255, 0, 510, 0, 0, direction=RFC_EXPORT),
+        ],
+    )
+
+
+async def _stub_bootstrap(func_name: str) -> FunctionDesc:
+    """Async stub for _call_bootstrap: a descriptor without any I/O.
+
+    Replaces the real bootstrap, which would send RFC_GET_FUNCTION_INTERFACE over
+    the transport.
+    """
+    return _stfc_desc(func_name)
+
+
+# A minimal well-formed success response: return code 0 and no output parameters.
+# An invoke response always carries 0x0420; a payload without it means the call was
+# aborted, and parse_invoke_response now raises rather than reporting {}.
+_EMPTY_OK_RESP: bytes = struct.pack(">HHI", 0x0420, 4, 0)
 
 
 # Minimal TLV response bytes that trigger AbapApplicationError and AbapSystemFailure.
@@ -98,7 +125,7 @@ async def test_async_call_returns_dict() -> None:
     Asserts:
     - result is a dict.
     """
-    conn, _ = _make_ready_conn([b""])
+    conn, _ = _make_ready_conn([_EMPTY_OK_RESP])
     conn._call_bootstrap = _stub_bootstrap  # type: ignore[method-assign]
     result = await conn.call("STFC_CONNECTION", REQUTEXT="hi")
     assert isinstance(result, dict)
@@ -114,7 +141,7 @@ async def test_async_call_param_types() -> None:
     Asserts:
     - result is a dict (no error from passing multiple typed kwargs).
     """
-    conn, _ = _make_ready_conn([b""])
+    conn, _ = _make_ready_conn([_EMPTY_OK_RESP])
     conn._call_bootstrap = _stub_bootstrap  # type: ignore[method-assign]
     result = await conn.call("STFC_CONNECTION", REQUTEXT="hello", INTPARAM=42)
     assert isinstance(result, dict)
@@ -124,17 +151,18 @@ async def test_async_call_return_types() -> None:
     """CLIENT-03: Python-native return types from async call.
 
     SAP types (INT, CHAR, BCD, DATE, etc.) must decode to Python-native types
-    via the unchanged codec layer. An empty response → empty dict.
+    via the unchanged codec layer. A success response carrying no output parameters
+    decodes to an empty dict.
 
     Asserts:
     - result is a dict.
     - result == {} (empty response, no params decoded).
     """
-    conn, _ = _make_ready_conn([b""])
+    conn, _ = _make_ready_conn([_EMPTY_OK_RESP])
     conn._call_bootstrap = _stub_bootstrap  # type: ignore[method-assign]
     result = await conn.call("STFC_CONNECTION")
     assert isinstance(result, dict)
-    assert result == {}
+    assert result == {}  # rc=0 with no output parameters
 
 
 # --------------------------------------------------------------------------- #

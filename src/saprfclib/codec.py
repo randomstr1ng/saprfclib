@@ -81,6 +81,14 @@ RFCTYPE_CDAY = 40
 # INT8/UTCLONG/UTCSECOND/UTCMINUTE share the INT8 8-byte group in the serializer
 # (dispatch cases 7/0x1f-0x22); DTDAY-TSECOND share INT4 group (0x23-0x26);
 # TMINUTE/CDAY share INT2 group (0x27-0x28). All confirmed LE by grouping.
+# INT4 little-endian is CONFIRMED, not inferred: the STFC_CHANGING golden pair
+# settles it by arithmetic. The request carries START_VALUE=0a000000 and
+# COUNTER=01000000; the response carries RESULT=0b000000 and COUNTER=02000000. The
+# function returns START_VALUE + COUNTER and increments COUNTER, so read
+# little-endian that is 10 + 1 = 11 and 1 -> 2 — exactly right. Big-endian would make
+# the inputs 167772160 and 16777216 and no reading of the response fits.
+# Sources: tests/golden/framing/stfc_changing_request.bin / stfc_changing_response.bin
+# (see tests/test_table_params.py::test_int4_params_are_little_endian_on_the_wire).
 _INT_FORMATS: dict[int, str] = {
     RFCTYPE_INT: "<i",  # signed 32-bit
     RFCTYPE_INT2: "<h",  # signed 16-bit
@@ -117,6 +125,40 @@ _DECF_GAP_MESSAGE = (
 
 # Types the SAP SDK documents as not serialized on the wire.
 _OUT_OF_SCOPE = frozenset({RFCTYPE_NULL, RFCTYPE_ABAPOBJECT, RFCTYPE_XMLDATA})
+
+# Byte-like types whose "unset" value is empty bytes rather than an empty string.
+_BYTE_LIKE_TYPES = frozenset({RFCTYPE_BYTE, RFCTYPE_XSTRING})
+
+
+def _default_field_value(child: FieldDesc) -> Any:
+    """Return the initial value for a structure field the caller left unset.
+
+    ABAP initialises every field of a work area before an RFC fills it, so a
+    caller supplying only the fields they care about is the normal case — most
+    SAP function modules are written expecting it (RFC_READ_TABLE's FIELDS rows
+    are the canonical example: callers set FIELDNAME and nothing else).
+
+    The value is chosen so the type's own encoder produces the correct padding
+    rather than leaving the buffer's NUL fill in place: CHAR pads with blanks and
+    NUM pads with zeros (Pitfall: fixed-width character fields are blank-padded,
+    numeric fields zero-padded — the two are not interchangeable), so both start
+    from an empty string and let ``_encode_uc_fixed`` do the padding.
+    """
+    rfctype = child.rfctype
+    if rfctype == RFCTYPE_STRUCTURE:
+        return {}
+    if rfctype == RFCTYPE_TABLE:
+        return []
+    if rfctype in _BYTE_LIKE_TYPES:
+        return b""
+    if rfctype == RFCTYPE_FLOAT:
+        return 0.0
+    if rfctype == RFCTYPE_BCD:
+        return Decimal(0)
+    if rfctype in _INT_FORMATS or rfctype == RFCTYPE_INT1:
+        return 0
+    # CHAR / DATE / TIME / NUM / STRING and anything else character-shaped.
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -339,8 +381,9 @@ def _decode_structure(
             )
         span = data[offset : offset + length]
         if child.rfctype == RFCTYPE_STRUCTURE:
-            assert child.type_desc is not None
-            result[child.name] = _decode_structure(span, child.type_desc, unicode_mode)
+            result[child.name] = _decode_structure(
+                span, _require_type_desc(child, "decode"), unicode_mode
+            )
         elif child.rfctype == RFCTYPE_TABLE:
             result[child.name] = _decode_table(span, child)
         else:
@@ -358,8 +401,7 @@ def _decode_table(
     by an attacker-controlled count (threat T-02-06). Each row is decoded as a
     STRUCTURE over its memoryview slice (Pattern 3, D-11 zero-copy).
     """
-    assert field.type_desc is not None
-    type_desc = field.type_desc
+    type_desc = _require_type_desc(field, "decode")
     row_size = _row_size(type_desc, field.unicode_mode)
     if row_size <= 0:
         raise ValueError(f"TABLE row size must be positive, got {row_size}")
@@ -368,6 +410,26 @@ def _decode_table(
         _decode_structure(mv[i : i + row_size], type_desc, field.unicode_mode)
         for i in range(0, len(mv) - row_size + 1, row_size)
     ]
+
+
+def _require_type_desc(field: FieldDesc, action: str) -> TypeDesc:
+    """Return the field's layout, or explain precisely what is missing.
+
+    A STRUCTURE or TABLE field cannot be encoded or decoded without the layout of
+    its row, which the client fetches separately via RFC_GET_STRUCTURE_DEFINITION.
+    When that lookup fails the descriptor arrives with ``type_desc=None`` and the
+    failure used to surface here as a bare AssertionError naming nothing — no field,
+    no structure, no cause. Say which parameter and which DDIC type are missing so
+    the real problem is findable.
+    """
+    if field.type_desc is None:
+        kind = "TABLE" if field.rfctype == RFCTYPE_TABLE else "STRUCTURE"
+        raise ValueError(
+            f"cannot {action} {kind} parameter {field.name!r}: its row layout was "
+            f"never resolved (type_desc is None). The RFC_GET_STRUCTURE_DEFINITION "
+            f"lookup for its DDIC type did not complete."
+        )
+    return field.type_desc
 
 
 def _encode_structure(
@@ -381,16 +443,28 @@ def _encode_structure(
     sized to the layout's total byte size, zero-padding any gaps. Recurses for
     nested STRUCTURE; nested TABLE fields encode to their full variable extent
     (the descriptor's row size bounds a single embedded row in Phase 2 tests).
+
+    Fields absent from ``value`` are filled with their type's initial value via
+    ``_default_field_value`` and encoded normally, so a partial row dict yields a
+    correctly padded work area instead of raising KeyError or leaving NUL fill
+    where the wire expects blanks.
     """
     size = _row_size(type_desc, unicode_mode)
     buf = bytearray(size)
     for child in type_desc.fields:
         child.unicode_mode = unicode_mode
         offset, _ = _field_span(child)
-        child_value = value[child.name]
+        if child.name in value:
+            child_value = value[child.name]
+        else:
+            if child.rfctype in (RFCTYPE_STRUCTURE, RFCTYPE_TABLE) and child.type_desc is None:
+                # No layout to lay out, and the caller supplied nothing: the
+                # zero fill already in ``buf`` is the initial value. Encoding a
+                # supplied value without a type_desc still asserts below.
+                continue
+            child_value = _default_field_value(child)
         if child.rfctype == RFCTYPE_STRUCTURE:
-            assert child.type_desc is not None
-            raw = _encode_structure(child_value, child.type_desc, unicode_mode)
+            raw = _encode_structure(child_value, _require_type_desc(child, "encode"), unicode_mode)
         elif child.rfctype == RFCTYPE_TABLE:
             raw = _encode_table(child_value, child)
         else:
@@ -407,8 +481,7 @@ def _encode_table(value: list[dict[str, Any]], field: FieldDesc) -> bytes:
 
     No row delimiter — rows are fixed-size structures back-to-back (D-10).
     """
-    assert field.type_desc is not None
-    type_desc = field.type_desc
+    type_desc = _require_type_desc(field, "encode")
     out = bytearray()
     for row in value:
         out += _encode_structure(row, type_desc, field.unicode_mode)
@@ -483,8 +556,7 @@ def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc)
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return buf
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
-            assert field.type_desc is not None
-            return _decode_structure(buf, field.type_desc, field.unicode_mode)
+            return _decode_structure(buf, _require_type_desc(field, "decode"), field.unicode_mode)
         case rfctype if rfctype == RFCTYPE_TABLE:
             return _decode_table(buf, field)
         case _:
@@ -554,8 +626,7 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return bytes(value)
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
-            assert field.type_desc is not None
-            return _encode_structure(value, field.type_desc, field.unicode_mode)
+            return _encode_structure(value, _require_type_desc(field, "encode"), field.unicode_mode)
         case rfctype if rfctype == RFCTYPE_TABLE:
             return _encode_table(value, field)
         case _:
