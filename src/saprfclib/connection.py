@@ -146,6 +146,13 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 #   [4:6]  0x0000      reserved
 #   [6:8]  0x8500      constant (CPIC NI frame tag/version — exact meaning TBD)
 # Cross-check: stfc_connection TLV body=648B=0x0288 → footer=0000028800008500 ✓
+#
+# The length field is 32 bits, not 16. Every capture has a zero high half because
+# every captured body is small, so [0:2]=0x0000 reads equally well as "reserved"
+# — but packing it as uint16 raises struct.error above 64 KB, and the C SDK sends
+# bodies far larger than that (a multi-megabyte ABAP program through
+# /SAPDS/RFC_ABAP_INSTALL_RUN, for one). Verified across all nine request
+# fixtures: the BE uint32 at [0:4] equals len(tlv_body) exactly in each.
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
 # Client tail at APPCHDR6[76:80] in 80-byte control frames (GW_INFO, GW_DONE_CLIENT).
 # protocol analysis: var_3c=0xffff at [76:78] (hardcoded);
@@ -2277,9 +2284,11 @@ class Connection:
         ("client with wrong appc header version rejected").
 
         Footer: every invoke frame ends with an 8-byte trailer inside the NI frame:
-          [0:2] 0x0000 | [2:4] uint16 BE len(tlv_body) | [4:6] 0x0000 | [6:8] 0x8500
-        Wire-verified in 5 golden captures; absent from server responses (responses
-        carry a 0x0667 timing double instead). See _INVOKE_FOOTER_MAGIC constant.
+          [0:4] uint32 BE len(tlv_body) | [4:6] 0x0000 | [6:8] 0x8500
+        Wire-verified in all nine request fixtures; absent from server responses
+        (responses carry a 0x0667 timing double instead). The length is 32-bit: a
+        uint16 fits every capture only because every captured body is small, and
+        overflows for bodies above 64 KB. See _INVOKE_FOOTER_MAGIC.
         """
         gw = bytearray(76)
         struct.pack_into(">H", gw, 0, _GW_TYPE_RFC)
@@ -2288,7 +2297,7 @@ class Connection:
         struct.pack_into(">I", gw, 24, _GW_HDR_APPC_VER)
         struct.pack_into(">I", gw, 28, _GW_HDR_MAX_LEN)
         gw[40:48] = handle
-        footer = struct.pack(">HH", 0, len(tlv_body)) + _INVOKE_FOOTER_MAGIC
+        footer = struct.pack(">I", len(tlv_body)) + _INVOKE_FOOTER_MAGIC
         return bytes(gw) + _RFC_MARKER + tlv_body + footer
 
     def _send_invoke_frame(self, frame: bytes) -> None:
