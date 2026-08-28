@@ -32,7 +32,9 @@
 # from server error TLV tags, never from credential tags.
 from __future__ import annotations
 
+import logging
 import struct
+from collections.abc import Iterator
 from typing import Any
 
 from saprfclib.codec import decode, encode
@@ -108,6 +110,37 @@ _TAG_TABLE_END = 0x0306  # table-stream end marker. Accepted when reading; never
 _TAG_TABLE_DELTA = 0x0335
 _TAG_TABLE_DELTA_END = 0x0336
 _DELTA_OPCODE = 10  # first uint32 of the 0x0335 header; only value observed
+_logger = logging.getLogger(__name__)
+
+# XML-encoded table rows (tags 0x3c02 / 0x3c05).
+#
+# A table sent this way is bracketed by an empty 0x3c02 pair, with plain-text XML
+# carried in 0x3c05 chunks as ASCII — NOT the UTF-16LE every other string-bearing tag
+# uses. Confirmed live twice:
+#   empty:      0x3c02 | 0x3c05 '<ET_DATA>' | 0x3c05 '</ET_DATA>' | 0x3c02
+#   populated:  0x3c05 '<ET_DATA>' | 0x3c05 '<item><LINE>a|b|c</LINE></item></ET_DATA>'
+# Sources: tests/golden/framing/rfc_read_table_response.bin and
+# basxml_et_data_response.bin (the latter contributed via issue #29).
+#
+# NOT to be confused with SAP's BASXML, which issue #18 tracks and which is NOT
+# implemented. That is a binary tokenised format: BasXmlRenderer emits a header
+# beginning with the literal magic "BXML", then token bytes and a string table (an
+# element open is the byte 0x3c followed by a string-table index, not the text "<"),
+# under the http://www.sap.com/abapxml namespace, and BasXMLParser reads it back with
+# length-prefixed strings. The two share a TLV tag and nothing else. A payload
+# carrying the BXML magic is refused outright rather than fed to the text reader —
+# see _BASXML_BINARY_MAGIC.
+_TAG_BASXML_MARKER = 0x3C02
+_TAG_BASXML_DATA = 0x3C05
+_BASXML_OPEN = b"<"
+# SAP's binary BASXML document magic. Its presence means the peer negotiated the
+# tokenised format that issue #18 covers; the text reader below would produce
+# nonsense from it, so it is rejected with a clear message instead.
+_BASXML_BINARY_MAGIC = b"BXML"
+# Sentinel: inside a BASXML block but the table name has not been read yet. A plain
+# string, so `is` comparisons distinguish it from a real table called anything.
+_BASXML_PENDING = "\x00pending"
+
 _SAPCOMPRESS_MAGIC = b"\x1f\x9d"  # compress.py header magic, at stream offset 5
 _SAPCOMPRESS_HDR = 8  # [4B LE uncompressed length][algo][2B magic][config]
 _LZ_WRAPPER = 8  # bytes preceding the SAPCOMPRESS stream in a joined 0x0305 payload
@@ -848,13 +881,22 @@ def parse_invoke_response(
             param_map[field.name.upper()] = field
 
     result: dict[str, object] = {}
+    basxml: dict[str, bytes] = {}
     # Walk the ordered tag list to pick up 0x0201+0x0203 pairs
-    for name, value in _extract_name_value_pairs(resp, dm_table_names):
+    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml):
         name_upper = name.upper()
         match_field: FieldDesc | None = param_map.get(name_upper)
         if match_field is None:
             continue  # unknown param name — ignore (defensive)
         result[match_field.name] = decode(match_field.rfctype, value, match_field)
+
+    # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
+    # bypass the codec entirely (see decode_basxml_table).
+    for name, payload in basxml.items():
+        match_field = param_map.get(name.upper())
+        if match_field is None:
+            continue
+        result[match_field.name] = decode_basxml_table(payload, match_field.name)
 
     return result
 
@@ -914,6 +956,168 @@ def _parse_tlv_stream(data: bytes) -> dict[int, bytes]:
     return out
 
 
+_BASXML_MAX_BYTES = 64 * 1024 * 1024  # refuse absurd payloads (T-04-RESP)
+_BASXML_MAX_ITEMS = 1_000_000
+_BASXML_ENTITIES = {
+    "amp": "&",
+    "lt": "<",
+    "gt": ">",
+    "quot": '"',
+    "apos": "'",
+}
+
+
+def _xml_unescape(text: str) -> str:
+    """Resolve the five predefined XML entities plus numeric character references.
+
+    Deliberately hand-rolled rather than using an XML library: this payload arrives
+    from the peer (trust boundary T-04-RESP), and the stdlib parsers accept DTDs and
+    entity definitions, which brings entity-expansion exposure for no benefit here.
+    The BASXML grammar in play is elements with text content and nothing else — no
+    attributes, no namespaces, no processing instructions — so a bounded scanner
+    covers it exactly and offers no such surface.
+    """
+    if "&" not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch != "&":
+            out.append(ch)
+            i += 1
+            continue
+        end = text.find(";", i + 1, i + 12)
+        if end == -1:
+            out.append(ch)
+            i += 1
+            continue
+        ref = text[i + 1 : end]
+        if ref.startswith("#"):
+            try:
+                code = int(ref[2:], 16) if ref[1:2].lower() == "x" else int(ref[1:])
+                out.append(chr(code))
+                i = end + 1
+                continue
+            except (ValueError, OverflowError):
+                pass
+        elif ref in _BASXML_ENTITIES:
+            out.append(_BASXML_ENTITIES[ref])
+            i = end + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _basxml_elements(text: str, start: int, end: int) -> Iterator[tuple[str, int, int]]:
+    """Yield (tag, inner_start, inner_end) for direct child elements between start/end."""
+    pos = start
+    while pos < end:
+        open_lt = text.find("<", pos, end)
+        if open_lt == -1:
+            return
+        open_gt = text.find(">", open_lt + 1, end)
+        if open_gt == -1:
+            return
+        tag = text[open_lt + 1 : open_gt]
+        if tag.startswith("/") or tag.startswith("?") or tag.startswith("!"):
+            pos = open_gt + 1
+            continue
+        if tag.endswith("/"):  # self-closing: empty value
+            yield tag[:-1].strip(), open_gt + 1, open_gt + 1
+            pos = open_gt + 1
+            continue
+        closing = f"</{tag}>"
+        close_at = text.find(closing, open_gt + 1, end)
+        if close_at == -1:
+            return
+        yield tag, open_gt + 1, close_at
+        pos = close_at + len(closing)
+
+
+def decode_basxml_table(payload: bytes, table_name: str = "") -> list[dict[str, str]]:
+    """Decode a BASXML table body into row dicts.
+
+    Wire form, confirmed live (kernel 793, RFC_READ_TABLE with
+    USE_ET_DATA_4_RETURN='X', contributed via issue #29)::
+
+        <ET_DATA><item><LINE>VAL1|VAL2|VAL3</LINE></item></ET_DATA>
+
+    The payload is ASCII, not the UTF-16LE every other string-bearing tag uses, and
+    arrives split across 0x3c05 records that must be joined before parsing.
+
+    Each ``<item>`` becomes one row and each element inside it a key. The observed
+    form carries the whole delimited row in a single ``<LINE>`` element — the same
+    buffer ``DATA`` would have held — but the documented form puts one element per
+    field, so both are handled by the same walk: whatever elements an item contains
+    become that row's keys.
+
+    Values are returned as text. No type conversion is applied, because the element
+    carries no type information and the row is delimited exactly as the caller's
+    DELIMITER specified; splitting or converting it is the caller's decision, as it
+    is for ``DATA``.
+    """
+    if payload[:4] == _BASXML_BINARY_MAGIC:
+        raise NotImplementedError(
+            f"table {table_name!r} arrived in SAP's binary BASXML encoding (BXML "
+            f"magic), which is not implemented — see "
+            f"https://github.com/randomstr1ng/saprfclib/issues/18. This is a "
+            f"different format from the plain-text XML tables saprfclib does decode; "
+            f"decoding it as text would produce nonsense."
+        )
+    if len(payload) > _BASXML_MAX_BYTES:
+        raise ValueError(
+            f"BASXML payload for table {table_name!r} is {len(payload)} bytes, "
+            f"over the {_BASXML_MAX_BYTES} byte cap"
+        )
+    text = payload.decode("utf-8", errors="replace")
+
+    # Skip any XML declaration, DTD or comment before the root element. No server has
+    # been observed sending one, but skipping them keeps the structure walk
+    # predictable on unexpected input instead of treating the prologue as data.
+    scan = 0
+    while scan < len(text):
+        nxt = text.find("<", scan)
+        if nxt == -1 or text[nxt + 1 : nxt + 2] not in ("?", "!"):
+            break
+        depth, i = 0, nxt
+        while i < len(text):
+            if text[i] == "<":
+                depth += 1
+            elif text[i] == ">":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        scan = i + 1
+    text = text[scan:] if scan else text
+
+    # Enter the outer <TABLE> wrapper if present; tolerate its absence.
+    body_start, body_end = 0, len(text)
+    first_gt = text.find(">")
+    if text[:1] == "<" and first_gt != -1:
+        wrapper = text[1:first_gt]
+        closing = f"</{wrapper}>"
+        close_at = text.rfind(closing)
+        if close_at != -1:
+            body_start, body_end = first_gt + 1, close_at
+
+    rows: list[dict[str, str]] = []
+    for tag, inner_start, inner_end in _basxml_elements(text, body_start, body_end):
+        if len(rows) >= _BASXML_MAX_ITEMS:
+            raise ValueError(f"BASXML table {table_name!r} exceeds the {_BASXML_MAX_ITEMS} row cap")
+        row: dict[str, str] = {}
+        for name, vs, ve in _basxml_elements(text, inner_start, inner_end):
+            row[name] = _xml_unescape(text[vs:ve])
+        if not row:
+            # An item with no child elements: keep its text under the item tag so
+            # the row is not silently lost.
+            row = {tag: _xml_unescape(text[inner_start:inner_end])}
+        rows.append(row)
+    return rows
+
+
 def decompress_table_stream(chunks: list[bytes], param_name: str = "") -> bytes:
     """Decompress the SAPCOMPRESS stream carried by a table's 0x0305 records.
 
@@ -956,8 +1160,22 @@ def decompress_table_stream(chunks: list[bytes], param_name: str = "") -> bytes:
         ) from exc
 
 
+def _basxml_open_tag(chunk: bytes) -> str | None:
+    """Return the table name if this chunk opens a BASXML document, else None."""
+    if not chunk.startswith(_BASXML_OPEN):
+        return None
+    text = chunk.decode("ascii", "replace")
+    close = text.find(">")
+    if close == -1:
+        return None
+    name = text[1:close]
+    return None if name.startswith("/") or not name else name
+
+
 def _extract_name_value_pairs(
-    data: bytes, dm_table_names: dict[int, str] | None = None
+    data: bytes,
+    dm_table_names: dict[int, str] | None = None,
+    basxml_out: dict[str, bytes] | None = None,
 ) -> list[tuple[str, bytes]]:
     """Walk TLV stream and return ordered (name_str, value_bytes) pairs.
 
@@ -993,6 +1211,9 @@ def _extract_name_value_pairs(
     in_table: bool = False
     table_rows: bytearray = bytearray()
     table_lz: list[bytes] = []  # 0x0305 fragments of one compressed stream
+    basxml_chunks: dict[str, list[bytes]] = {}  # table name -> 0x3c05 fragments
+    basxml_current: str | None = None  # None outside a block, _BASXML_PENDING inside
+    # one whose name is not yet known
 
     def _payload() -> bytes:
         """Row bytes for the table just finished, decompressing 0x0305 if used."""
@@ -1061,6 +1282,29 @@ def _extract_name_value_pairs(
             table_rows = bytearray()
             table_lz = []
 
+        # --- BASXML-encoded table ---
+        # An empty 0x3c02 brackets the block on both sides; the fragments between are
+        # one XML document split at arbitrary points, so only the FIRST fragment names
+        # the table. A later fragment may well start with '<item>', which is why the
+        # name is taken once on entry rather than re-derived per chunk.
+        elif tag == _TAG_BASXML_MARKER:
+            basxml_current = None if basxml_current is not None else _BASXML_PENDING
+        elif tag == _TAG_BASXML_DATA and basxml_current is not None:
+            if basxml_current is _BASXML_PENDING:
+                basxml_current = _basxml_open_tag(value) or _BASXML_PENDING
+                if basxml_current is _BASXML_PENDING:
+                    # Not plain-text XML — most likely the binary BASXML of issue #18.
+                    # Say so rather than dropping the parameter without a word.
+                    _logger.warning(
+                        "an XML-encoded table could not be identified (payload starts "
+                        "%r). If this is SAP's binary BASXML it is not supported yet — "
+                        "see issue #18. The parameter is omitted from the result.",
+                        bytes(value[:8]),
+                    )
+                    continue
+                basxml_chunks.setdefault(basxml_current, [])
+            basxml_chunks[basxml_current].append(value)
+
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
             pass  # row_size / row_count already available from row data length
@@ -1098,6 +1342,13 @@ def _extract_name_value_pairs(
     # Finalize any unterminated table at end of stream
     if in_table and current_name is not None:
         pairs.append((current_name, _payload()))
+
+    # BASXML tables are reported separately: their payload is XML text, not the flat
+    # row buffer the binary encoding produces, so the caller must decode it with
+    # decode_basxml_table rather than the codec.
+    if basxml_out is not None:
+        for name, chunks in basxml_chunks.items():
+            basxml_out[name] = b"".join(chunks)
 
     return pairs
 

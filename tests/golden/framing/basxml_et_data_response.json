@@ -1,0 +1,43 @@
+{
+  "message_type": "BASXML_ET_DATA_RESPONSE",
+  "capture_source": "live capture 2026-08-28, contributed via issue #29; SAP S/4HANA 2023 kernel 793 release 758, unicode. RFC_READ_TABLE on OA2C_CLIENT with USE_ET_DATA_4_RETURN='X'. Sanitised: GW handle and 0x0514 session token overwritten, and every column value inside <LINE> replaced with 'X' of the SAME length so the delimiter structure and all field widths are preserved. No NI length prefix.",
+  "evidence": "decodes to one row of five pipe-delimited columns matching the four requested FIELDS plus the client UUID",
+  "ni_header_length": 0,
+  "notes": [
+    "USE_ET_DATA_4_RETURN='X' makes the server return rows through ET_DATA in BASXML instead of the binary DATA table - which comes back declared (0x0301/0x0330/0x0302) but with NO rows.",
+    "BASXML shape: an empty 0x3c02 brackets the block on both sides, with the XML split across 0x3c05 records. The payload is ASCII, NOT the UTF-16LE every other string-bearing tag uses.",
+    "The fragments are one XML document split at arbitrary points: here chunk 1 is '<ET_DATA>' and chunk 2 is '<item><LINE>...</LINE></item></ET_DATA>'. Only the first fragment names the table - a later one may begin '<item>' - so the name must be taken once on entry, not re-derived per chunk.",
+    "The row form observed is the shortcut one: a single <LINE> element holding the whole delimited row, exactly the buffer DATA would have carried. The documented alternative puts one element per field; both are handled by the same walk, since whatever elements an <item> contains become that row's keys.",
+    "[ASSUMED] Multi-row behaviour. This capture has a single <item>, so how several rows are distributed across 0x3c05 fragments is inferred from the fact that the fragments form one document. Joining before parsing makes the split irrelevant, but a multi-row capture would confirm it."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "basxml_table": "ET_DATA",
+    "basxml_rows": 1,
+    "basxml_row_keys": [
+      "LINE"
+    ],
+    "columns_in_line": 5,
+    "binary_data_rows": 0,
+    "fields_via_delta_tag": 4,
+    "total_length": 1482
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    }
+  ]
+}

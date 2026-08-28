@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Metadata retrieval no longer treats an ABAP exception as an empty descriptor. A
+  function module that is not remote-enabled answers `RFC_GET_FUNCTION_INTERFACE`
+  with a normal exception (`FL`/`046`/`FU_NOT_FOUND`), and because an exception reply
+  carries no `0x0420` the return-code check never fired — so the descriptor came back
+  empty and every subsequent call rejected the caller's arguments as unknown. All four
+  metadata bootstraps now classify errors through one shared path (#25).
+- The exception tag mapping was wrong. `0x0402`–`0x0408` came from documentation and
+  matches no capture; three live exception replies agree on `0x0415` message class,
+  `0x0416` type, `0x0417` number and `0x0411` first variable. `AbapApplicationError`
+  now carries the full message coordinates instead of only the key.
+- Tables returned as plain-text XML under `0x3c02`/`0x3c05` are decoded instead of
+  being dropped from the result. `RFC_READ_TABLE` uses this for `ET_DATA` when called
+  with `USE_ET_DATA_4_RETURN='X'` (#29). SAP's binary BASXML remains unimplemented
+  (#18) and is now refused explicitly rather than mis-parsed as text.
 - The invoke-frame footer packed the TLV body length as a 16-bit integer, so any
   request body over 64 KB raised `struct.error` — a real ABAP program submitted
   through `/SAPDS/RFC_ABAP_INSTALL_RUN` is enough to hit it. The field is 32-bit;

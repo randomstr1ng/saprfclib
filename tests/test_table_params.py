@@ -1056,3 +1056,167 @@ def test_strict_params_is_exposed_and_defaults_to_false() -> None:
 
     for fn in (connect, connect_async):
         assert inspect.signature(fn).parameters["strict_params"].default is False
+
+
+# --------------------------------------------------------------------------- #
+# BASXML-encoded tables (issues #29 / #18)
+# --------------------------------------------------------------------------- #
+#
+# RFC_READ_TABLE's ET_DATA arrives BASXML-encoded, not as a binary table.
+
+
+def test_basxml_payload_is_ascii_not_utf16() -> None:
+    """0x3c05 breaks the UTF-16LE convention every other string tag follows.
+
+    '<ET_DATA>' is 9 bytes for 9 characters; decoding it as UTF-16LE yields mojibake,
+    which is how it went unnoticed.
+    """
+    raw = (GOLDEN / "rfc_read_table_response.bin").read_bytes()
+    if struct.unpack_from(">I", raw, 0)[0] == len(raw) - 4:
+        raw = raw[4:]
+    chunks = [val for tag, val in _walk_tlv(raw[80:]) if tag == 0x3C05]
+    assert chunks[0] == b"<ET_DATA>"
+    assert len(chunks[0]) == 9
+
+
+# --------------------------------------------------------------------------- #
+# BASXML table decoding (issue #29)
+# --------------------------------------------------------------------------- #
+
+
+def _basxml_desc() -> FunctionDesc:
+    et = TypeDesc("SDTI_RESULT_TAB", [_char("LINE", 8, 0)], 4, 8)
+    return FunctionDesc(
+        "RFC_READ_TABLE",
+        [
+            FieldDesc("ET_DATA", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_EXPORT, type_desc=et),
+            FieldDesc(
+                "DATA", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_TABLES, type_desc=_tab512()
+            ),
+            FieldDesc(
+                "FIELDS",
+                RFCTYPE_TABLE,
+                0,
+                0,
+                0,
+                0,
+                0,
+                direction=RFC_TABLES,
+                type_desc=_rfc_db_fld(),
+            ),
+        ],
+    )
+
+
+def test_basxml_table_reaches_the_caller() -> None:
+    """ET_DATA decodes to rows instead of vanishing from the result.
+
+    Source: tests/golden/framing/basxml_et_data_response.bin — RFC_READ_TABLE with
+    USE_ET_DATA_4_RETURN='X'.
+    """
+    body = (GOLDEN / "basxml_et_data_response.bin").read_bytes()[80:]
+    result = parse_invoke_response(body, _basxml_desc(), {1: "FIELDS"})
+    assert "ET_DATA" in result
+    assert len(result["ET_DATA"]) == 1
+    assert list(result["ET_DATA"][0]) == ["LINE"]
+    assert result["ET_DATA"][0]["LINE"].count("|") == 4  # five columns
+
+
+def test_binary_data_table_is_empty_when_the_flag_is_set() -> None:
+    """The server puts everything in ET_DATA and leaves DATA declared but empty."""
+    body = (GOLDEN / "basxml_et_data_response.bin").read_bytes()[80:]
+    result = parse_invoke_response(body, _basxml_desc(), {1: "FIELDS"})
+    assert result["DATA"] == []
+    assert len(result["FIELDS"]) == 4
+
+
+def test_basxml_fragments_are_one_document_not_one_per_table() -> None:
+    """Only the first fragment names the table; a later one may start with <item>.
+
+    Re-deriving the name per chunk attributes the rows to a table called 'item' and
+    loses them, which is exactly what happened first time round.
+    """
+    from saprfclib.invoke import _extract_name_value_pairs
+
+    body = (GOLDEN / "basxml_et_data_response.bin").read_bytes()[80:]
+    out: dict[str, bytes] = {}
+    _extract_name_value_pairs(body, None, out)
+    assert set(out) == {"ET_DATA"}
+    assert out["ET_DATA"].startswith(b"<ET_DATA>")
+    assert out["ET_DATA"].endswith(b"</ET_DATA>")
+
+
+@pytest.mark.parametrize(
+    ("xml", "expected"),
+    [
+        # the observed shortcut form: whole row in one element
+        (b"<T><item><LINE>a|b</LINE></item></T>", [{"LINE": "a|b"}]),
+        # the documented field-per-tag form
+        (b"<T><item><A>1</A><B>2</B></item></T>", [{"A": "1", "B": "2"}]),
+        # several rows
+        (b"<T><item><L>r1</L></item><item><L>r2</L></item></T>", [{"L": "r1"}, {"L": "r2"}]),
+        # empty table
+        (b"<T></T>", []),
+        # self-closing element -> empty value
+        (b"<T><item><L/></item></T>", [{"L": ""}]),
+        # entities must be resolved
+        (b"<T><item><L>a&amp;b&lt;c&gt;d</L></item></T>", [{"L": "a&b<c>d"}]),
+        (b"<T><item><L>&#65;&#x42;</L></item></T>", [{"L": "AB"}]),
+    ],
+)
+def test_basxml_decoder_shapes(xml: bytes, expected: list[dict[str, str]]) -> None:
+    """Both documented shapes, multiple rows, and entity handling."""
+    from saprfclib.invoke import decode_basxml_table
+
+    assert decode_basxml_table(xml, "T") == expected
+
+
+def test_basxml_decoder_is_bounded() -> None:
+    """Untrusted payload: refuse an absurd size rather than allocating for it."""
+    from saprfclib.invoke import _BASXML_MAX_BYTES, decode_basxml_table
+
+    with pytest.raises(ValueError, match="over the .* byte cap"):
+        decode_basxml_table(b"x" * (_BASXML_MAX_BYTES + 1), "T")
+
+
+def test_basxml_decoder_ignores_dtd_and_entity_declarations() -> None:
+    """A hand-rolled scanner, so entity-expansion tricks have nothing to expand.
+
+    Only the five predefined entities and numeric references resolve; an undeclared
+    one is left as written rather than looked up.
+    """
+    from saprfclib.invoke import decode_basxml_table
+
+    hostile = b"<!DOCTYPE T [<!ENTITY x 'boom'>]><T><item><L>&x;</L></item></T>"
+    assert decode_basxml_table(hostile, "T") == [{"L": "&x;"}]
+
+
+def test_binary_basxml_is_refused_not_misparsed() -> None:
+    """SAP's binary BASXML shares a TLV tag with the plain-text form and nothing else.
+
+    BasXmlRenderer writes a header beginning with the literal magic "BXML", then
+    token bytes and a string table — an element open is the byte 0x3c followed by a
+    string-table index, not the text "<". Feeding that to the text reader would
+    produce nonsense, so it is refused with a pointer to the issue that tracks it.
+    """
+    from saprfclib.invoke import decode_basxml_table
+
+    with pytest.raises(NotImplementedError, match="BXML magic"):
+        decode_basxml_table(b"BXML\x3f\x03VER\x030.7", "ET_DATA")
+
+
+def test_unidentifiable_xml_block_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """A block whose opening chunk is not text XML must not vanish silently."""
+    from saprfclib.invoke import _extract_name_value_pairs, tlv_record
+
+    stream = (
+        tlv_record(0x3C02)
+        + tlv_record(0x3C05, b"BXML\x3f\x03VER")
+        + tlv_record(0x3C02)
+        + struct.pack(">HH", 0xFFFF, 0)
+    )
+    out: dict[str, bytes] = {}
+    with caplog.at_level(logging.WARNING, logger="saprfclib.invoke"):
+        _extract_name_value_pairs(stream, None, out)
+    assert out == {}
+    assert any("issue #18" in r.getMessage() for r in caplog.records)

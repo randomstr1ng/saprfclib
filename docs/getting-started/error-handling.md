@@ -100,6 +100,42 @@ timeout elapses. Carries diagnostic counters for debugging pool exhaustion.
 | `idle` | `int` | Connections sitting idle |
 | `max_size` | `int` | Pool's hard ceiling on total connections |
 
+## Argument errors are not `SapRfcError`
+
+Two failures happen **before** anything reaches the server, so they are plain
+`ValueError` and are not caught by `except saprfclib.SapRfcError`:
+
+- a keyword argument the function interface does not declare, when the connection
+  was opened with `strict_params=True`
+- an invalid `lang` code
+
+```python
+try:
+    conn.call("SXPG_STEP_XPG_START", COMMANDNAME="LIST_DB2DUMP", MXROW=100)
+except ValueError as exc:
+    print(f"bad arguments, nothing was sent: {exc}")
+```
+
+!!! warning "By default this does not raise at all"
+    `strict_params` defaults to `False`, so an undeclared argument is **dropped** and
+    the call proceeds without it. The function then runs differently from what you
+    asked — above, `SXPG_STEP_XPG_START` runs with no row limit — and the response
+    contains nothing to indicate an argument went missing.
+
+    Each drop is logged: `WARNING` the first time a given function drops a given set
+    of names, `DEBUG` on repeats. If results ever look wrong, check the log for
+    `dropping parameter(s)` before suspecting the server.
+
+    Use `strict_params=True` when a dropped argument would change the result. See
+    [Connection Options](connection-options.md#unknown-keyword-arguments).
+
+## Empty or aborted responses
+
+A response carrying no return code raises `CommunicationError`. This usually means
+the gateway terminated the conversation, and **the connection is no longer usable** —
+discard it rather than retrying on the same one. Later calls on a torn-down
+conversation fail with `Conversation NNN not found`.
+
 ## Recommended pattern
 
 Handle the most-specific exceptions first and use `SapRfcError` as the
