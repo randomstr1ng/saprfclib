@@ -18,6 +18,7 @@ table tag sequence 0x0301 / 0x0330 / 0x0302 / 0x0304, never as 0x0203 values.
 
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
 
@@ -957,3 +958,358 @@ def test_int4_encoder_reproduces_the_captured_bytes() -> None:
     field = FieldDesc("START_VALUE", 8, 4, 0, 4, 0, 0, direction=RFC_IMPORT)
     assert encode(8, 10, field) == bytes.fromhex("0a000000")
     assert encode(8, 1, field) == bytes.fromhex("01000000")
+
+
+# --------------------------------------------------------------------------- #
+# strict_params — unknown keyword arguments (issue #24)
+# --------------------------------------------------------------------------- #
+
+
+def _sxpg_desc() -> FunctionDesc:
+    return FunctionDesc(
+        "SXPG_STEP_XPG_START",
+        [FieldDesc("COMMANDNAME", RFCTYPE_CHAR, 10, 0, 20, 0, 0, direction=RFC_IMPORT)],
+    )
+
+
+def test_lenient_mode_drops_undeclared_parameters() -> None:
+    """Default policy: the call proceeds without the unrecognised argument."""
+    from saprfclib.connection import _filter_call_params
+
+    out = _filter_call_params(
+        "SXPG_STEP_XPG_START",
+        _sxpg_desc(),
+        {"COMMANDNAME": "LIST_DB2DUMP", "MXROW": 100},
+        strict=False,
+        seen=set(),
+    )
+    assert out == {"COMMANDNAME": "LIST_DB2DUMP"}
+
+
+def test_strict_mode_leaves_params_for_the_builder_to_reject() -> None:
+    """strict=True passes them through so build_invoke_request names them."""
+    from saprfclib.connection import _filter_call_params
+
+    params = {"COMMANDNAME": "LIST_DB2DUMP", "MXROW": 100}
+    assert (
+        _filter_call_params(
+            "SXPG_STEP_XPG_START", _sxpg_desc(), dict(params), strict=True, seen=set()
+        )
+        == params
+    )
+    with pytest.raises(ValueError, match="MXROW"):
+        build_invoke_request("SXPG_STEP_XPG_START", _sxpg_desc(), params)
+
+
+def test_dropping_warns_once_then_debugs(caplog: pytest.LogCaptureFixture) -> None:
+    """A dropped argument must be visible, without flooding a long-running loop.
+
+    Silent parameter loss is the failure mode that makes a call return results the
+    caller never asked for, so the first occurrence is a WARNING; repeats of the same
+    (function, names) combination fall to DEBUG.
+    """
+    from saprfclib.connection import _filter_call_params
+
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    params = {"COMMANDNAME": "X", "MXROW": 100}
+    with caplog.at_level(logging.DEBUG, logger="saprfclib.connection"):
+        for _ in range(3):
+            _filter_call_params(
+                "SXPG_STEP_XPG_START", _sxpg_desc(), dict(params), strict=False, seen=seen
+            )
+    levels = [r.levelno for r in caplog.records]
+    assert levels.count(logging.WARNING) == 1
+    assert levels.count(logging.DEBUG) == 2
+    assert "MXROW" in caplog.records[0].getMessage()
+
+
+def test_a_different_function_warns_again() -> None:
+    """Deduplication is per function and per set of names, not global."""
+    from saprfclib.connection import _filter_call_params
+
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for func in ("F_ONE", "F_TWO"):
+        _filter_call_params(func, _sxpg_desc(), {"MXROW": 1}, strict=False, seen=seen)
+    assert seen == {("F_ONE", ("MXROW",)), ("F_TWO", ("MXROW",))}
+
+
+def test_known_parameters_survive_both_modes() -> None:
+    """The policy must never touch an argument the interface declares."""
+    from saprfclib.connection import _filter_call_params
+
+    for strict in (True, False):
+        out = _filter_call_params(
+            "SXPG_STEP_XPG_START",
+            _sxpg_desc(),
+            {"commandname": "lower-case is fine"},
+            strict=strict,
+            seen=set(),
+        )
+        assert out == {"commandname": "lower-case is fine"}
+
+
+def test_strict_params_is_exposed_and_defaults_to_false() -> None:
+    """SDK-parity default; opt in to strictness."""
+    import inspect
+
+    from saprfclib.connection import connect, connect_async
+
+    for fn in (connect, connect_async):
+        assert inspect.signature(fn).parameters["strict_params"].default is False
+
+
+# --------------------------------------------------------------------------- #
+# BASXML-encoded tables (issues #29 / #18)
+# --------------------------------------------------------------------------- #
+#
+# RFC_READ_TABLE's ET_DATA arrives BASXML-encoded, not as a binary table.
+
+
+def test_basxml_payload_is_ascii_not_utf16() -> None:
+    """0x3c05 breaks the UTF-16LE convention every other string tag follows.
+
+    '<ET_DATA>' is 9 bytes for 9 characters; decoding it as UTF-16LE yields mojibake,
+    which is how it went unnoticed.
+    """
+    raw = (GOLDEN / "rfc_read_table_response.bin").read_bytes()
+    if struct.unpack_from(">I", raw, 0)[0] == len(raw) - 4:
+        raw = raw[4:]
+    chunks = [val for tag, val in _walk_tlv(raw[80:]) if tag == 0x3C05]
+    assert chunks[0] == b"<ET_DATA>"
+    assert len(chunks[0]) == 9
+
+
+# --------------------------------------------------------------------------- #
+# BASXML table decoding (issue #29)
+# --------------------------------------------------------------------------- #
+
+
+def _basxml_desc() -> FunctionDesc:
+    et = TypeDesc("SDTI_RESULT_TAB", [_char("LINE", 8, 0)], 4, 8)
+    return FunctionDesc(
+        "RFC_READ_TABLE",
+        [
+            FieldDesc("ET_DATA", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_EXPORT, type_desc=et),
+            FieldDesc(
+                "DATA", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_TABLES, type_desc=_tab512()
+            ),
+            FieldDesc(
+                "FIELDS",
+                RFCTYPE_TABLE,
+                0,
+                0,
+                0,
+                0,
+                0,
+                direction=RFC_TABLES,
+                type_desc=_rfc_db_fld(),
+            ),
+        ],
+    )
+
+
+def test_basxml_table_reaches_the_caller() -> None:
+    """ET_DATA decodes to rows instead of vanishing from the result.
+
+    Source: tests/golden/framing/basxml_et_data_response.bin — RFC_READ_TABLE with
+    USE_ET_DATA_4_RETURN='X'.
+    """
+    body = (GOLDEN / "basxml_et_data_response.bin").read_bytes()[80:]
+    result = parse_invoke_response(body, _basxml_desc(), {1: "FIELDS"})
+    assert "ET_DATA" in result
+    assert len(result["ET_DATA"]) == 1
+    assert list(result["ET_DATA"][0]) == ["LINE"]
+    assert result["ET_DATA"][0]["LINE"].count("|") == 4  # five columns
+
+
+def test_binary_data_table_is_empty_when_the_flag_is_set() -> None:
+    """The server puts everything in ET_DATA and leaves DATA declared but empty."""
+    body = (GOLDEN / "basxml_et_data_response.bin").read_bytes()[80:]
+    result = parse_invoke_response(body, _basxml_desc(), {1: "FIELDS"})
+    assert result["DATA"] == []
+    assert len(result["FIELDS"]) == 4
+
+
+def test_basxml_fragments_are_one_document_not_one_per_table() -> None:
+    """Only the first fragment names the table; a later one may start with <item>.
+
+    Re-deriving the name per chunk attributes the rows to a table called 'item' and
+    loses them, which is exactly what happened first time round.
+    """
+    from saprfclib.invoke import _extract_name_value_pairs
+
+    body = (GOLDEN / "basxml_et_data_response.bin").read_bytes()[80:]
+    out: dict[str, bytes] = {}
+    _extract_name_value_pairs(body, None, out)
+    assert set(out) == {"ET_DATA"}
+    assert out["ET_DATA"].startswith(b"<ET_DATA>")
+    assert out["ET_DATA"].endswith(b"</ET_DATA>")
+
+
+@pytest.mark.parametrize(
+    ("xml", "expected"),
+    [
+        # the observed shortcut form: whole row in one element
+        (b"<T><item><LINE>a|b</LINE></item></T>", [{"LINE": "a|b"}]),
+        # the documented field-per-tag form
+        (b"<T><item><A>1</A><B>2</B></item></T>", [{"A": "1", "B": "2"}]),
+        # several rows
+        (b"<T><item><L>r1</L></item><item><L>r2</L></item></T>", [{"L": "r1"}, {"L": "r2"}]),
+        # empty table
+        (b"<T></T>", []),
+        # self-closing element -> empty value
+        (b"<T><item><L/></item></T>", [{"L": ""}]),
+        # entities must be resolved
+        (b"<T><item><L>a&amp;b&lt;c&gt;d</L></item></T>", [{"L": "a&b<c>d"}]),
+        (b"<T><item><L>&#65;&#x42;</L></item></T>", [{"L": "AB"}]),
+    ],
+)
+def test_basxml_decoder_shapes(xml: bytes, expected: list[dict[str, str]]) -> None:
+    """Both documented shapes, multiple rows, and entity handling."""
+    from saprfclib.invoke import decode_basxml_table
+
+    assert decode_basxml_table(xml, "T") == expected
+
+
+def test_basxml_decoder_is_bounded() -> None:
+    """Untrusted payload: refuse an absurd size rather than allocating for it."""
+    from saprfclib.invoke import _BASXML_MAX_BYTES, decode_basxml_table
+
+    with pytest.raises(ValueError, match="over the .* byte cap"):
+        decode_basxml_table(b"x" * (_BASXML_MAX_BYTES + 1), "T")
+
+
+def test_basxml_decoder_ignores_dtd_and_entity_declarations() -> None:
+    """A hand-rolled scanner, so entity-expansion tricks have nothing to expand.
+
+    Only the five predefined entities and numeric references resolve; an undeclared
+    one is left as written rather than looked up.
+    """
+    from saprfclib.invoke import decode_basxml_table
+
+    hostile = b"<!DOCTYPE T [<!ENTITY x 'boom'>]><T><item><L>&x;</L></item></T>"
+    assert decode_basxml_table(hostile, "T") == [{"L": "&x;"}]
+
+
+def test_binary_basxml_is_refused_not_misparsed() -> None:
+    """SAP's binary BASXML shares a TLV tag with the plain-text form and nothing else.
+
+    BasXmlRenderer writes a header beginning with the literal magic "BXML", then
+    token bytes and a string table — an element open is the byte 0x3c followed by a
+    string-table index, not the text "<". Feeding that to the text reader would
+    produce nonsense, so it is refused with a pointer to the issue that tracks it.
+    """
+    from saprfclib.invoke import decode_basxml_table
+
+    with pytest.raises(NotImplementedError, match="BXML magic"):
+        decode_basxml_table(b"BXML\x3f\x03VER\x030.7", "ET_DATA")
+
+
+def test_unidentifiable_xml_block_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """A block whose opening chunk is not text XML must not vanish silently."""
+    from saprfclib.invoke import _extract_name_value_pairs, tlv_record
+
+    stream = (
+        tlv_record(0x3C02)
+        + tlv_record(0x3C05, b"BXML\x3f\x03VER")
+        + tlv_record(0x3C02)
+        + struct.pack(">HH", 0xFFFF, 0)
+    )
+    out: dict[str, bytes] = {}
+    with caplog.at_level(logging.WARNING, logger="saprfclib.invoke"):
+        _extract_name_value_pairs(stream, None, out)
+    assert out == {}
+    assert any("issue #18" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+# Unreadable responses and incomplete descriptors (issue #28)
+# --------------------------------------------------------------------------- #
+
+
+_GATEWAY_ERR = (
+    b"*ERR*\x001\x00Conversation 50633926 not found\x00728\x00SAP-Gateway\x00793\x002"
+    b"\x00/bas/793_REL/src/krn/si/gw/gwxxconn.c\x00960\x00\x00Wed Aug 26 12:18:35 2026"
+    b"\x00\x00\x00\x003820\x00SAP-Gateway on host example / sapgw00\x00\x00\x00\x00\x00*ERR*\x00"
+)
+
+
+def test_gateway_error_frame_is_reported_as_such() -> None:
+    """A torn-down conversation must not surface as a TLV parse error.
+
+    The gateway answers with a NUL-separated *ERR* record, not TLV. Walking it as
+    TLV reads '*E' as a tag and 'RR' as a length, which is the
+    "malformed TLV: tag 0x2a45 length 21074" the reporter saw — an error that says
+    nothing about what actually happened.
+    """
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    with pytest.raises(CommunicationError) as excinfo:
+        raise_for_rfc_error(_GATEWAY_ERR)
+    message = str(excinfo.value)
+    assert "Conversation 50633926 not found" in message
+    assert "discarded" in message  # tells the caller the connection is dead
+
+
+def test_gateway_error_text_is_extracted() -> None:
+    """Message, component and kernel release come out of the NUL-separated record."""
+    from saprfclib.invoke import parse_gateway_error
+
+    text = parse_gateway_error(_GATEWAY_ERR)
+    assert text is not None
+    assert "Conversation 50633926 not found" in text
+    assert "SAP-Gateway" in text
+
+
+def test_a_normal_response_is_not_mistaken_for_a_gateway_error() -> None:
+    from saprfclib.invoke import parse_gateway_error, tlv_record
+
+    ok = tlv_record(0x0420, struct.pack(">I", 0)) + struct.pack(">HH", 0xFFFF, 0)
+    assert parse_gateway_error(ok) is None
+    assert parse_invoke_response(ok, _read_table_desc()) == {}
+
+
+def test_unreadable_response_says_so_rather_than_quoting_a_bogus_tag() -> None:
+    """Any payload that is not an RFC message at all gets a communication error."""
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    with pytest.raises(CommunicationError, match="not a readable RFC message"):
+        raise_for_rfc_error(b"\x99\x99\xff\xf0garbage that is not TLV at all")
+
+
+def test_missing_layout_raises_incomplete_descriptor_error() -> None:
+    """A metadata gap gets its own type so callers can fall back on it.
+
+    Distinct from AbapApplicationError: an unresolved layout is a client-side
+    problem worth retrying against another backend, where an ABAP exception is the
+    server's considered answer and is not.
+    """
+    from saprfclib.exceptions import IncompleteDescriptorError
+
+    desc = _read_table_desc()
+    for f in desc.parameters:
+        if f.name == "FIELDS":
+            f.type_desc = None
+    with pytest.raises(IncompleteDescriptorError, match="FIELDS"):
+        build_invoke_request("RFC_READ_TABLE", desc, {"FIELDS": [{"FIELDNAME": "MANDT"}]})
+
+
+def test_incomplete_descriptor_error_is_catchable_both_ways() -> None:
+    """Also a ValueError, so handlers written before it had a type keep working."""
+    import saprfclib
+    from saprfclib.exceptions import IncompleteDescriptorError, SapRfcError
+
+    assert issubclass(IncompleteDescriptorError, SapRfcError)
+    assert issubclass(IncompleteDescriptorError, ValueError)
+    assert saprfclib.IncompleteDescriptorError is IncompleteDescriptorError
+
+
+def test_decode_side_also_raises_the_typed_error() -> None:
+    from saprfclib.codec import decode
+    from saprfclib.exceptions import IncompleteDescriptorError
+
+    field = FieldDesc("ROWS", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_TABLES)
+    with pytest.raises(IncompleteDescriptorError, match="ROWS"):
+        decode(RFCTYPE_TABLE, b"\x00" * 8, field)

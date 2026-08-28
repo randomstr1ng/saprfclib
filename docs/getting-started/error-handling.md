@@ -100,6 +100,72 @@ timeout elapses. Carries diagnostic counters for debugging pool exhaustion.
 | `idle` | `int` | Connections sitting idle |
 | `max_size` | `int` | Pool's hard ceiling on total connections |
 
+## Argument errors are not `SapRfcError`
+
+Two failures happen **before** anything reaches the server, so they are plain
+`ValueError` and are not caught by `except saprfclib.SapRfcError`:
+
+- a keyword argument the function interface does not declare, when the connection
+  was opened with `strict_params=True`
+- an invalid `lang` code
+
+```python
+try:
+    conn.call("SXPG_STEP_XPG_START", COMMANDNAME="LIST_DB2DUMP", MXROW=100)
+except ValueError as exc:
+    print(f"bad arguments, nothing was sent: {exc}")
+```
+
+!!! warning "By default this does not raise at all"
+    `strict_params` defaults to `False`, so an undeclared argument is **dropped** and
+    the call proceeds without it. The function then runs differently from what you
+    asked — above, `SXPG_STEP_XPG_START` runs with no row limit — and the response
+    contains nothing to indicate an argument went missing.
+
+    Each drop is logged: `WARNING` the first time a given function drops a given set
+    of names, `DEBUG` on repeats. If results ever look wrong, check the log for
+    `dropping parameter(s)` before suspecting the server.
+
+    Use `strict_params=True` when a dropped argument would change the result. See
+    [Connection Options](connection-options.md#unknown-keyword-arguments).
+
+## Empty or aborted responses
+
+A response carrying no return code raises `CommunicationError`. So does a response
+that is not an RFC message at all — most often a SAP gateway error record, which is
+NUL-separated text rather than TLV:
+
+```
+CommunicationError: the SAP gateway rejected the frame: Conversation 50633926 not
+found | SAP-Gateway | 793. The conversation is gone; this connection should be
+discarded rather than retried.
+```
+
+In every one of these cases **the connection is no longer usable** — discard it
+rather than retrying on the same one, because every later call reports the same
+missing conversation.
+
+## IncompleteDescriptorError
+
+Raised when a STRUCTURE or TABLE parameter reaches the codec with no layout: the
+`RFC_GET_STRUCTURE_DEFINITION` lookup for its DDIC type did not complete, so there
+are no field offsets to encode or decode against.
+
+It is deliberately distinct from `AbapApplicationError`. A metadata gap is a
+client-side problem and is worth retrying against a different backend; an ABAP
+exception is the server's considered answer and is not.
+
+```python
+try:
+    result = conn.call("BAPI_SOMETHING", **params)
+except saprfclib.IncompleteDescriptorError as exc:
+    # our metadata is incomplete — fall back rather than treating it as an ABAP error
+    result = other_backend.call("BAPI_SOMETHING", **params)
+```
+
+It subclasses both `SapRfcError` and `ValueError`, so handlers written before it had
+a type of its own keep working.
+
 ## Recommended pattern
 
 Handle the most-specific exceptions first and use `SapRfcError` as the

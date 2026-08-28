@@ -378,6 +378,52 @@ Note the response RFC marker is `00000002` here, where the STFC_CONNECTION respo
 above shows `00000004`. The marker value varies; the 80-byte strip keys off the
 leading `0x06` GW-frame byte and is unaffected either way.
 
+### XML-encoded table rows (0x3c02 / 0x3c05) — CONFIRMED (2026-08-28)
+
+Some tables come back as plain-text XML instead of binary rows. An empty `0x3c02`
+brackets the block on both sides and the XML is carried in `0x3c05` chunks:
+
+```
+0x0205 len=14   'ET_DATA'                     export declaration (UTF-16LE)
+0x3c02 len=0                                  block begin
+0x3c05 len=9    '<ET_DATA>'                   ASCII — NOT UTF-16LE
+0x3c05 len=211  '<item><LINE>a|b|c</LINE></item></ET_DATA>'
+0x3c02 len=0                                  block end
+```
+
+`RFC_READ_TABLE` uses this for `ET_DATA` when called with `USE_ET_DATA_4_RETURN='X'`,
+the flag that avoids truncating STRING columns into `DATA`'s fixed work area. With
+the flag set, `DATA` still arrives declared (`0x0301`/`0x0330`/`0x0302`) but carries
+no rows.
+
+Golden fixtures: `tests/golden/framing/rfc_read_table_response.bin` (empty table) and
+`basxml_et_data_response.bin` (one populated row).
+
+Two properties that are easy to get wrong:
+
+* **The payload is ASCII.** Every other string-bearing tag in the protocol is
+  UTF-16LE; decoding these chunks that way yields mojibake.
+* **The fragments are one document split at arbitrary points, so only the first
+  names the table.** In the capture above, chunk 2 begins `<item>` — re-deriving the
+  name per chunk files the rows under a table called `item` and loses them.
+
+Row shape observed is the shortcut form: one `<LINE>` element holding the whole
+delimited row, exactly the buffer `DATA` would have held. The documented alternative
+puts one element per field. Both work under the same rule — whatever elements an
+`<item>` contains become that row's keys.
+
+!!! danger "This is NOT SAP's BASXML"
+    They share a TLV tag and nothing else. SAP's BASXML is a **binary tokenised**
+    format: `BasXmlRenderer` writes a header beginning with the literal magic
+    `BXML`, then token bytes and a string table, under the
+    `http://www.sap.com/abapxml` namespace — an element open is the byte `0x3c`
+    followed by a string-table index, not the character `<`. `BasXMLParser` reads it
+    back with length-prefixed strings.
+
+    That format is **not implemented**. A payload carrying the `BXML` magic is
+    refused with `NotImplementedError` rather than fed to the text reader, which
+    would silently produce nonsense.
+
 ### Compressed tables — CONFIRMED (2026-08-26)
 
 A table larger than roughly 8 KB is sent SAPCOMPRESS-compressed under tag `0x0305`

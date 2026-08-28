@@ -28,6 +28,7 @@ __all__ = [
     "AbapApplicationError",
     "AbapSystemFailure",
     "CommunicationError",
+    "IncompleteDescriptorError",
     "PoolTimeoutError",
     "RetryExhausted",
     "SncError",
@@ -41,6 +42,23 @@ class SapRfcError(Exception):
 
     Catching ``SapRfcError`` catches every error type the client raises:
     ``AbapApplicationError``, ``AbapSystemFailure`` and ``CommunicationError``.
+    """
+
+
+class IncompleteDescriptorError(SapRfcError, ValueError):
+    """A parameter's layout could not be resolved, so it cannot be encoded or decoded.
+
+    Raised when a STRUCTURE or TABLE parameter reaches the codec with no
+    ``type_desc``: the secondary RFC_GET_STRUCTURE_DEFINITION lookup for its DDIC
+    type did not complete, so there is no field layout to lay the value out against.
+
+    Distinct from the ABAP-level errors so a caller can react to it specifically —
+    a metadata gap is a client-side problem and is worth retrying against a different
+    backend, where an ``AbapApplicationError`` is the server's considered answer and
+    is not.
+
+    Also a ``ValueError``, which is what this condition raised before it had a type of
+    its own, so existing ``except ValueError`` handlers keep working.
     """
 
 

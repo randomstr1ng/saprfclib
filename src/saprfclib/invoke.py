@@ -32,12 +32,19 @@
 # from server error TLV tags, never from credential tags.
 from __future__ import annotations
 
+import logging
 import struct
+from collections.abc import Iterator
 from typing import Any
 
 from saprfclib.codec import decode, encode
 from saprfclib.compress import DecompressError, sapcompress_decompress
-from saprfclib.exceptions import AbapApplicationError, AbapSystemFailure, CommunicationError
+from saprfclib.exceptions import (
+    AbapApplicationError,
+    AbapSystemFailure,
+    CommunicationError,
+    IncompleteDescriptorError,
+)
 from saprfclib.types import (
     RFC_CHANGING,
     RFC_EXPORT,
@@ -108,6 +115,37 @@ _TAG_TABLE_END = 0x0306  # table-stream end marker. Accepted when reading; never
 _TAG_TABLE_DELTA = 0x0335
 _TAG_TABLE_DELTA_END = 0x0336
 _DELTA_OPCODE = 10  # first uint32 of the 0x0335 header; only value observed
+_logger = logging.getLogger(__name__)
+
+# XML-encoded table rows (tags 0x3c02 / 0x3c05).
+#
+# A table sent this way is bracketed by an empty 0x3c02 pair, with plain-text XML
+# carried in 0x3c05 chunks as ASCII — NOT the UTF-16LE every other string-bearing tag
+# uses. Confirmed live twice:
+#   empty:      0x3c02 | 0x3c05 '<ET_DATA>' | 0x3c05 '</ET_DATA>' | 0x3c02
+#   populated:  0x3c05 '<ET_DATA>' | 0x3c05 '<item><LINE>a|b|c</LINE></item></ET_DATA>'
+# Sources: tests/golden/framing/rfc_read_table_response.bin and
+# basxml_et_data_response.bin (the latter contributed via issue #29).
+#
+# NOT to be confused with SAP's BASXML, which issue #18 tracks and which is NOT
+# implemented. That is a binary tokenised format: BasXmlRenderer emits a header
+# beginning with the literal magic "BXML", then token bytes and a string table (an
+# element open is the byte 0x3c followed by a string-table index, not the text "<"),
+# under the http://www.sap.com/abapxml namespace, and BasXMLParser reads it back with
+# length-prefixed strings. The two share a TLV tag and nothing else. A payload
+# carrying the BXML magic is refused outright rather than fed to the text reader —
+# see _BASXML_BINARY_MAGIC.
+_TAG_BASXML_MARKER = 0x3C02
+_TAG_BASXML_DATA = 0x3C05
+_BASXML_OPEN = b"<"
+# SAP's binary BASXML document magic. Its presence means the peer negotiated the
+# tokenised format that issue #18 covers; the text reader below would produce
+# nonsense from it, so it is rejected with a clear message instead.
+_BASXML_BINARY_MAGIC = b"BXML"
+# Sentinel: inside a BASXML block but the table name has not been read yet. A plain
+# string, so `is` comparisons distinguish it from a real table called anything.
+_BASXML_PENDING = "\x00pending"
+
 _SAPCOMPRESS_MAGIC = b"\x1f\x9d"  # compress.py header magic, at stream offset 5
 _SAPCOMPRESS_HDR = 8  # [4B LE uncompressed length][algo][2B magic][config]
 _LZ_WRAPPER = 8  # bytes preceding the SAPCOMPRESS stream in a joined 0x0305 payload
@@ -117,18 +155,35 @@ _TAG_DM_TABLE_ID = 0x0330  # 4B BE uint32 DM table tracking ID (getNextDMTableId
 _TAG_RESPONSE_START = 0x0500  # empty: response start marker
 _TAG_RETURN_CODE = 0x0420  # 4B BE uint32 return code (0=success)
 
-# Exception-specific tags (confirmed from stfc_exception_response.bin)
-_TAG_EXCEPTION_NUMBER = 0x0417  # exception sequence number UTF-16LE (e.g. "000")
-_TAG_EXCEPTION_KEY = 0x0401  # ABAP exception key UTF-16LE (e.g. "EXAMPLE")
-# Additional exception metadata tags (from SDK type definitions error TLV docs)
-_TAG_EXCEPTION_MSG_CLASS = 0x0402
-_TAG_EXCEPTION_MSG_TYPE = 0x0403
-_TAG_EXCEPTION_MSG_NUMBER = 0x0404
-_TAG_EXCEPTION_MSG_V1 = 0x0405
-_TAG_EXCEPTION_MSG_V2 = 0x0406
-_TAG_EXCEPTION_MSG_V3 = 0x0407
-_TAG_EXCEPTION_MSG_V4 = 0x0408
-_TAG_EXCEPTION_MESSAGE = 0x040B
+# Exception tags. 0x0417 doubles as the "this is an exception" marker and the ABAP
+# message number; 0x0401 carries the exception name.
+#
+# CONFIRMED by three live exception replies:
+#   RFC_READ_TABLE on a table it will not read (kernel 793):
+#     0x0415 'DA'  0x0416 'E'  0x0417 '131'  0x0411 'T001'  0x0401 'TABLE_NOT_AVAILABLE'
+#   RFC_GET_FUNCTION_INTERFACE for a non-RFC-enabled FM (kernels 793 and 742):
+#     0x0415 'FL'  0x0416 'E'  0x0417 '046'  0x0411 '<FM name>'  0x0401 'FU_NOT_FOUND'
+#   tests/golden/framing/stfc_exception_response.bin (RAISE with no MESSAGE):
+#     0x0417 '000'  0x0401 'EXAMPLE'   — the message fields are simply absent
+#
+# In each, 0x0415 is the two-character message class, 0x0416 the single-character
+# type, 0x0417 the three-digit number and 0x0411 the first message variable. The
+# previous 0x0402-0x0408 mapping came from documentation rather than a capture and
+# does not match any of them — 0x0402 is the logon/system error message text
+# (_TAG_ERROR_MESSAGE), not the message class.
+_TAG_EXCEPTION_NUMBER = 0x0417  # ABAP message number, e.g. "046"
+_TAG_EXCEPTION_KEY = 0x0401  # exception name, e.g. "FU_NOT_FOUND"
+_TAG_EXCEPTION_MSG_CLASS = 0x0415  # message class, e.g. "FL"
+_TAG_EXCEPTION_MSG_TYPE = 0x0416  # message type, e.g. "E"
+_TAG_EXCEPTION_MSG_NUMBER = 0x0417  # same tag as the marker above
+_TAG_EXCEPTION_MSG_V1 = 0x0411  # first message variable
+# [ASSUMED] V2-V4 follow V1 consecutively. No capture yet carries more than one
+# variable, so these are inference from 0x0411; a reply that fills them would confirm
+# or correct them. They are read defensively — an absent tag simply yields None.
+_TAG_EXCEPTION_MSG_V2 = 0x0412
+_TAG_EXCEPTION_MSG_V3 = 0x0413
+_TAG_EXCEPTION_MSG_V4 = 0x0414
+_TAG_EXCEPTION_MESSAGE = 0x040B  # [ASSUMED] free-text message; not seen in any capture
 
 # RFC version string (confirmed from golden fixture)
 _RFC_VERSION = b"754"
@@ -161,6 +216,22 @@ def tlv_record(tag: int, data: bytes = b"") -> bytes:
 # --------------------------------------------------------------------------- #
 # Request builder
 # --------------------------------------------------------------------------- #
+
+
+def unknown_parameters(desc: FunctionDesc, params: dict[str, Any]) -> list[str]:
+    """Return the caller-supplied names the function interface does not declare.
+
+    Names are matched case-insensitively, as ``build_invoke_request`` matches them.
+    Returned in sorted order so messages are stable.
+    """
+    known = {f.name.upper() for f in desc.parameters}
+    return sorted(name for name in params if name.upper() not in known)
+
+
+def drop_unknown_parameters(desc: FunctionDesc, params: dict[str, Any]) -> dict[str, Any]:
+    """Return ``params`` without the names the function interface does not declare."""
+    known = {f.name.upper() for f in desc.parameters}
+    return {name: value for name, value in params.items() if name.upper() in known}
 
 
 def dm_table_ids(desc: FunctionDesc, params: dict[str, Any]) -> dict[int, str]:
@@ -254,12 +325,12 @@ def build_invoke_request(
     # would simply never reach it — the value would be dropped from the request with
     # no diagnostic, and the server would run the function without it. Fail loudly
     # instead: silently omitting an argument the caller passed is the worst outcome.
-    known = {f.name.upper() for f in desc.parameters}
-    unknown = sorted(set(params_upper) - known)
+    unknown = unknown_parameters(desc, params)
     if unknown:
         raise ValueError(
             f"{func_name}: parameter(s) {', '.join(unknown)} are not in the function "
-            f"interface; known parameters are {', '.join(sorted(known)) or '(none)'}"
+            f"interface; known parameters are "
+            f"{', '.join(sorted(f.name for f in desc.parameters)) or '(none)'}"
         )
     # DM table IDs assigned by the shared helper so the response parser can map
     # tag 0x0335 back to a parameter name (see dm_table_ids).
@@ -282,7 +353,7 @@ def build_invoke_request(
                 # Not an assert: assertions vanish under `python -O`, and this one
                 # guards a real runtime condition — the RFC_GET_STRUCTURE_DEFINITION
                 # lookup for the row type failed, so there is no layout to encode to.
-                raise ValueError(
+                raise IncompleteDescriptorError(
                     f"cannot encode TABLE parameter {field.name!r}: its row layout "
                     f"was never resolved (type_desc is None). The "
                     f"RFC_GET_STRUCTURE_DEFINITION lookup for its DDIC type did not "
@@ -681,29 +752,78 @@ def build_bgrfc_state_request(
 # --------------------------------------------------------------------------- #
 
 
-def parse_invoke_response(
-    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str] | None = None
-) -> dict[str, Any]:
-    """Parse a RFC invoke response TLV stream and return a native-typed dict.
+_GATEWAY_ERROR_MARKER = b"*ERR*"
+_GATEWAY_ERROR_MESSAGE_FIELD = 2  # NUL-separated: marker, code, message, ...
 
-    Walks the TLV stream with bounds-checking (T-04-RESP, mirrors session._parse_tlv).
-    Classification logic (confirmed from stfc_exception_response.bin golden fixture):
-      - Tag 0x0417 present → AbapApplicationError (ABAP exception)
-      - Tag 0x0420 non-zero and no exception tags → AbapSystemFailure
-      - Tag 0x0420 == 0 → success; walk 0x0201/0x0203 pairs and decode values
 
-    Pitfall 4: 0x0420 return code is 4B BE uint32 (use struct.unpack('>I')).
-    Pitfall 2: value bytes from 0x0203 are passed directly to codec.decode — let
-    the codec handle type-specific length/encoding (UTF-16 code-unit math, BCD, etc.).
+def parse_gateway_error(payload: bytes) -> str | None:
+    """Return the human-readable text of a SAP gateway error frame, if this is one.
 
-    ``dm_table_names`` maps DM table IDs to parameter names for tables the caller
-    sent as input; the server returns those under tag 0x0335 keyed by ID rather than
-    by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
-    parameters are absent from the result.
+    The gateway answers a frame it will not process with a NUL-separated record
+    rather than TLV, bracketed by ``*ERR*``::
+
+        *ERR*\x001\x00Conversation 50633926 not found\x00728\x00SAP-Gateway
+        \x00793\x002\x00/bas/793_REL/src/krn/si/gw/gwxxconn.c\x00960\x00...
+
+    Field 2 carries the message; the rest are an error number, the reporting
+    component, the kernel release and the source location that raised it.
+
+    Recognising this matters because the bytes are not TLV at all. Walking them as
+    TLV reads ``*E`` as a tag and ``RR`` as a length, which surfaced to a reporter as
+    "malformed TLV: tag 0x2a45 length 21074" — an error that says nothing about the
+    conversation having been torn down.
     """
-    tags = _parse_tlv_stream(resp)
+    if not payload.startswith(_GATEWAY_ERROR_MARKER):
+        return None
+    fields = payload.split(b"\x00")
+    parts: list[str] = []
+    for idx in (_GATEWAY_ERROR_MESSAGE_FIELD, 4, 5):
+        if idx < len(fields):
+            text = fields[idx].decode("utf-8", "replace").strip()
+            if text:
+                parts.append(text)
+    return " | ".join(parts) if parts else payload.decode("utf-8", "replace")[:200]
 
-    # --- Exception classification ---
+
+def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -> None:
+    """Raise the typed error an RFC response carries, if it carries one.
+
+    Shared by every reader of a response, so a failure is classified the same way
+    wherever it arrives. Metadata bootstraps used to skip this entirely: a function
+    module that is not remote-enabled answers RFC_GET_FUNCTION_INTERFACE with a
+    normal ABAP exception (message class FL, number 046, name FU_NOT_FOUND), and
+    because an exception reply carries no 0x0420 the return-code check never fired.
+    The result was an empty descriptor and no diagnostic, so the next call rejected
+    every argument the caller passed as "unknown".
+
+    Deliberately not special-cased to FU_NOT_FOUND — any exception the server reports
+    during metadata retrieval is surfaced with its full message detail.
+
+    Raises:
+        AbapApplicationError: the response carries ABAP exception tags.
+        AbapSystemFailure: the return code is non-zero.
+    """
+    gateway_error = parse_gateway_error(resp)
+    if gateway_error is not None:
+        raise CommunicationError(
+            f"the SAP gateway rejected the frame: {gateway_error}. The conversation "
+            f"is gone; this connection should be discarded rather than retried."
+        )
+
+    if _tags is None:
+        try:
+            tags = _parse_tlv_stream(resp)
+        except ValueError as exc:
+            # Not an RFC response at all. Report that, rather than the tag and length
+            # read out of whatever the bytes actually were.
+            preview = resp[:40].decode("utf-8", "replace")
+            raise CommunicationError(
+                f"the response is not a readable RFC message ({len(resp)} bytes, "
+                f"starting {preview!r}): {exc}"
+            ) from exc
+    else:
+        tags = _tags
+
     # AbapApplicationError: signaled by 0x0417 exception number tag (from live fixture).
     if _TAG_EXCEPTION_NUMBER in tags:
         key = _decode_utf16le(tags.get(_TAG_EXCEPTION_KEY))
@@ -726,6 +846,48 @@ def parse_invoke_response(
             msg_v4=msg_v4 or None,
             message=message or None,
         )
+
+    rc_bytes = tags.get(_TAG_RETURN_CODE)
+    if rc_bytes is not None:
+        if len(rc_bytes) != 4:
+            raise ValueError(f"return-code TLV 0x0420 has length {len(rc_bytes)}, expected 4")
+        rc = struct.unpack(">I", rc_bytes)[0]
+        if rc != 0:
+            raise AbapSystemFailure(
+                msg_class=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS)) or None,
+                msg_type=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE)) or None,
+                msg_number=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER)) or None,
+                msg_v1=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1)) or None,
+                msg_v2=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
+                msg_v3=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
+                msg_v4=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
+                message=_decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
+                or f"RFC return code {rc}",
+            )
+
+
+def parse_invoke_response(
+    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str] | None = None
+) -> dict[str, Any]:
+    """Parse a RFC invoke response TLV stream and return a native-typed dict.
+
+    Walks the TLV stream with bounds-checking (T-04-RESP, mirrors session._parse_tlv).
+    Classification logic (confirmed from stfc_exception_response.bin golden fixture):
+      - Tag 0x0417 present → AbapApplicationError (ABAP exception)
+      - Tag 0x0420 non-zero and no exception tags → AbapSystemFailure
+      - Tag 0x0420 == 0 → success; walk 0x0201/0x0203 pairs and decode values
+
+    Pitfall 4: 0x0420 return code is 4B BE uint32 (use struct.unpack('>I')).
+    Pitfall 2: value bytes from 0x0203 are passed directly to codec.decode — let
+    the codec handle type-specific length/encoding (UTF-16 code-unit math, BCD, etc.).
+
+    ``dm_table_names`` maps DM table IDs to parameter names for tables the caller
+    sent as input; the server returns those under tag 0x0335 keyed by ID rather than
+    by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
+    parameters are absent from the result.
+    """
+    tags = _parse_tlv_stream(resp)
+    raise_for_rfc_error(resp, _tags=tags)
 
     # Every genuine invoke response carries the return code; only an exception
     # response omits it, and that is raised above. Its absence means the call did not
@@ -776,13 +938,22 @@ def parse_invoke_response(
             param_map[field.name.upper()] = field
 
     result: dict[str, object] = {}
+    basxml: dict[str, bytes] = {}
     # Walk the ordered tag list to pick up 0x0201+0x0203 pairs
-    for name, value in _extract_name_value_pairs(resp, dm_table_names):
+    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml):
         name_upper = name.upper()
         match_field: FieldDesc | None = param_map.get(name_upper)
         if match_field is None:
             continue  # unknown param name — ignore (defensive)
         result[match_field.name] = decode(match_field.rfctype, value, match_field)
+
+    # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
+    # bypass the codec entirely (see decode_basxml_table).
+    for name, payload in basxml.items():
+        match_field = param_map.get(name.upper())
+        if match_field is None:
+            continue
+        result[match_field.name] = decode_basxml_table(payload, match_field.name)
 
     return result
 
@@ -842,6 +1013,168 @@ def _parse_tlv_stream(data: bytes) -> dict[int, bytes]:
     return out
 
 
+_BASXML_MAX_BYTES = 64 * 1024 * 1024  # refuse absurd payloads (T-04-RESP)
+_BASXML_MAX_ITEMS = 1_000_000
+_BASXML_ENTITIES = {
+    "amp": "&",
+    "lt": "<",
+    "gt": ">",
+    "quot": '"',
+    "apos": "'",
+}
+
+
+def _xml_unescape(text: str) -> str:
+    """Resolve the five predefined XML entities plus numeric character references.
+
+    Deliberately hand-rolled rather than using an XML library: this payload arrives
+    from the peer (trust boundary T-04-RESP), and the stdlib parsers accept DTDs and
+    entity definitions, which brings entity-expansion exposure for no benefit here.
+    The BASXML grammar in play is elements with text content and nothing else — no
+    attributes, no namespaces, no processing instructions — so a bounded scanner
+    covers it exactly and offers no such surface.
+    """
+    if "&" not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch != "&":
+            out.append(ch)
+            i += 1
+            continue
+        end = text.find(";", i + 1, i + 12)
+        if end == -1:
+            out.append(ch)
+            i += 1
+            continue
+        ref = text[i + 1 : end]
+        if ref.startswith("#"):
+            try:
+                code = int(ref[2:], 16) if ref[1:2].lower() == "x" else int(ref[1:])
+                out.append(chr(code))
+                i = end + 1
+                continue
+            except (ValueError, OverflowError):
+                pass
+        elif ref in _BASXML_ENTITIES:
+            out.append(_BASXML_ENTITIES[ref])
+            i = end + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _basxml_elements(text: str, start: int, end: int) -> Iterator[tuple[str, int, int]]:
+    """Yield (tag, inner_start, inner_end) for direct child elements between start/end."""
+    pos = start
+    while pos < end:
+        open_lt = text.find("<", pos, end)
+        if open_lt == -1:
+            return
+        open_gt = text.find(">", open_lt + 1, end)
+        if open_gt == -1:
+            return
+        tag = text[open_lt + 1 : open_gt]
+        if tag.startswith("/") or tag.startswith("?") or tag.startswith("!"):
+            pos = open_gt + 1
+            continue
+        if tag.endswith("/"):  # self-closing: empty value
+            yield tag[:-1].strip(), open_gt + 1, open_gt + 1
+            pos = open_gt + 1
+            continue
+        closing = f"</{tag}>"
+        close_at = text.find(closing, open_gt + 1, end)
+        if close_at == -1:
+            return
+        yield tag, open_gt + 1, close_at
+        pos = close_at + len(closing)
+
+
+def decode_basxml_table(payload: bytes, table_name: str = "") -> list[dict[str, str]]:
+    """Decode a BASXML table body into row dicts.
+
+    Wire form, confirmed live (kernel 793, RFC_READ_TABLE with
+    USE_ET_DATA_4_RETURN='X', contributed via issue #29)::
+
+        <ET_DATA><item><LINE>VAL1|VAL2|VAL3</LINE></item></ET_DATA>
+
+    The payload is ASCII, not the UTF-16LE every other string-bearing tag uses, and
+    arrives split across 0x3c05 records that must be joined before parsing.
+
+    Each ``<item>`` becomes one row and each element inside it a key. The observed
+    form carries the whole delimited row in a single ``<LINE>`` element — the same
+    buffer ``DATA`` would have held — but the documented form puts one element per
+    field, so both are handled by the same walk: whatever elements an item contains
+    become that row's keys.
+
+    Values are returned as text. No type conversion is applied, because the element
+    carries no type information and the row is delimited exactly as the caller's
+    DELIMITER specified; splitting or converting it is the caller's decision, as it
+    is for ``DATA``.
+    """
+    if payload[:4] == _BASXML_BINARY_MAGIC:
+        raise NotImplementedError(
+            f"table {table_name!r} arrived in SAP's binary BASXML encoding (BXML "
+            f"magic), which is not implemented — see "
+            f"https://github.com/randomstr1ng/saprfclib/issues/18. This is a "
+            f"different format from the plain-text XML tables saprfclib does decode; "
+            f"decoding it as text would produce nonsense."
+        )
+    if len(payload) > _BASXML_MAX_BYTES:
+        raise ValueError(
+            f"BASXML payload for table {table_name!r} is {len(payload)} bytes, "
+            f"over the {_BASXML_MAX_BYTES} byte cap"
+        )
+    text = payload.decode("utf-8", errors="replace")
+
+    # Skip any XML declaration, DTD or comment before the root element. No server has
+    # been observed sending one, but skipping them keeps the structure walk
+    # predictable on unexpected input instead of treating the prologue as data.
+    scan = 0
+    while scan < len(text):
+        nxt = text.find("<", scan)
+        if nxt == -1 or text[nxt + 1 : nxt + 2] not in ("?", "!"):
+            break
+        depth, i = 0, nxt
+        while i < len(text):
+            if text[i] == "<":
+                depth += 1
+            elif text[i] == ">":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        scan = i + 1
+    text = text[scan:] if scan else text
+
+    # Enter the outer <TABLE> wrapper if present; tolerate its absence.
+    body_start, body_end = 0, len(text)
+    first_gt = text.find(">")
+    if text[:1] == "<" and first_gt != -1:
+        wrapper = text[1:first_gt]
+        closing = f"</{wrapper}>"
+        close_at = text.rfind(closing)
+        if close_at != -1:
+            body_start, body_end = first_gt + 1, close_at
+
+    rows: list[dict[str, str]] = []
+    for tag, inner_start, inner_end in _basxml_elements(text, body_start, body_end):
+        if len(rows) >= _BASXML_MAX_ITEMS:
+            raise ValueError(f"BASXML table {table_name!r} exceeds the {_BASXML_MAX_ITEMS} row cap")
+        row: dict[str, str] = {}
+        for name, vs, ve in _basxml_elements(text, inner_start, inner_end):
+            row[name] = _xml_unescape(text[vs:ve])
+        if not row:
+            # An item with no child elements: keep its text under the item tag so
+            # the row is not silently lost.
+            row = {tag: _xml_unescape(text[inner_start:inner_end])}
+        rows.append(row)
+    return rows
+
+
 def decompress_table_stream(chunks: list[bytes], param_name: str = "") -> bytes:
     """Decompress the SAPCOMPRESS stream carried by a table's 0x0305 records.
 
@@ -884,8 +1217,22 @@ def decompress_table_stream(chunks: list[bytes], param_name: str = "") -> bytes:
         ) from exc
 
 
+def _basxml_open_tag(chunk: bytes) -> str | None:
+    """Return the table name if this chunk opens a BASXML document, else None."""
+    if not chunk.startswith(_BASXML_OPEN):
+        return None
+    text = chunk.decode("ascii", "replace")
+    close = text.find(">")
+    if close == -1:
+        return None
+    name = text[1:close]
+    return None if name.startswith("/") or not name else name
+
+
 def _extract_name_value_pairs(
-    data: bytes, dm_table_names: dict[int, str] | None = None
+    data: bytes,
+    dm_table_names: dict[int, str] | None = None,
+    basxml_out: dict[str, bytes] | None = None,
 ) -> list[tuple[str, bytes]]:
     """Walk TLV stream and return ordered (name_str, value_bytes) pairs.
 
@@ -921,6 +1268,9 @@ def _extract_name_value_pairs(
     in_table: bool = False
     table_rows: bytearray = bytearray()
     table_lz: list[bytes] = []  # 0x0305 fragments of one compressed stream
+    basxml_chunks: dict[str, list[bytes]] = {}  # table name -> 0x3c05 fragments
+    basxml_current: str | None = None  # None outside a block, _BASXML_PENDING inside
+    # one whose name is not yet known
 
     def _payload() -> bytes:
         """Row bytes for the table just finished, decompressing 0x0305 if used."""
@@ -989,6 +1339,29 @@ def _extract_name_value_pairs(
             table_rows = bytearray()
             table_lz = []
 
+        # --- BASXML-encoded table ---
+        # An empty 0x3c02 brackets the block on both sides; the fragments between are
+        # one XML document split at arbitrary points, so only the FIRST fragment names
+        # the table. A later fragment may well start with '<item>', which is why the
+        # name is taken once on entry rather than re-derived per chunk.
+        elif tag == _TAG_BASXML_MARKER:
+            basxml_current = None if basxml_current is not None else _BASXML_PENDING
+        elif tag == _TAG_BASXML_DATA and basxml_current is not None:
+            if basxml_current is _BASXML_PENDING:
+                basxml_current = _basxml_open_tag(value) or _BASXML_PENDING
+                if basxml_current is _BASXML_PENDING:
+                    # Not plain-text XML — most likely the binary BASXML of issue #18.
+                    # Say so rather than dropping the parameter without a word.
+                    _logger.warning(
+                        "an XML-encoded table could not be identified (payload starts "
+                        "%r). If this is SAP's binary BASXML it is not supported yet — "
+                        "see issue #18. The parameter is omitted from the result.",
+                        bytes(value[:8]),
+                    )
+                    continue
+                basxml_chunks.setdefault(basxml_current, [])
+            basxml_chunks[basxml_current].append(value)
+
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
             pass  # row_size / row_count already available from row data length
@@ -1026,6 +1399,13 @@ def _extract_name_value_pairs(
     # Finalize any unterminated table at end of stream
     if in_table and current_name is not None:
         pairs.append((current_name, _payload()))
+
+    # BASXML tables are reported separately: their payload is XML text, not the flat
+    # row buffer the binary encoding produces, so the caller must decode it with
+    # decode_basxml_table rather than the codec.
+    if basxml_out is not None:
+        for name, chunks in basxml_chunks.items():
+            basxml_out[name] = b"".join(chunks)
 
     return pairs
 

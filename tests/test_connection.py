@@ -1488,3 +1488,45 @@ def test_unstripped_gw_header_is_what_issue_7_reported() -> None:
     assert struct.unpack_from(">H", raw, 2)[0] == 512  # the bogus "length"
     # With the header stripped the same bytes parse cleanly.
     assert Connection._rfcping_ok(raw) is True
+
+
+# --------------------------------------------------------------------------- #
+# Invoke footer length field (issue #27)
+# --------------------------------------------------------------------------- #
+
+
+def test_invoke_footer_length_is_32_bit() -> None:
+    """The footer length is a BE uint32, not a uint16.
+
+    Every capture has a zero high half because every captured body is small, so a
+    uint16 fits them all — but packing it that way raises struct.error above 64 KB,
+    and a real client sends bodies far larger (a multi-megabyte ABAP program through
+    /SAPDS/RFC_ABAP_INSTALL_RUN, for one).
+    """
+    big = b"\x00" * 70_000
+    frame = Connection._build_invoke_frame(b"00000000", big)
+    footer = frame[-8:]
+    assert struct.unpack_from(">I", footer, 0)[0] == len(big)
+    assert footer[4:8] == b"\x00\x00\x85\x00"
+
+
+def test_invoke_footer_matches_every_request_fixture() -> None:
+    """The 32-bit reading must reproduce all captured footers exactly.
+
+    Guards the reinterpretation: uint16-with-reserved-prefix and uint32 agree on
+    every capture, so the fixtures alone cannot distinguish them — but they must
+    still agree, or the change broke something.
+    """
+    checked = 0
+    for path in sorted((GOLDEN_ROOT / "framing").glob("*request*.bin")):
+        raw = path.read_bytes()
+        if len(raw) > 4 and struct.unpack_from(">I", raw, 0)[0] == len(raw) - 4:
+            raw = raw[4:]
+        if raw[:1] != b"\x06" or raw[-2:] != b"\x85\x00":
+            continue
+        body = raw[80:-8]
+        rebuilt = Connection._build_invoke_frame(raw[40:48], body)
+        assert rebuilt[-8:] == raw[-8:], f"{path.name}: footer changed"
+        assert struct.unpack_from(">I", raw, len(raw) - 8)[0] == len(body)
+        checked += 1
+    assert checked >= 8, f"expected to check most request fixtures, checked {checked}"

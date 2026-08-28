@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `IncompleteDescriptorError` in the public exception hierarchy (see Fixed, #28).
+- `connect(strict_params=...)` and `connect_async(strict_params=...)` control what
+  `call()` does with a keyword argument the function interface does not declare.
+  The default, `False`, drops it and logs a warning so code ported from `pyrfc` that
+  passes a superset of kwargs keeps working; `True` raises `ValueError`. Note that
+  both `pyrfc` and the SAP NW RFC SDK raise in this situation — the lenient default is
+  a deliberate convenience, and a dropped argument changes what the call does (#24).
+
+### Fixed
+
+- Metadata retrieval no longer treats an ABAP exception as an empty descriptor. A
+  function module that is not remote-enabled answers `RFC_GET_FUNCTION_INTERFACE`
+  with a normal exception (`FL`/`046`/`FU_NOT_FOUND`), and because an exception reply
+  carries no `0x0420` the return-code check never fired — so the descriptor came back
+  empty and every subsequent call rejected the caller's arguments as unknown. All four
+  metadata bootstraps now classify errors through one shared path (#25).
+- The exception tag mapping was wrong. `0x0402`–`0x0408` came from documentation and
+  matches no capture; three live exception replies agree on `0x0415` message class,
+  `0x0416` type, `0x0417` number and `0x0411` first variable. `AbapApplicationError`
+  now carries the full message coordinates instead of only the key.
+- A SAP gateway error record is recognised and reported as one. The gateway answers a
+  frame it will not process with NUL-separated text rather than TLV; reading that as
+  TLV produced `malformed TLV: tag 0x2a45 length 21074`, which says nothing about the
+  conversation having been torn down. Any response that is not a readable RFC message
+  now raises `CommunicationError` naming what actually arrived (#28).
+- New `IncompleteDescriptorError`, raised when a STRUCTURE or TABLE parameter has no
+  resolved layout. Distinct from the ABAP errors so a caller can fall back to another
+  backend on a metadata gap; subclasses `ValueError` as well, so existing handlers are
+  unaffected (#28).
+- Tables returned as plain-text XML under `0x3c02`/`0x3c05` are decoded instead of
+  being dropped from the result. `RFC_READ_TABLE` uses this for `ET_DATA` when called
+  with `USE_ET_DATA_4_RETURN='X'` (#29). SAP's binary BASXML remains unimplemented
+  (#18) and is now refused explicitly rather than mis-parsed as text.
+- The invoke-frame footer packed the TLV body length as a 16-bit integer, so any
+  request body over 64 KB raised `struct.error` — a real ABAP program submitted
+  through `/SAPDS/RFC_ABAP_INSTALL_RUN` is enough to hit it. The field is 32-bit;
+  verified against all nine request fixtures, whose footers are unchanged (#27).
+
 ## [0.1.1] - 2026-08-26
 
 Bug-fix release. Every fix below is verified against a live SAP S/4HANA system
