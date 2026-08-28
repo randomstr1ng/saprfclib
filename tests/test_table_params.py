@@ -1313,3 +1313,50 @@ def test_decode_side_also_raises_the_typed_error() -> None:
     field = FieldDesc("ROWS", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_TABLES)
     with pytest.raises(IncompleteDescriptorError, match="ROWS"):
         decode(RFCTYPE_TABLE, b"\x00" * 8, field)
+
+
+def test_multirow_xml_table_decodes_every_item() -> None:
+    """Ten rows in one XML document — the case the single-row capture could not show.
+
+    Source: tests/golden/framing/basxml_et_data_multirow_response.bin, a T100 read
+    cross-checked against the binary path.
+    """
+    body = (GOLDEN / "basxml_et_data_multirow_response.bin").read_bytes()[80:]
+    result = parse_invoke_response(body, _basxml_desc(), None)
+    rows = result["ET_DATA"]
+    assert len(rows) == 10
+    assert all(list(r) == ["LINE"] for r in rows)
+    assert rows[0]["LINE"].startswith("E|FL|001|")
+
+
+def test_xml_fragments_do_not_split_on_item_boundaries() -> None:
+    """Fragment boundaries are the server's choice, so joining first is required.
+
+    Here the document arrives as 9 + 773 bytes: the first fragment holds only the
+    opening tag, the second holds all ten items.
+    """
+    from saprfclib.invoke import _extract_name_value_pairs
+
+    body = (GOLDEN / "basxml_et_data_multirow_response.bin").read_bytes()[80:]
+    fragments = [val for tag, val in _walk_tlv(body) if tag == 0x3C05]
+    assert len(fragments) == 2
+    assert fragments[0] == b"<ET_DATA>"  # opening tag alone
+    assert fragments[1].count(b"<item>") == 10
+
+    out: dict[str, bytes] = {}
+    _extract_name_value_pairs(body, None, out)
+    assert out["ET_DATA"].count(b"<item>") == 10
+
+
+def test_xml_rows_are_not_blank_padded() -> None:
+    """The XML form omits the DDIC-width padding the binary form applies.
+
+    Verified live: the identical query returns ARBGB as 'FL' here and as 'FL' plus
+    eighteen spaces through DATA. Callers splitting the delimited row get trimmed
+    values on this path and padded values on the other.
+    """
+    body = (GOLDEN / "basxml_et_data_multirow_response.bin").read_bytes()[80:]
+    rows = parse_invoke_response(body, _basxml_desc(), None)["ET_DATA"]
+    columns = rows[0]["LINE"].split("|")
+    assert columns[1] == "FL"  # not 'FL' + 18 spaces
+    assert all(c == c.rstrip() for c in columns[:3])

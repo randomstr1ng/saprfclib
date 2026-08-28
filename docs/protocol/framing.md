@@ -408,9 +408,22 @@ Two properties that are easy to get wrong:
   name per chunk files the rows under a table called `item` and loses them.
 
 Row shape observed is the shortcut form: one `<LINE>` element holding the whole
-delimited row, exactly the buffer `DATA` would have held. The documented alternative
-puts one element per field. Both work under the same rule — whatever elements an
-`<item>` contains become that row's keys.
+delimited row. The documented alternative puts one element per field. Both work under
+the same rule — whatever elements an `<item>` contains become that row's keys.
+
+Multi-row is confirmed by capture, not inferred. A ten-row `T100` read arrives as ten
+`<item>` elements split across two `0x3c05` fragments of 9 and 773 bytes, the first
+holding only the opening tag — so **fragment boundaries fall wherever the server
+chooses, not on item boundaries**. Golden fixture:
+`tests/golden/framing/basxml_et_data_multirow_response.bin`.
+
+!!! warning "The XML form is not blank-padded"
+    Unlike the binary encoding, the XML form does **not** pad fields to their DDIC
+    width. The same query returns `ARBGB` as `FL` here and as `FL` followed by
+    eighteen spaces through `DATA`. Row content is otherwise identical field for
+    field, but a caller splitting the delimited row gets trimmed values on one path
+    and padded values on the other. Verified by running the identical query with and
+    without `USE_ET_DATA_4_RETURN`.
 
 !!! danger "This is NOT SAP's BASXML"
     They share a TLV tag and nothing else. SAP's BASXML is a **binary tokenised**

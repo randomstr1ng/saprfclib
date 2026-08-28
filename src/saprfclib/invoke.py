@@ -1105,10 +1105,20 @@ def decode_basxml_table(payload: bytes, table_name: str = "") -> list[dict[str, 
     arrives split across 0x3c05 records that must be joined before parsing.
 
     Each ``<item>`` becomes one row and each element inside it a key. The observed
-    form carries the whole delimited row in a single ``<LINE>`` element — the same
-    buffer ``DATA`` would have held — but the documented form puts one element per
-    field, so both are handled by the same walk: whatever elements an item contains
-    become that row's keys.
+    form carries the whole delimited row in a single ``<LINE>`` element, but the
+    documented form puts one element per field, so both are handled by the same walk:
+    whatever elements an item contains become that row's keys.
+
+    Multi-row is confirmed, not inferred: a ten-row T100 read arrived as ten
+    ``<item>`` elements split across two 0x3c05 fragments of 9 and 773 bytes — the
+    first holding only the opening tag. Fragment boundaries fall wherever the server
+    chooses and not on item boundaries, which is why the fragments are joined before
+    parsing rather than parsed one at a time.
+
+    One difference from the binary encoding worth knowing: the XML form does NOT
+    blank-pad fields to their DDIC width. The same query returns ``ARBGB`` as
+    ``'FL'`` here and as ``'FL'`` plus eighteen spaces through ``DATA``. Row content
+    is otherwise identical field for field.
 
     Values are returned as text. No type conversion is applied, because the element
     carries no type information and the row is delimited exactly as the caller's

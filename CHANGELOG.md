@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Multi-row XML-encoded tables are confirmed working and no longer rest on an
+  assumption. A ten-row read arrives as ten `<item>` elements split across fragments
+  that do not align to item boundaries, which is why they are joined before parsing.
+  Cross-checked against the binary path: the identical query without
+  `USE_ET_DATA_4_RETURN` returns the same rows field for field.
+- Documented that the XML form does not blank-pad fields to their DDIC width, unlike
+  the binary encoding — a caller splitting the delimited row gets trimmed values on
+  one path and padded values on the other.
+
+## [0.1.2] - 2026-08-28
+
 ### Added
 
 - `IncompleteDescriptorError` in the public exception hierarchy (see Fixed, #28).
@@ -181,6 +194,7 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/randomstr1ng/saprfclib/releases/tag/v0.1.0

@@ -1,0 +1,45 @@
+{
+  "message_type": "BASXML_ET_DATA_MULTIROW_RESPONSE",
+  "capture_source": "live capture 2026-08-28; SAP S/4HANA 2023 kernel 793 release 758, unicode. RFC_READ_TABLE on T100 (SPRSL/ARBGB/MSGNR/TEXT, WHERE SPRSL='E' AND ARBGB='FL') with USE_ET_DATA_4_RETURN='X'. Sanitised: GW conversation handle and 0x0514 session token overwritten, byte length preserved. Values are SAP standard message texts, left as captured. No NI length prefix.",
+  "evidence": "cross-checked against the binary path: the identical query without the flag returns the same ten rows through DATA, field-for-field after trailing blanks are stripped",
+  "ni_header_length": 0,
+  "notes": [
+    "Ten <item> elements in one XML document, confirming multi-row handling that the single-row capture (basxml_et_data_response.bin) could only leave inferred.",
+    "The whole document arrived in TWO 0x3c05 fragments, 9 and 773 bytes: the first carries only the opening <ET_DATA> tag and the second everything else. Fragment boundaries therefore fall wherever the server chooses and NOT on item boundaries, which is why the fragments must be joined before parsing rather than parsed individually.",
+    "IMPORTANT semantic difference from the binary encoding: the XML form does NOT blank-pad fields to their DDIC width. Binary DATA returns ARBGB as 'FL' followed by 18 spaces (CHAR(20)); the XML form returns 'FL'. Callers splitting the delimited row therefore get trimmed values on the XML path and padded values on the binary path. The row CONTENT is otherwise identical."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "basxml_table": "ET_DATA",
+    "basxml_rows": 10,
+    "basxml_row_keys": [
+      "LINE"
+    ],
+    "xml_fragments": 2,
+    "xml_fragment_sizes": [
+      9,
+      773
+    ],
+    "columns_per_row": 4,
+    "fields_are_blank_padded": false,
+    "total_length": 2020
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    }
+  ]
+}

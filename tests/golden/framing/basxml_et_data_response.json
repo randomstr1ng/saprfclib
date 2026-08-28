@@ -8,7 +8,7 @@
     "BASXML shape: an empty 0x3c02 brackets the block on both sides, with the XML split across 0x3c05 records. The payload is ASCII, NOT the UTF-16LE every other string-bearing tag uses.",
     "The fragments are one XML document split at arbitrary points: here chunk 1 is '<ET_DATA>' and chunk 2 is '<item><LINE>...</LINE></item></ET_DATA>'. Only the first fragment names the table - a later one may begin '<item>' - so the name must be taken once on entry, not re-derived per chunk.",
     "The row form observed is the shortcut one: a single <LINE> element holding the whole delimited row, exactly the buffer DATA would have carried. The documented alternative puts one element per field; both are handled by the same walk, since whatever elements an <item> contains become that row's keys.",
-    "[ASSUMED] Multi-row behaviour. This capture has a single <item>, so how several rows are distributed across 0x3c05 fragments is inferred from the fact that the fragments form one document. Joining before parsing makes the split irrelevant, but a multi-row capture would confirm it."
+    "Multi-row behaviour is confirmed separately by basxml_et_data_multirow_response.bin (ten <item> elements, cross-checked against the binary path)."
   ],
   "expected_parse": {
     "return_code": 0,
