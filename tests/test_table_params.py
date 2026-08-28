@@ -1220,3 +1220,96 @@ def test_unidentifiable_xml_block_is_reported(caplog: pytest.LogCaptureFixture) 
         _extract_name_value_pairs(stream, None, out)
     assert out == {}
     assert any("issue #18" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+# Unreadable responses and incomplete descriptors (issue #28)
+# --------------------------------------------------------------------------- #
+
+
+_GATEWAY_ERR = (
+    b"*ERR*\x001\x00Conversation 50633926 not found\x00728\x00SAP-Gateway\x00793\x002"
+    b"\x00/bas/793_REL/src/krn/si/gw/gwxxconn.c\x00960\x00\x00Wed Aug 26 12:18:35 2026"
+    b"\x00\x00\x00\x003820\x00SAP-Gateway on host example / sapgw00\x00\x00\x00\x00\x00*ERR*\x00"
+)
+
+
+def test_gateway_error_frame_is_reported_as_such() -> None:
+    """A torn-down conversation must not surface as a TLV parse error.
+
+    The gateway answers with a NUL-separated *ERR* record, not TLV. Walking it as
+    TLV reads '*E' as a tag and 'RR' as a length, which is the
+    "malformed TLV: tag 0x2a45 length 21074" the reporter saw — an error that says
+    nothing about what actually happened.
+    """
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    with pytest.raises(CommunicationError) as excinfo:
+        raise_for_rfc_error(_GATEWAY_ERR)
+    message = str(excinfo.value)
+    assert "Conversation 50633926 not found" in message
+    assert "discarded" in message  # tells the caller the connection is dead
+
+
+def test_gateway_error_text_is_extracted() -> None:
+    """Message, component and kernel release come out of the NUL-separated record."""
+    from saprfclib.invoke import parse_gateway_error
+
+    text = parse_gateway_error(_GATEWAY_ERR)
+    assert text is not None
+    assert "Conversation 50633926 not found" in text
+    assert "SAP-Gateway" in text
+
+
+def test_a_normal_response_is_not_mistaken_for_a_gateway_error() -> None:
+    from saprfclib.invoke import parse_gateway_error, tlv_record
+
+    ok = tlv_record(0x0420, struct.pack(">I", 0)) + struct.pack(">HH", 0xFFFF, 0)
+    assert parse_gateway_error(ok) is None
+    assert parse_invoke_response(ok, _read_table_desc()) == {}
+
+
+def test_unreadable_response_says_so_rather_than_quoting_a_bogus_tag() -> None:
+    """Any payload that is not an RFC message at all gets a communication error."""
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    with pytest.raises(CommunicationError, match="not a readable RFC message"):
+        raise_for_rfc_error(b"\x99\x99\xff\xf0garbage that is not TLV at all")
+
+
+def test_missing_layout_raises_incomplete_descriptor_error() -> None:
+    """A metadata gap gets its own type so callers can fall back on it.
+
+    Distinct from AbapApplicationError: an unresolved layout is a client-side
+    problem worth retrying against another backend, where an ABAP exception is the
+    server's considered answer and is not.
+    """
+    from saprfclib.exceptions import IncompleteDescriptorError
+
+    desc = _read_table_desc()
+    for f in desc.parameters:
+        if f.name == "FIELDS":
+            f.type_desc = None
+    with pytest.raises(IncompleteDescriptorError, match="FIELDS"):
+        build_invoke_request("RFC_READ_TABLE", desc, {"FIELDS": [{"FIELDNAME": "MANDT"}]})
+
+
+def test_incomplete_descriptor_error_is_catchable_both_ways() -> None:
+    """Also a ValueError, so handlers written before it had a type keep working."""
+    import saprfclib
+    from saprfclib.exceptions import IncompleteDescriptorError, SapRfcError
+
+    assert issubclass(IncompleteDescriptorError, SapRfcError)
+    assert issubclass(IncompleteDescriptorError, ValueError)
+    assert saprfclib.IncompleteDescriptorError is IncompleteDescriptorError
+
+
+def test_decode_side_also_raises_the_typed_error() -> None:
+    from saprfclib.codec import decode
+    from saprfclib.exceptions import IncompleteDescriptorError
+
+    field = FieldDesc("ROWS", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_TABLES)
+    with pytest.raises(IncompleteDescriptorError, match="ROWS"):
+        decode(RFCTYPE_TABLE, b"\x00" * 8, field)

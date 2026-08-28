@@ -131,10 +131,40 @@ except ValueError as exc:
 
 ## Empty or aborted responses
 
-A response carrying no return code raises `CommunicationError`. This usually means
-the gateway terminated the conversation, and **the connection is no longer usable** —
-discard it rather than retrying on the same one. Later calls on a torn-down
-conversation fail with `Conversation NNN not found`.
+A response carrying no return code raises `CommunicationError`. So does a response
+that is not an RFC message at all — most often a SAP gateway error record, which is
+NUL-separated text rather than TLV:
+
+```
+CommunicationError: the SAP gateway rejected the frame: Conversation 50633926 not
+found | SAP-Gateway | 793. The conversation is gone; this connection should be
+discarded rather than retried.
+```
+
+In every one of these cases **the connection is no longer usable** — discard it
+rather than retrying on the same one, because every later call reports the same
+missing conversation.
+
+## IncompleteDescriptorError
+
+Raised when a STRUCTURE or TABLE parameter reaches the codec with no layout: the
+`RFC_GET_STRUCTURE_DEFINITION` lookup for its DDIC type did not complete, so there
+are no field offsets to encode or decode against.
+
+It is deliberately distinct from `AbapApplicationError`. A metadata gap is a
+client-side problem and is worth retrying against a different backend; an ABAP
+exception is the server's considered answer and is not.
+
+```python
+try:
+    result = conn.call("BAPI_SOMETHING", **params)
+except saprfclib.IncompleteDescriptorError as exc:
+    # our metadata is incomplete — fall back rather than treating it as an ABAP error
+    result = other_backend.call("BAPI_SOMETHING", **params)
+```
+
+It subclasses both `SapRfcError` and `ValueError`, so handlers written before it had
+a type of its own keep working.
 
 ## Recommended pattern
 

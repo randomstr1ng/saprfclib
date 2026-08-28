@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `IncompleteDescriptorError` in the public exception hierarchy (see Fixed, #28).
 - `connect(strict_params=...)` and `connect_async(strict_params=...)` control what
   `call()` does with a keyword argument the function interface does not declare.
   The default, `False`, drops it and logs a warning so code ported from `pyrfc` that
@@ -28,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches no capture; three live exception replies agree on `0x0415` message class,
   `0x0416` type, `0x0417` number and `0x0411` first variable. `AbapApplicationError`
   now carries the full message coordinates instead of only the key.
+- A SAP gateway error record is recognised and reported as one. The gateway answers a
+  frame it will not process with NUL-separated text rather than TLV; reading that as
+  TLV produced `malformed TLV: tag 0x2a45 length 21074`, which says nothing about the
+  conversation having been torn down. Any response that is not a readable RFC message
+  now raises `CommunicationError` naming what actually arrived (#28).
+- New `IncompleteDescriptorError`, raised when a STRUCTURE or TABLE parameter has no
+  resolved layout. Distinct from the ABAP errors so a caller can fall back to another
+  backend on a metadata gap; subclasses `ValueError` as well, so existing handlers are
+  unaffected (#28).
 - Tables returned as plain-text XML under `0x3c02`/`0x3c05` are decoded instead of
   being dropped from the result. `RFC_READ_TABLE` uses this for `ET_DATA` when called
   with `USE_ET_DATA_4_RETURN='X'` (#29). SAP's binary BASXML remains unimplemented

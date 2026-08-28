@@ -39,7 +39,12 @@ from typing import Any
 
 from saprfclib.codec import decode, encode
 from saprfclib.compress import DecompressError, sapcompress_decompress
-from saprfclib.exceptions import AbapApplicationError, AbapSystemFailure, CommunicationError
+from saprfclib.exceptions import (
+    AbapApplicationError,
+    AbapSystemFailure,
+    CommunicationError,
+    IncompleteDescriptorError,
+)
 from saprfclib.types import (
     RFC_CHANGING,
     RFC_EXPORT,
@@ -348,7 +353,7 @@ def build_invoke_request(
                 # Not an assert: assertions vanish under `python -O`, and this one
                 # guards a real runtime condition — the RFC_GET_STRUCTURE_DEFINITION
                 # lookup for the row type failed, so there is no layout to encode to.
-                raise ValueError(
+                raise IncompleteDescriptorError(
                     f"cannot encode TABLE parameter {field.name!r}: its row layout "
                     f"was never resolved (type_desc is None). The "
                     f"RFC_GET_STRUCTURE_DEFINITION lookup for its DDIC type did not "
@@ -747,6 +752,39 @@ def build_bgrfc_state_request(
 # --------------------------------------------------------------------------- #
 
 
+_GATEWAY_ERROR_MARKER = b"*ERR*"
+_GATEWAY_ERROR_MESSAGE_FIELD = 2  # NUL-separated: marker, code, message, ...
+
+
+def parse_gateway_error(payload: bytes) -> str | None:
+    """Return the human-readable text of a SAP gateway error frame, if this is one.
+
+    The gateway answers a frame it will not process with a NUL-separated record
+    rather than TLV, bracketed by ``*ERR*``::
+
+        *ERR*\x001\x00Conversation 50633926 not found\x00728\x00SAP-Gateway
+        \x00793\x002\x00/bas/793_REL/src/krn/si/gw/gwxxconn.c\x00960\x00...
+
+    Field 2 carries the message; the rest are an error number, the reporting
+    component, the kernel release and the source location that raised it.
+
+    Recognising this matters because the bytes are not TLV at all. Walking them as
+    TLV reads ``*E`` as a tag and ``RR`` as a length, which surfaced to a reporter as
+    "malformed TLV: tag 0x2a45 length 21074" — an error that says nothing about the
+    conversation having been torn down.
+    """
+    if not payload.startswith(_GATEWAY_ERROR_MARKER):
+        return None
+    fields = payload.split(b"\x00")
+    parts: list[str] = []
+    for idx in (_GATEWAY_ERROR_MESSAGE_FIELD, 4, 5):
+        if idx < len(fields):
+            text = fields[idx].decode("utf-8", "replace").strip()
+            if text:
+                parts.append(text)
+    return " | ".join(parts) if parts else payload.decode("utf-8", "replace")[:200]
+
+
 def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -> None:
     """Raise the typed error an RFC response carries, if it carries one.
 
@@ -765,7 +803,26 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
         AbapApplicationError: the response carries ABAP exception tags.
         AbapSystemFailure: the return code is non-zero.
     """
-    tags = _parse_tlv_stream(resp) if _tags is None else _tags
+    gateway_error = parse_gateway_error(resp)
+    if gateway_error is not None:
+        raise CommunicationError(
+            f"the SAP gateway rejected the frame: {gateway_error}. The conversation "
+            f"is gone; this connection should be discarded rather than retried."
+        )
+
+    if _tags is None:
+        try:
+            tags = _parse_tlv_stream(resp)
+        except ValueError as exc:
+            # Not an RFC response at all. Report that, rather than the tag and length
+            # read out of whatever the bytes actually were.
+            preview = resp[:40].decode("utf-8", "replace")
+            raise CommunicationError(
+                f"the response is not a readable RFC message ({len(resp)} bytes, "
+                f"starting {preview!r}): {exc}"
+            ) from exc
+    else:
+        tags = _tags
 
     # AbapApplicationError: signaled by 0x0417 exception number tag (from live fixture).
     if _TAG_EXCEPTION_NUMBER in tags:

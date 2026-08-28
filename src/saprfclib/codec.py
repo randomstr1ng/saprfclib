@@ -36,6 +36,7 @@ import struct
 from decimal import Decimal
 from typing import Any, cast
 
+from saprfclib.exceptions import IncompleteDescriptorError
 from saprfclib.types import FieldDesc, TypeDesc
 
 __all__ = ["encode", "decode"]
@@ -424,7 +425,7 @@ def _require_type_desc(field: FieldDesc, action: str) -> TypeDesc:
     """
     if field.type_desc is None:
         kind = "TABLE" if field.rfctype == RFCTYPE_TABLE else "STRUCTURE"
-        raise ValueError(
+        raise IncompleteDescriptorError(
             f"cannot {action} {kind} parameter {field.name!r}: its row layout was "
             f"never resolved (type_desc is None). The RFC_GET_STRUCTURE_DEFINITION "
             f"lookup for its DDIC type did not complete."
