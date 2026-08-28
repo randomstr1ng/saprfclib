@@ -1,0 +1,39 @@
+{
+  "message_type": "GFI_FU_NOT_FOUND_RESPONSE",
+  "capture_source": "live capture 2026-08-28 at the transport seam, contributed via issue #25; SAP S/4HANA 2023 kernel 793 release 758, unicode. RFC_GET_FUNCTION_INTERFACE for RFC_ABAP_INSTALL_AND_RUN, which is not remote-enabled on that release. Already sanitised by the probe script: GW conversation handle and 0x0514 session token overwritten, byte length preserved. No NI length prefix.",
+  "evidence": "the same shape appears on kernel 742 for CNV_MBT_SHELL_GET_CLIENTS; both raise AbapApplicationError with identical message coordinates",
+  "ni_header_length": 0,
+  "notes": [
+    "An ABAP exception reply carries NO 0x0420 return code. A reader that only checks the return code therefore sees no error at all - which is how a non-RFC-enabled function module produced an empty FunctionDesc and no diagnostic, and every later call rejected the caller's arguments as unknown (issue #25).",
+    "Tag mapping confirmed here and by two other live exceptions: 0x0415 message class, 0x0416 message type, 0x0417 message number (also the marker that this is an exception at all), 0x0411 first message variable, 0x0401 exception name.",
+    "FL/046/FU_NOT_FOUND is the standard 'function module not found or not remote-enabled' message; 0x0411 echoes the function module name that was asked for."
+  ],
+  "expected_parse": {
+    "raises": "AbapApplicationError",
+    "msg_class": "FL",
+    "msg_type": "E",
+    "msg_number": "046",
+    "msg_v1": "RFC_ABAP_INSTALL_AND_RUN",
+    "key": "FU_NOT_FOUND",
+    "return_code_present": false,
+    "total_length": 206
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    }
+  ]
+}

@@ -117,18 +117,35 @@ _TAG_DM_TABLE_ID = 0x0330  # 4B BE uint32 DM table tracking ID (getNextDMTableId
 _TAG_RESPONSE_START = 0x0500  # empty: response start marker
 _TAG_RETURN_CODE = 0x0420  # 4B BE uint32 return code (0=success)
 
-# Exception-specific tags (confirmed from stfc_exception_response.bin)
-_TAG_EXCEPTION_NUMBER = 0x0417  # exception sequence number UTF-16LE (e.g. "000")
-_TAG_EXCEPTION_KEY = 0x0401  # ABAP exception key UTF-16LE (e.g. "EXAMPLE")
-# Additional exception metadata tags (from SDK type definitions error TLV docs)
-_TAG_EXCEPTION_MSG_CLASS = 0x0402
-_TAG_EXCEPTION_MSG_TYPE = 0x0403
-_TAG_EXCEPTION_MSG_NUMBER = 0x0404
-_TAG_EXCEPTION_MSG_V1 = 0x0405
-_TAG_EXCEPTION_MSG_V2 = 0x0406
-_TAG_EXCEPTION_MSG_V3 = 0x0407
-_TAG_EXCEPTION_MSG_V4 = 0x0408
-_TAG_EXCEPTION_MESSAGE = 0x040B
+# Exception tags. 0x0417 doubles as the "this is an exception" marker and the ABAP
+# message number; 0x0401 carries the exception name.
+#
+# CONFIRMED by three live exception replies:
+#   RFC_READ_TABLE on a table it will not read (kernel 793):
+#     0x0415 'DA'  0x0416 'E'  0x0417 '131'  0x0411 'T001'  0x0401 'TABLE_NOT_AVAILABLE'
+#   RFC_GET_FUNCTION_INTERFACE for a non-RFC-enabled FM (kernels 793 and 742):
+#     0x0415 'FL'  0x0416 'E'  0x0417 '046'  0x0411 '<FM name>'  0x0401 'FU_NOT_FOUND'
+#   tests/golden/framing/stfc_exception_response.bin (RAISE with no MESSAGE):
+#     0x0417 '000'  0x0401 'EXAMPLE'   — the message fields are simply absent
+#
+# In each, 0x0415 is the two-character message class, 0x0416 the single-character
+# type, 0x0417 the three-digit number and 0x0411 the first message variable. The
+# previous 0x0402-0x0408 mapping came from documentation rather than a capture and
+# does not match any of them — 0x0402 is the logon/system error message text
+# (_TAG_ERROR_MESSAGE), not the message class.
+_TAG_EXCEPTION_NUMBER = 0x0417  # ABAP message number, e.g. "046"
+_TAG_EXCEPTION_KEY = 0x0401  # exception name, e.g. "FU_NOT_FOUND"
+_TAG_EXCEPTION_MSG_CLASS = 0x0415  # message class, e.g. "FL"
+_TAG_EXCEPTION_MSG_TYPE = 0x0416  # message type, e.g. "E"
+_TAG_EXCEPTION_MSG_NUMBER = 0x0417  # same tag as the marker above
+_TAG_EXCEPTION_MSG_V1 = 0x0411  # first message variable
+# [ASSUMED] V2-V4 follow V1 consecutively. No capture yet carries more than one
+# variable, so these are inference from 0x0411; a reply that fills them would confirm
+# or correct them. They are read defensively — an absent tag simply yields None.
+_TAG_EXCEPTION_MSG_V2 = 0x0412
+_TAG_EXCEPTION_MSG_V3 = 0x0413
+_TAG_EXCEPTION_MSG_V4 = 0x0414
+_TAG_EXCEPTION_MESSAGE = 0x040B  # [ASSUMED] free-text message; not seen in any capture
 
 # RFC version string (confirmed from golden fixture)
 _RFC_VERSION = b"754"
@@ -697,29 +714,26 @@ def build_bgrfc_state_request(
 # --------------------------------------------------------------------------- #
 
 
-def parse_invoke_response(
-    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str] | None = None
-) -> dict[str, Any]:
-    """Parse a RFC invoke response TLV stream and return a native-typed dict.
+def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -> None:
+    """Raise the typed error an RFC response carries, if it carries one.
 
-    Walks the TLV stream with bounds-checking (T-04-RESP, mirrors session._parse_tlv).
-    Classification logic (confirmed from stfc_exception_response.bin golden fixture):
-      - Tag 0x0417 present → AbapApplicationError (ABAP exception)
-      - Tag 0x0420 non-zero and no exception tags → AbapSystemFailure
-      - Tag 0x0420 == 0 → success; walk 0x0201/0x0203 pairs and decode values
+    Shared by every reader of a response, so a failure is classified the same way
+    wherever it arrives. Metadata bootstraps used to skip this entirely: a function
+    module that is not remote-enabled answers RFC_GET_FUNCTION_INTERFACE with a
+    normal ABAP exception (message class FL, number 046, name FU_NOT_FOUND), and
+    because an exception reply carries no 0x0420 the return-code check never fired.
+    The result was an empty descriptor and no diagnostic, so the next call rejected
+    every argument the caller passed as "unknown".
 
-    Pitfall 4: 0x0420 return code is 4B BE uint32 (use struct.unpack('>I')).
-    Pitfall 2: value bytes from 0x0203 are passed directly to codec.decode — let
-    the codec handle type-specific length/encoding (UTF-16 code-unit math, BCD, etc.).
+    Deliberately not special-cased to FU_NOT_FOUND — any exception the server reports
+    during metadata retrieval is surfaced with its full message detail.
 
-    ``dm_table_names`` maps DM table IDs to parameter names for tables the caller
-    sent as input; the server returns those under tag 0x0335 keyed by ID rather than
-    by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
-    parameters are absent from the result.
+    Raises:
+        AbapApplicationError: the response carries ABAP exception tags.
+        AbapSystemFailure: the return code is non-zero.
     """
-    tags = _parse_tlv_stream(resp)
+    tags = _parse_tlv_stream(resp) if _tags is None else _tags
 
-    # --- Exception classification ---
     # AbapApplicationError: signaled by 0x0417 exception number tag (from live fixture).
     if _TAG_EXCEPTION_NUMBER in tags:
         key = _decode_utf16le(tags.get(_TAG_EXCEPTION_KEY))
@@ -742,6 +756,48 @@ def parse_invoke_response(
             msg_v4=msg_v4 or None,
             message=message or None,
         )
+
+    rc_bytes = tags.get(_TAG_RETURN_CODE)
+    if rc_bytes is not None:
+        if len(rc_bytes) != 4:
+            raise ValueError(f"return-code TLV 0x0420 has length {len(rc_bytes)}, expected 4")
+        rc = struct.unpack(">I", rc_bytes)[0]
+        if rc != 0:
+            raise AbapSystemFailure(
+                msg_class=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS)) or None,
+                msg_type=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE)) or None,
+                msg_number=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER)) or None,
+                msg_v1=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1)) or None,
+                msg_v2=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
+                msg_v3=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
+                msg_v4=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
+                message=_decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
+                or f"RFC return code {rc}",
+            )
+
+
+def parse_invoke_response(
+    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str] | None = None
+) -> dict[str, Any]:
+    """Parse a RFC invoke response TLV stream and return a native-typed dict.
+
+    Walks the TLV stream with bounds-checking (T-04-RESP, mirrors session._parse_tlv).
+    Classification logic (confirmed from stfc_exception_response.bin golden fixture):
+      - Tag 0x0417 present → AbapApplicationError (ABAP exception)
+      - Tag 0x0420 non-zero and no exception tags → AbapSystemFailure
+      - Tag 0x0420 == 0 → success; walk 0x0201/0x0203 pairs and decode values
+
+    Pitfall 4: 0x0420 return code is 4B BE uint32 (use struct.unpack('>I')).
+    Pitfall 2: value bytes from 0x0203 are passed directly to codec.decode — let
+    the codec handle type-specific length/encoding (UTF-16 code-unit math, BCD, etc.).
+
+    ``dm_table_names`` maps DM table IDs to parameter names for tables the caller
+    sent as input; the server returns those under tag 0x0335 keyed by ID rather than
+    by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
+    parameters are absent from the result.
+    """
+    tags = _parse_tlv_stream(resp)
+    raise_for_rfc_error(resp, _tags=tags)
 
     # Every genuine invoke response carries the return code; only an exception
     # response omits it, and that is raised above. Its absence means the call did not

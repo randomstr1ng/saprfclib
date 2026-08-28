@@ -62,6 +62,7 @@ from saprfclib.invoke import (
     dm_table_ids,
     drop_unknown_parameters,
     parse_invoke_response,
+    raise_for_rfc_error,
     unknown_parameters,
 )
 from saprfclib.language import normalize_logon_language
@@ -2604,6 +2605,12 @@ class Connection:
         # Parse the response TLV to extract PARAMS table rows.
         # We use a direct walker rather than parse_invoke_response because we need
         # to interpret the raw bytes as PARAMS rows without a TypeDesc descriptor.
+        # A function module that is not remote-enabled answers GFI with a normal ABAP
+        # exception (FL/046/FU_NOT_FOUND), and an exception reply carries no 0x0420 —
+        # so the return-code check never fires and we used to hand back an empty
+        # descriptor instead. Classify before parsing rows, on every path.
+        raise_for_rfc_error(_strip_gw_header(response))
+
         rows = _parse_gfi_params_rows(response, unicode_mode=unicode_mode)
         if not rows:
             # A function module with no parameters at all is legal but rare, and it
@@ -2771,6 +2778,7 @@ class Connection:
 
         response = self._transport.recv_message()
 
+        raise_for_rfc_error(_strip_gw_header(response))
         dfies_rows = _parse_dfies_rows(response)
         return _build_type_desc_from_dfies(tabname, dfies_rows)
 
@@ -4180,6 +4188,12 @@ class AsyncConnection:
         await self._transport.send_message(frame)
         response = await self._transport.recv_message()
 
+        # A function module that is not remote-enabled answers GFI with a normal ABAP
+        # exception (FL/046/FU_NOT_FOUND), and an exception reply carries no 0x0420 —
+        # so the return-code check never fires and we used to hand back an empty
+        # descriptor instead. Classify before parsing rows, on every path.
+        raise_for_rfc_error(_strip_gw_header(response))
+
         rows = _parse_gfi_params_rows(response, unicode_mode=unicode_mode)
         if not rows:
             # A function module with no parameters at all is legal but rare, and it
@@ -4287,6 +4301,7 @@ class AsyncConnection:
         frame = Connection._build_invoke_frame(handle, request_tlv)
         await self._transport.send_message(frame)
         response = await self._transport.recv_message()
+        raise_for_rfc_error(_strip_gw_header(response))
         dfies_rows = _parse_dfies_rows(response)
         return _build_type_desc_from_dfies(tabname, dfies_rows)
 
