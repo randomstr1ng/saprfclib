@@ -126,6 +126,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Corrected the worked DECFLOAT16 example in `docs/protocol/serialization.md`. It read
+  `22 38 00 00 00 00 04 20` for 42.0; under a standard DPD reading those bytes are
+  `1020` — the exponent field said 0 rather than −1, and the declet `0x420` spells the
+  digits 2‑2‑0 rather than 4‑2‑0. The example was labelled `[ASSUMED]` and no code
+  depends on it, but a wrong worked example is what someone implementing the codec
+  would check their work against. Also records that twelve is `…00 12` under DPD and
+  `…00 0c` under BID, which makes a single captured value decisive between the two.
+- Recorded what the 2026-06-26 DECFLOAT probe actually established: that three *guessed*
+  function-module names do not exist, which is not the same as no such function module
+  existing. Notes the dictionary tables (`DD04L`, `DD03L`, `FUPARAREF`, `TFDIR`) that
+  answer the question directly.
+
 - `CONTRIBUTING.md` gains a **Branch Model** section: never squash-merge `development`
   into `main`. A squash writes a commit with no ancestry link to what it flattened, so
   the next release PR re-proposes those changes and conflicts against work `main`

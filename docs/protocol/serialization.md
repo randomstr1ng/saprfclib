@@ -378,15 +378,36 @@ raw_int = int.from_bytes(raw_be, 'big')
 
 **Hex Example (constructed, NOT captured — do not rely on these bytes):**
 ```hex
-22 38 00 00 00 00 04 20  -- 42.0 as IEEE 754r DECFLOAT16 DPD big-endian [ASSUMED]
-                           -- the actual wire bytes are unconfirmed
+22 34 00 00 00 00 02 20  -- 42.0 encoded as IEEE 754-2008 decimal64, DPD, big-endian
+                         -- arithmetic from the public IEEE standard, NOT a capture.
+                         -- Whether SAP puts DPD on the wire at all is still [ASSUMED].
 ```
 
+The previous version of this example read `22 38 00 00 00 00 04 20`. Those bytes do
+not encode 42.0 — under a standard DPD reading they are `1020`. Two separate errors:
+the exponent field said 0 rather than −1 (`38` vs `34`), and the declet `0x420` spells
+the digits 2‑2‑0 rather than 4‑2‑0, which is `0x220`. Nothing depended on it, because
+the codec raises rather than encoding, but a wrong worked example is a trap for whoever
+implements this — it looks like something to check an implementation against.
+
+**Telling DPD from BID from one captured value.** The two schemes differ visibly at
+small integers, which makes a single capture decisive rather than suggestive: the
+number **twelve** is `…00 12` under DPD (each declet spells three decimal digits) and
+`…00 0c` under BID (the coefficient is a plain binary integer). Any captured DECFLOAT
+whose value is known settles the question immediately; no inference required.
+
 !!! warning "DecFloat16/34 is unconfirmed on the wire — and therefore unimplemented"
-    A live probe on 2026-06-26 found **no reachable function module exposing a DECFLOAT16/34
-    parameter** — `STFC_DECFLOAT`, `RFC_DECFLOAT_TEST` and `DEMO_DECFLOAT_ARITH` all returned
+    A live probe on 2026-06-26 found no reachable function module exposing a DECFLOAT16/34
+    parameter — `STFC_DECFLOAT`, `RFC_DECFLOAT_TEST` and `DEMO_DECFLOAT_ARITH` all returned
     `FU_NOT_FOUND`. Big-endian DPD is HIGH confidence from documented type behaviour, but nothing
     has been seen on the wire.
+
+    Note what that probe actually established: three guessed function-module names do not
+    exist. That is not the same as "no such function module exists", and it should not be
+    read as one. The dictionary can be asked directly — `DD04L`/`DD03L` for DECFLOAT-typed
+    data elements and structure fields, `FUPARAREF` for the parameters referencing them, and
+    `TFDIR` (`FMODE = 'R'`) for the remote-enabled subset — which turns "we did not find one"
+    into an evidenced answer either way.
 
     Rather than ship a plausible guess that could silently corrupt decimal values, `encode` and
     `decode` in `src/saprfclib/codec.py` **raise `NotImplementedError`** for `RFCTYPE_DECF16` (23)
