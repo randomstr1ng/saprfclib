@@ -119,6 +119,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script printed that a user had been created when it had not. Both shapes are handled,
   and a shape it does not recognise raises rather than being read as success.
 
+### Documentation
+
+- `CONTRIBUTING.md` gains a **Branch Model** section: never squash-merge `development`
+  into `main`. A squash writes a commit with no ancestry link to what it flattened, so
+  the next release PR re-proposes those changes and conflicts against work `main`
+  already contains — a loop that recurs every release and compounds. Documents both
+  remedies (merge commits for release PRs, or resetting `development` after a squash)
+  and the preconditions for each.
+- `docs/protocol/framing.md` now tabulates the two remaining `[ASSUMED]` exception tags
+  (`0x0412`–`0x0414` for message variables V2–V4, and `0x040B`) with what would confirm
+  each. `0x040B` has never been observed and is now known to be redundant with the
+  confirmed `0x0402`; it is kept only because removing an untested fallback is no
+  better evidenced than keeping it.
 
 ## [0.1.2] - 2026-08-28
 

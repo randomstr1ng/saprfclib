@@ -163,13 +163,60 @@ Python.
 
 Do not open a public issue for a security problem. See [SECURITY.md](SECURITY.md).
 
+## Branch Model (Maintainers Only)
+
+Day-to-day work lands on `development`; `main` is what gets tagged and released.
+
+**Never squash-merge `development` into `main`.** A squash-merge writes a brand-new
+commit on `main` with no ancestry link to any of the commits it flattened, so git no
+longer knows those changes are already there. The next `development` → `main` PR then
+re-proposes all of them and reports conflicts against changes that are, in substance,
+identical to what `main` already has. That is the phantom-conflict loop: it recurs
+every release and gets worse with each one, because each squash adds another
+disconnected commit.
+
+Use one of these instead, consistently:
+
+* **Merge commits for release PRs** (preferred). Merge `development` → `main` with a
+  real merge commit so `main` records `development` as a parent and the next PR shows
+  only what is genuinely new. On GitHub, use "Create a merge commit" — or disable
+  squash merging on the repository so the option cannot be picked by accident:
+
+  ```bash
+  gh api -X PATCH repos/{owner}/{repo} \
+      -F allow_squash_merge=false -F allow_merge_commit=true
+  ```
+
+  Squash-merging is still the right choice for *feature* branches into
+  `development`, where flattening a messy branch is what you want. The rule is about
+  the `development` → `main` hop specifically.
+
+* **Or reset `development` to `main` after every squash-merge**, which throws the
+  disconnected history away before it can accumulate:
+
+  ```bash
+  git checkout development
+  git fetch origin
+  git reset --hard origin/main   # discards anything on development not in main
+  git push --force-with-lease origin development
+  ```
+
+  Only safe immediately after a release, when `main` genuinely contains everything on
+  `development`. Confirm that first — `git diff origin/main development` must be
+  empty. Anyone else working from `development` has to re-base after this.
+
+If the loop has already started, `git merge -s ours` records the merge without
+changing the tree — but only once you have proved the trees are identical
+(`git diff main development` empty), never as a way to make a conflict go away.
+
 ## Release Process (Maintainers Only)
 
 Releases are tag-driven. `hatch-vcs` derives the package version from the git tag, and
 publishing to PyPI uses [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
 — there is no API token stored in the repository.
 
-1. Ensure CI is green on `main`.
+1. Ensure CI is green on `main`, and that `development` reached `main` through a
+   merge commit rather than a squash (see **Branch Model** above).
 
 2. Update `CHANGELOG.md`: move "Unreleased" entries under the new version heading.
 

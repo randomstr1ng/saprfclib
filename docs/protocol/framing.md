@@ -975,9 +975,16 @@ capture sends them single-byte. The two are not distinguishable by "are all byte
 width is detected per value from the interleaved-NUL pattern rather than assumed from the
 connection's Unicode flag.
 
-Still not confirmed: whether `0x0412`–`0x0414` carry message variables V2–V4 (labelled
-`[ASSUMED]` in `invoke.py`; only V1/`0x0411` is confirmed), and the grammar of the
-`0x0418` call-stack breadcrumb, which is captured but not parsed.
+Two `[ASSUMED]` labels remain in `invoke.py`, both waiting on a capture that happens
+to contain the field. Neither affects correctness of the data an RFC call returns —
+they can only make an error message less complete than it could be.
+
+| Tag | Assumed to be | Why it is unconfirmed |
+|-----|---------------|-----------------------|
+| `0x0412`–`0x0414` | Message variables V2–V4 | Only V1 (`0x0411`) has ever appeared. The three are inferred from V1 being `0x0411` and the numbering running consecutively. A capture of a `MESSAGE ... WITH` raising four variables would settle it. |
+| `0x040B` | Free-text exception message | Never observed in any capture. It predates the 7.52 work; `0x0402` is now the *confirmed* free-text tag, and the reader tries `0x040B` first only because removing an untested fallback is a change with no evidence behind it either. If a capture shows `0x040B` is something else, it should be dropped rather than relabelled. |
+
+Also captured but not parsed: the grammar of the `0x0418` call-stack breadcrumb.
 
 ### Binary TABLE descriptor layout (0x0302 / 0x0330) — PARTIALLY CONFIRMED
 

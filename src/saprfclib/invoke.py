@@ -184,7 +184,11 @@ _TAG_EXCEPTION_MSG_V1 = 0x0411  # first message variable
 _TAG_EXCEPTION_MSG_V2 = 0x0412
 _TAG_EXCEPTION_MSG_V3 = 0x0413
 _TAG_EXCEPTION_MSG_V4 = 0x0414
-_TAG_EXCEPTION_MESSAGE = 0x040B  # [ASSUMED] free-text message; not seen in any capture
+# [ASSUMED] free-text message. Never seen in any capture; predates the kernel 752
+# work, which found the confirmed free-text tag to be 0x0402 (below). Tried first only
+# because dropping an untested fallback is no better evidenced than keeping it. See
+# docs/protocol/framing.md — if a capture shows 0x040B is something else, remove it.
+_TAG_EXCEPTION_MESSAGE = 0x040B
 # Kernel 752 raises the same failure with a different tag set: no 0x0401 at all, the
 # name in 0x0403, and the readable text in 0x0402. Captured live from a signon
 # refusal (0x0415 '00', 0x0416 'X', 0x0417 '341'):
