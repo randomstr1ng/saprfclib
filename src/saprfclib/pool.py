@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import deque
@@ -43,6 +44,8 @@ from typing import Any
 
 import saprfclib.connection as _connection
 from saprfclib.exceptions import PoolTimeoutError
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["ConnectionPool", "AsyncConnectionPool"]
 
@@ -102,15 +105,23 @@ class ConnectionPool:
         """
         try:
             return bool(conn.ping())
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it"
+            # Discarding the connection is right; doing it without a word is not.
+            # A pool that quietly bins every connection it checks looks to the caller
+            # like a slow pool rather than a broken one.
+            _logger.debug(
+                "pool: discarding a connection that failed its health check (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     def _safe_close(self, conn: Any) -> None:
         """Close a connection, swallowing any error (close is best-effort)."""
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — close is best-effort
+            _logger.debug("pool: error while closing a discarded connection: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Public acquire/release surface
@@ -294,6 +305,10 @@ class AsyncConnectionPool:
         self._idle: deque[Any] = deque()
         self._in_use: set[Any] = set()
         self._created = 0
+        # Cumulative, not per-checkout: _checkout runs inside a wait_for, so a
+        # timeout unwinds it and any counter local to it is lost with the frame.
+        # acquire() snapshots this before and after to get the per-wait figure.
+        self._discarded_total = 0
         self._closed = False
 
     # ------------------------------------------------------------------ #
@@ -336,7 +351,12 @@ class AsyncConnectionPool:
         """
         try:
             return bool(await conn.ping())
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it"
+            _logger.debug(
+                "pool: discarding a connection that failed its health check (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     async def _safe_close(self, conn: Any) -> None:
@@ -347,8 +367,8 @@ class AsyncConnectionPool:
         """
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — close is best-effort
+            _logger.debug("pool: error while closing a discarded connection: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Public acquire / release surface
@@ -363,13 +383,17 @@ class AsyncConnectionPool:
         exception (D-11, POOL-02).  Raises :class:`PoolTimeoutError` if the deadline
         elapses while the pool is exhausted (counts only, no credentials — T-09-05-P03).
         """
+        discarded_before = self._discarded_total
         try:
             conn = await asyncio.wait_for(self._checkout(), timeout=timeout)
         except TimeoutError as exc:
             async with self._cond:
+                # Was 0 unconditionally, which turned the one field that distinguishes
+                # "the pool is busy" from "the pool is churning dead connections" into
+                # a constant. A caller reading it was told the pool was simply full.
                 raise PoolTimeoutError(
                     waited=timeout,
-                    discarded=0,
+                    discarded=self._discarded_total - discarded_before,
                     active=len(self._in_use),
                     idle=len(self._idle),
                     max_size=self._max_size,
@@ -420,6 +444,7 @@ class AsyncConnectionPool:
                 async with self._cond:
                     self._in_use.discard(candidate)
                     self._created -= 1
+                    self._discarded_total += 1
                     self._cond.notify()
                 await self._safe_close(candidate)
                 # Loop to try again (either idle remains or we open a new one).

@@ -70,6 +70,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually runs, and had already begun to.
 - Pinned `asyncio_default_fixture_loop_scope` so a `pytest-asyncio` upgrade cannot change
   fixture loop scoping under the suite. Unset, it also aborted any run under `-W error`.
+- **bgRFC: a unit that did not run is no longer committed as though it had.** Several
+  separate faults produced the same outcome — the server confirmed the LUW and the
+  caller believed its work was done:
+    - `call_error` was reassigned on every iteration, so a unit whose first call raised
+      and whose second succeeded ended the loop with no error and was committed. Whether
+      a failure survived depended on nothing but call ordering. Execution now stops at
+      the first error, which a unit's all-or-nothing semantics require anyway: the
+      caller re-ships the whole unit, so anything run after the failure would run twice.
+    - An empty buffered call, one whose name could not be decoded, and one whose name
+      was blank each returned "no error" and counted as executed.
+    - A frame declaring more calls than it carried skipped the gap and committed a
+      partial LUW as a complete one.
+    - An unreadable `BGRFC_CALL_COUNT` was treated as zero calls, so the unit committed
+      having executed nothing at all.
+- bgRFC buffered-call names are found correctly. The scan for the UTF-16LE NUL
+  terminator used `bytes.find(b"\x00\x00")`, which matches the low NUL of the final
+  character plus the first NUL of the terminator — an odd offset for every ASCII name.
+  That was then rejected as unaligned and the entire payload taken as the name, so any
+  call carrying parameters resolved to a garbage function name. The terminator is a
+  code unit and is now sought on even offsets.
+- A bgRFC unit-state lookup that raises no longer answers `NOT_FOUND`. `NOT_FOUND` means
+  "never seen", and the caller responds to it by shipping the unit again — so a failing
+  lookup against an already-committed unit re-ran the LUW. A failed lookup is now
+  reported as a failure.
+- bgRFC user callbacks (`on_commit_unit`, `on_rollback_unit`, `on_confirm_unit`) are
+  still isolated so a faulty callback cannot take down the server, but they are now
+  logged with a traceback instead of discarded. A rollback handler that throws leaves
+  the caller's own state half-undone, which is precisely what nobody found out about.
+- The unimplemented bgRFC parameter encoding (OG-06-02) says so. A handler was invoked
+  with an empty request dict while the call's payload was dropped; that now logs a
+  warning naming the function and the number of bytes discarded.
+- `AsyncConnectionPool` reports the connections it discarded. `PoolTimeoutError` was
+  constructed with `discarded=0` unconditionally, turning the one field that separates
+  "the pool is busy" from "the pool is churning dead connections" into a constant.
+- The pool logs failed health checks and close errors at DEBUG rather than discarding
+  them silently, so a pool binning every connection it checks no longer looks merely slow.
+- The SQLite stores refuse a database written by a newer `saprfclib` instead of reading
+  and writing it through the older schema they know — on a store whose purpose is
+  surviving a crash intact. They also stamp `PRAGMA user_version` from `_SCHEMA_VERSION`
+  rather than a repeated literal `1`; the two were independent, so bumping the constant
+  would have created a new schema and recorded it as the old version.
+- The server logs, at DEBUG, an output parameter its handler did not supply. Skipping it
+  is correct — outputs are optional — but the client simply saw the key missing.
+
 
 ## [0.1.2] - 2026-08-28
 

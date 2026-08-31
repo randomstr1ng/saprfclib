@@ -884,11 +884,11 @@ class RfcServer:
         unit_store.persist(unit_id, unit_type)
 
         # --- execute buffered calls (exception-isolated, T-06-U03) ---
-        # Each buffered call in the frame was embedded by build_bgrfc_request as
-        # raw bytes under BGRFC_CALL_N params.  For each call, extract and attempt
-        # to dispatch through the standard handler registry (existing isolation block).
-        # If the call bytes cannot be parsed or the handler is missing, treat as
-        # a handler error but continue (isolation: one bad call does not abort the unit).
+        # Each buffered call in the frame was embedded by build_bgrfc_request as raw
+        # bytes under BGRFC_CALL_N params. A unit is one LUW: the calls in it either
+        # all run or none of them count, and the caller re-ships the whole unit after
+        # a failure. So execution stops at the first error rather than carrying on --
+        # running the remaining calls would double-execute them on the resend.
         call_error: str | None = None
         call_count_str = self._extract_param_from_frame(tlv, "BGRFC_CALL_COUNT")
         call_count = 0
@@ -896,25 +896,48 @@ class RfcServer:
             try:
                 call_count = int(call_count_str)
             except ValueError:
-                call_count = 0
+                # Treating an unreadable count as zero commits the unit having run
+                # nothing, and reports that to the caller as a completed LUW.
+                return self._build_system_failure(
+                    f"BGRFC_DEST_SHIP: unreadable BGRFC_CALL_COUNT {call_count_str!r}"
+                )
+            if call_count < 0:
+                return self._build_system_failure(
+                    f"BGRFC_DEST_SHIP: negative BGRFC_CALL_COUNT {call_count}"
+                )
 
         for i in range(call_count):
             call_bytes = self._extract_raw_param_from_frame(tlv, f"BGRFC_CALL_{i}")
             if call_bytes is None:
-                continue
+                # The frame declared more calls than it carries. Skipping the gap
+                # would commit a partial LUW as a complete one.
+                call_error = (
+                    f"bgRFC: frame declares {call_count} call(s) but BGRFC_CALL_{i} is missing"
+                )
+                break
             # Try to decode the embedded call (func_name from UTF-16LE until NUL NUL).
             try:
                 call_error = self._execute_buffered_call(call_bytes)
             except Exception as exc:  # noqa: BLE001 — isolate ALL errors (T-06-U03)
                 call_error = str(exc).splitlines()[0][:512]
+            if call_error is not None:
+                break
 
         if call_error is not None:
             # Exception in a unit call → rollback path (T-06-U03)
             if self._on_rollback_unit is not None:
                 try:
                     self._on_rollback_unit(unit_id, unit_type)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — a bad callback must not kill the server
+                    # Isolated on purpose, but never silently: a rollback handler that
+                    # throws has left the caller's own state half-undone, and that is
+                    # the one thing nobody finds out about later.
+                    _logger.exception(
+                        "bgRFC: on_rollback_unit raised for unit %s (type %s); the unit "
+                        "was rolled back on the wire but the callback did not complete",
+                        unit_id,
+                        unit_type,
+                    )
             return self._build_system_failure(call_error)
 
         # --- success path → on_commit + store committed + on_confirm ---
@@ -922,16 +945,27 @@ class RfcServer:
             try:
                 self._on_commit_unit(unit_id, unit_type)
             except Exception:  # noqa: BLE001 — isolate callback errors
-                # Commit callback error: still confirm store (persist-then-commit separation)
-                pass
+                # Commit callback error: still confirm store (persist-then-commit
+                # separation). Logged because the unit is about to be confirmed as
+                # done while the caller's commit handler did not finish.
+                _logger.exception(
+                    "bgRFC: on_commit_unit raised for unit %s (type %s); the unit is "
+                    "being confirmed anyway (persist-then-commit separation)",
+                    unit_id,
+                    unit_type,
+                )
 
         unit_store.confirm(unit_id, unit_type)
 
         if self._on_confirm_unit is not None:
             try:
                 self._on_confirm_unit(unit_id, unit_type)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — cleanup must not fail the unit
+                _logger.exception(
+                    "bgRFC: on_confirm_unit raised for unit %s (type %s)",
+                    unit_id,
+                    unit_type,
+                )
 
         return self._build_rfc_ok_response()
 
@@ -948,8 +982,12 @@ class RfcServer:
         if self._on_confirm_unit is not None:
             try:
                 self._on_confirm_unit(unit_id, unit_type)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — cleanup must not fail the unit
+                _logger.exception(
+                    "bgRFC: on_confirm_unit raised for unit %s (type %s)",
+                    unit_id,
+                    unit_type,
+                )
         return self._build_rfc_ok_response()
 
     def _dispatch_bgrfc_state_query(self, tlv: bytes) -> bytes:
@@ -963,8 +1001,21 @@ class RfcServer:
         if self._on_get_unit_state is not None:
             try:
                 state = self._on_get_unit_state(unit_id, unit_type)
-            except Exception:  # noqa: BLE001
-                state = UnitState.NOT_FOUND
+            except Exception as exc:  # noqa: BLE001
+                # Answering NOT_FOUND here is the worst available answer: it tells the
+                # caller the unit was never seen, so the caller ships it again — and if
+                # it had in fact committed, the LUW runs twice. A failed lookup is not
+                # an absent unit; report that we do not know.
+                _logger.exception(
+                    "bgRFC: on_get_unit_state raised for unit %s (type %s)",
+                    unit_id,
+                    unit_type,
+                )
+                return self._build_system_failure(
+                    f"BGRFC_CHECK_UNIT_STATE_SERVER: state lookup for {unit_id} failed "
+                    f"({type(exc).__name__}: {str(exc).splitlines()[0][:200]}) — the "
+                    f"state is unknown, not NOT_FOUND"
+                )
         else:
             state = self._unit_store.get_unit_state(unit_id, unit_type)
         # Encode state name as a CHAR param in the response TLV.
@@ -988,22 +1039,36 @@ class RfcServer:
         This method is exception-isolated: the caller wraps it in try/except to
         satisfy T-06-U03 (no traceback leak, no credential leak).
         """
+        # Returning None here means "this call succeeded" to the caller, which then
+        # commits and confirms the unit. A call that could not be run is not a call
+        # that ran, so every unexecutable case below reports an error instead.
         if not call_bytes:
-            return None
+            return "bgRFC: buffered call is empty"
 
-        # Decode func_name: the first UTF-16LE string up to NUL NUL (b"\x00\x00" separator)
+        # Decode func_name: the leading UTF-16LE string up to its NUL terminator.
+        #
+        # The terminator is a 0x0000 *code unit*, so it can only start at an even
+        # offset. Scanning with bytes.find(b"\x00\x00") instead matched the low NUL
+        # of the last character plus the first NUL of the terminator -- an odd offset,
+        # every time, for any ASCII name. The odd result was then rejected as
+        # unaligned and the whole payload taken as the name, so the separator branch
+        # never ran and a call carrying parameters decoded to a garbage name.
+        nul_pos = -1
+        for off in range(0, len(call_bytes) - 1, 2):
+            if call_bytes[off] == 0 and call_bytes[off + 1] == 0:
+                nul_pos = off
+                break
         try:
-            nul_pos = call_bytes.find(b"\x00\x00")
-            if nul_pos < 0 or nul_pos % 2 != 0:
-                # No NUL NUL separator found — entire payload is the func_name
+            if nul_pos < 0:
+                # No terminator — the whole payload is the name.
                 func_name = call_bytes.decode("utf-16-le").rstrip("\x00 ")
             else:
                 func_name = call_bytes[:nul_pos].decode("utf-16-le").rstrip("\x00 ")
-        except Exception:
-            return None  # Cannot decode func_name — skip this call
+        except UnicodeDecodeError as exc:
+            return f"bgRFC: cannot decode function name from buffered call ({exc})"
 
         if not func_name:
-            return None
+            return "bgRFC: buffered call carries an empty function name"
 
         entry = self._registry.get(func_name.upper())
         if entry is None and self._generic is not None:
@@ -1012,9 +1077,21 @@ class RfcServer:
             # No handler registered — return error (does not crash the unit)
             return f"bgRFC: no handler registered for {func_name!r}"
 
-        func_desc, handler = entry
+        _func_desc, handler = entry
         # For bgRFC buffered calls, params are not yet deserialized (OG-06-02).
         # Pass an empty request dict until live-capture confirms the encoding.
+        # Say so whenever the call carries more than the name we consumed: the
+        # handler is about to run against no data, and doing that to a business
+        # handler without a word is worse than the missing feature itself.
+        consumed = len(call_bytes) if nul_pos < 0 else nul_pos + 2
+        if len(call_bytes) > consumed:
+            _logger.warning(
+                "bgRFC: calling %s with an empty request — the buffered-call parameter "
+                "encoding is not implemented (OG-06-02), so %d byte(s) of this call are "
+                "being dropped",
+                func_name,
+                len(call_bytes) - consumed,
+            )
         try:
             handler({})
         except Exception as exc:  # noqa: BLE001 — isolate (T-06-U03)
@@ -1239,7 +1316,16 @@ class RfcServer:
                     continue  # pure IMPORTING — client sent it, server does not echo
                 name_upper = field.name.upper()
                 if name_upper not in result_upper:
-                    continue  # handler did not supply this output — skip (optional)
+                    # Skipping is right — output params are optional — but a handler
+                    # that meant to fill this one gets no hint: the client just sees
+                    # the key missing from its result dict.
+                    _logger.debug(
+                        "server: handler for %s returned no value for output parameter "
+                        "%s; it will be absent from the client's result",
+                        func_desc.name,
+                        field.name,
+                    )
+                    continue
                 value = result_upper[name_upper]
                 if field.rfctype == RFCTYPE_TABLE:
                     parts.extend(self._build_table_records(field, value, len(dm_ids) + 1))
