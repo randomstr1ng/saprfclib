@@ -205,9 +205,46 @@ Use one of these instead, consistently:
   `development`. Confirm that first — `git diff origin/main development` must be
   empty. Anyone else working from `development` has to re-base after this.
 
-If the loop has already started, `git merge -s ours` records the merge without
-changing the tree — but only once you have proved the trees are identical
-(`git diff main development` empty), never as a way to make a conflict go away.
+### Repairing the link once the loop has started
+
+`git merge -s ours origin/main` records the merge without changing
+`development`'s tree, which restores the ancestry link so the next release PR
+shows only what is genuinely new.
+
+It is also a way to throw work away silently, so it needs a proof first — never
+reach for it just to make a conflict go away.
+
+**The proof is not "the trees are identical."** That is the obvious test and it is
+the wrong one: it can only hold in the moment between a release and the next
+commit, and by the time anyone notices the phantom conflicts `development` has
+always moved on. Requiring it would mean the check never passes when you actually
+need it.
+
+What has to be true is narrower: **everything on `main` is already present in
+`development`'s history.** Since a release is cut *from* `development`, `main`'s
+tree should be byte-identical to some commit `development` already contains and
+has built on. Find it:
+
+```bash
+MAIN_TREE=$(git rev-parse origin/main^{tree})
+for c in $(git rev-list development -n 200); do
+    if [ "$(git rev-parse $c^{tree})" = "$MAIN_TREE" ]; then
+        git log -1 --oneline "$c"; break
+    fi
+done
+```
+
+A hit means `main` contributes nothing `development` lacks, and `-s ours` is
+recording a fact rather than discarding a change. **No hit means stop** — `main`
+holds something that never came from this branch (a hotfix committed directly,
+say), and that has to be merged properly rather than declared absent.
+
+Afterwards, confirm both of these:
+
+```bash
+git merge-base --is-ancestor origin/main development   # link restored
+git rev-parse development^{tree}                       # unchanged from before
+```
 
 ## Release Process (Maintainers Only)
 
