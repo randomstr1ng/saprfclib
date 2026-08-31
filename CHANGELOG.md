@@ -42,6 +42,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented that the XML form does not blank-pad fields to their DDIC width, unlike
   the binary encoding — a caller splitting the delimited row gets trimmed values on
   one path and padded values on the other.
+- ABAP exceptions from a 7.52 system are now reported with their key and message text.
+  That release carries the exception key in `0x0403` and the message in `0x0402`, tags
+  that appear in no kernel 793 capture, so both were ignored: an error that says
+  `Logon data incomplete.` on the wire reached the caller as
+  `AbapApplicationError(key=None, message=None)`. Both spellings are now read, and the
+  kernel 793 tags keep priority. Message class, type and number were already correct.
+- Exception text is decoded at the width the value actually has. Kernel 793 sends these
+  fields as UTF-16LE, the 7.52 system sends them single-byte, and the two are not
+  separable by inspecting for high bytes — ASCII in UTF-16LE has none either, and
+  decoding it single-byte turns `Logon data incomplete.` into `L o g o n`. The
+  interleaved-NUL pattern is what distinguishes them.
+- An empty response frame is no longer reported as a malformed one. A header-only refusal
+  (observed on 7.52, where kernel 793 sends an EBCDIC CPIC error instead) has no body to
+  be malformed, and saying so pointed at the parser rather than at the server.
+- Removed a duplicate, unreachable copy of the system-failure classifier in
+  `parse_invoke_response`. `raise_for_rfc_error` runs first and already handles a
+  non-zero return code; the second copy could only drift out of step with the one that
+  actually runs, and had already begun to.
 
 ## [0.1.2] - 2026-08-28
 

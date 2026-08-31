@@ -270,8 +270,14 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length)     |
 | 0x0330    | capture     | TABLE header (4 bytes; part of binary TABLE encoding)                |
 | 0x0337    | analysis          | Marker / empty record                                                 |
-| 0x0401    | capture     | ABAP exception key/name (UTF-16LE, e.g. "EXAMPLE")                  |
-| 0x0417    | capture     | ABAP exception number (UTF-16LE, 3 chars, e.g. "000")               |
+| 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
+| 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
+| 0x0403    | capture     | ABAP exception key/name (kernel 752; alternative to 0x0401)          |
+| 0x0411    | capture     | Message variable V1                                                  |
+| 0x0415    | capture     | Message class (2 chars, e.g. "00", "FL")                             |
+| 0x0416    | capture     | Message type (1 char, e.g. "X", "E")                                 |
+| 0x0417    | capture     | ABAP exception/message number (3 chars, e.g. "000", "341")           |
+| 0x0418    | capture     | ABAP call-stack breadcrumb (`;W=…,E=…;S=…;D=…` — not parsed)         |
 | 0x0420    | capture     | RFC return code (4B BE uint32; 0=success)                            |
 | 0x0421    | analysis          | Auth / call context                                                   |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
@@ -947,15 +953,31 @@ parsed out of the response TLV, and the tags carrying it on a system failure hav
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
 
-### Exception TLV semantics (0x0401 vs 0x0417) — PARTIALLY CONFIRMED
+### Exception TLV semantics — the tag set varies by release
 
-Wire observation: `0x0417` is a 3-character UTF-16LE string (`"000"`), `0x0401` is an
-N-character UTF-16LE string (`"EXAMPLE"`). The mapping to *exception key* and *message
-number* was confirmed empirically by matching a `RAISE EXAMPLE` in ABAP against the captured
-frame. Not confirmed: whether `0x0401` is always the exception key rather than a message
-class, whether `0x0417` is a message number rather than a sequence number, and which tags
-carry the message class/type/number for `MESSAGE`-bearing exceptions. Consequence:
-`AbapApplicationError` field mapping may be imprecise for exceptions raised with `MESSAGE`.
+`0x0417` is the marker: its presence is what makes a response an exception rather than a
+result (an exception response carries no `0x0420` at all). It holds the message number —
+3 characters, e.g. `"000"`, `"341"`. The mapping to *exception key* and *message number*
+was confirmed by matching a `RAISE EXAMPLE` in ABAP against the captured frame, and again
+against `FU_NOT_FOUND` from `RFC_GET_FUNCTION_INTERFACE` for a non-remote-enabled module.
+
+**The tag carrying the key is not the same on every release.** Kernel 793 puts it in
+`0x0401`; a 7.52 system puts it in `0x0403` and adds the free message text in `0x0402`,
+neither of which appears in any 793 capture. A reader that knows only the 793 tags gets
+`key=None` and `message=None` from a 7.52 exception while the text sits unread in the
+frame — this is exactly what happened before
+`tests/golden/framing/signon_incomplete_752_response.bin` was captured. Both spellings are
+now read, 793's first.
+
+**The text encoding is not fixed either.** 793 sends these fields as UTF-16LE; the 7.52
+capture sends them single-byte. The two are not distinguishable by "are all bytes < 0x80"
+— ASCII text in UTF-16LE passes that test too and then decodes as `"L o g o n"` — so the
+width is detected per value from the interleaved-NUL pattern rather than assumed from the
+connection's Unicode flag.
+
+Still not confirmed: whether `0x0412`–`0x0414` carry message variables V2–V4 (labelled
+`[ASSUMED]` in `invoke.py`; only V1/`0x0411` is confirmed), and the grammar of the
+`0x0418` call-stack breadcrumb, which is captured but not parsed.
 
 ### Binary TABLE descriptor layout (0x0302 / 0x0330) — PARTIALLY CONFIRMED
 

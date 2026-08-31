@@ -185,6 +185,20 @@ _TAG_EXCEPTION_MSG_V2 = 0x0412
 _TAG_EXCEPTION_MSG_V3 = 0x0413
 _TAG_EXCEPTION_MSG_V4 = 0x0414
 _TAG_EXCEPTION_MESSAGE = 0x040B  # [ASSUMED] free-text message; not seen in any capture
+# Kernel 752 raises the same failure with a different tag set: no 0x0401 at all, the
+# name in 0x0403, and the readable text in 0x0402. Captured live from a signon
+# refusal (0x0415 '00', 0x0416 'X', 0x0417 '341'):
+#     0x0403 'CALL_FUNCTION_SIGNON_INCOMPL'
+#     0x0402 'Logon data incomplete.'
+# 0x0401 appears to name a RAISEd exception and 0x0403 an X-message abort, but only
+# one capture of each exists, so both are read as candidates for the key rather than
+# claiming which is which. Without these fallbacks the same error surfaced with
+# key=None and message=None while the text sat unread in 0x0402.
+_TAG_EXCEPTION_KEY_ALT = 0x0403
+_TAG_EXCEPTION_TEXT = 0x0402
+# 0x0418 accompanies the 752 refusal with an ABAP call-stack breadcrumb, e.g.
+# ";W=SAPMSSY1,E=703,H=2,N=1;S=REMOTE_FUNCTION_CALL,P=S...". Not parsed - the field
+# layout is unconfirmed and nothing needs it.
 
 # RFC version string (confirmed from golden fixture)
 _RFC_VERSION = b"754"
@@ -829,6 +843,26 @@ def parse_cpic_error(payload: bytes) -> str | None:
     return words
 
 
+def _decode_error_text(value: bytes | None) -> str:
+    """Decode an error/exception TLV value, detecting its width.
+
+    These fields are NOT reliably UTF-16LE. Kernel 793 sends them UTF-16LE
+    (``0x0417`` = ``b"0\x004\x006\x00"``), while kernel 752 sends the same fields
+    single-byte (``0x0417`` = ``b"341"``, ``0x0411`` = 28 bytes for a 28-character
+    name). Decoding one as the other yields mojibake rather than an error, so the
+    failure is silent and the message reaches the caller as noise.
+
+    UTF-16LE ASCII text has a NUL as every second byte; single-byte text does not.
+    Testing "every byte below 0x80" does not discriminate — UTF-16LE ASCII passes it
+    too — so the interleaved NULs are the reliable signal.
+    """
+    if not value:
+        return ""
+    if len(value) >= 2 and len(value) % 2 == 0 and all(b == 0 for b in value[1::2]):
+        return value.decode("utf-16-le", errors="replace").rstrip("\x00 ")
+    return value.decode("latin-1", errors="replace").rstrip("\x00 ")
+
+
 def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -> None:
     """Raise the typed error an RFC response carries, if it carries one.
 
@@ -876,15 +910,19 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
 
     # AbapApplicationError: signaled by 0x0417 exception number tag (from live fixture).
     if _TAG_EXCEPTION_NUMBER in tags:
-        key = _decode_utf16le(tags.get(_TAG_EXCEPTION_KEY))
-        msg_class = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS))
-        msg_type = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE))
-        msg_number = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER))
-        msg_v1 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1))
-        msg_v2 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2))
-        msg_v3 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3))
-        msg_v4 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4))
-        message = _decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
+        key = _decode_error_text(tags.get(_TAG_EXCEPTION_KEY)) or _decode_error_text(
+            tags.get(_TAG_EXCEPTION_KEY_ALT)
+        )
+        msg_class = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_CLASS))
+        msg_type = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_TYPE))
+        msg_number = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_NUMBER))
+        msg_v1 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V1))
+        msg_v2 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V2))
+        msg_v3 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V3))
+        msg_v4 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V4))
+        message = _decode_error_text(tags.get(_TAG_EXCEPTION_MESSAGE)) or _decode_error_text(
+            tags.get(_TAG_EXCEPTION_TEXT)
+        )
         raise AbapApplicationError(
             key=key or None,
             msg_class=msg_class or None,
@@ -904,14 +942,15 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
         rc = struct.unpack(">I", rc_bytes)[0]
         if rc != 0:
             raise AbapSystemFailure(
-                msg_class=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS)) or None,
-                msg_type=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE)) or None,
-                msg_number=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER)) or None,
-                msg_v1=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1)) or None,
-                msg_v2=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
-                msg_v3=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
-                msg_v4=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
-                message=_decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
+                msg_class=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_CLASS)) or None,
+                msg_type=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_TYPE)) or None,
+                msg_number=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_NUMBER)) or None,
+                msg_v1=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V1)) or None,
+                msg_v2=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
+                msg_v3=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
+                msg_v4=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
+                message=_decode_error_text(tags.get(_TAG_EXCEPTION_MESSAGE))
+                or _decode_error_text(tags.get(_TAG_EXCEPTION_TEXT))
                 or f"RFC return code {rc}",
             )
 
@@ -948,35 +987,22 @@ def parse_invoke_response(
     # and surfaces later as a confusing KeyError in caller code.
     rc_bytes = tags.get(_TAG_RETURN_CODE)
     if rc_bytes is None:
+        # An empty payload is not a malformed one — there is nothing there to be
+        # malformed. Some releases refuse a call by answering with the frame header
+        # and no body at all (observed on 7.52, where the same refusal that kernel
+        # 793 spells out as an EBCDIC CPIC error arrives as 80 bytes of header), so
+        # say which of the two happened rather than blaming the parser.
+        if not resp:
+            raise CommunicationError(
+                "the server answered with an empty frame: no response body at all, so "
+                "neither a result nor an error was reported. The call did not run and "
+                "the conversation is gone; this connection should be discarded."
+            )
         raise CommunicationError(
             f"malformed RFC response: no return-code TLV 0x{_TAG_RETURN_CODE:04x} and no "
             f"exception tags in {len(resp)} byte(s) of response payload — the server "
             f"aborted the call; this connection should be discarded"
         )
-    if rc_bytes is not None:
-        if len(rc_bytes) != 4:
-            raise ValueError(f"return-code TLV 0x0420 has length {len(rc_bytes)}, expected 4")
-        rc = struct.unpack(">I", rc_bytes)[0]
-        if rc != 0:
-            # Non-zero rc without an exception-key tag → system failure
-            msg_class = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS))
-            msg_type = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE))
-            msg_number = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER))
-            msg_v1 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1))
-            msg_v2 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2))
-            msg_v3 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3))
-            msg_v4 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4))
-            message = _decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
-            raise AbapSystemFailure(
-                msg_class=msg_class or None,
-                msg_type=msg_type or None,
-                msg_number=msg_number or None,
-                msg_v1=msg_v1 or None,
-                msg_v2=msg_v2 or None,
-                msg_v3=msg_v3 or None,
-                msg_v4=msg_v4 or None,
-                message=message or f"RFC return code {rc}",
-            )
 
     # --- Success path: extract 0x0201/0x0203 value pairs ---
     # Build a name→FieldDesc map for EXPORTING params (server → caller).

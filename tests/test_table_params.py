@@ -661,7 +661,7 @@ def test_response_without_a_return_code_raises() -> None:
     """
     from saprfclib.exceptions import CommunicationError
 
-    with pytest.raises(CommunicationError, match="no return-code TLV"):
+    with pytest.raises(CommunicationError, match="empty frame"):
         parse_invoke_response(b"", _read_table_desc())
 
 
@@ -1470,3 +1470,97 @@ def test_credentials_are_optional_on_both_connect_functions() -> None:
         params = inspect.signature(fn).parameters
         assert params["user"].default is None
         assert params["passwd"].default is None
+
+
+# --------------------------------------------------------------------------- #
+# Release-independent error decoding (kernel 7.52 vs 793)
+# --------------------------------------------------------------------------- #
+
+
+def test_752_signon_refusal_yields_key_and_message() -> None:
+    """The 7.52 exception tags carry the same information under different numbers.
+
+    Source: tests/golden/framing/signon_incomplete_752_response.bin. The key sits in
+    0x0403 and the text in 0x0402; a reader that knows only the kernel 793 tags
+    (0x0401, no free text) reports key=None and message=None while "Logon data
+    incomplete." sits unread in the frame.
+    """
+    from saprfclib.exceptions import AbapApplicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    body = (GOLDEN / "signon_incomplete_752_response.bin").read_bytes()[80:]
+    with pytest.raises(AbapApplicationError) as excinfo:
+        raise_for_rfc_error(body)
+    exc = excinfo.value
+    assert exc.key == "CALL_FUNCTION_SIGNON_INCOMPL"
+    assert exc.message == "Logon data incomplete."
+    assert (exc.msg_class, exc.msg_type, exc.msg_number) == ("00", "X", "341")
+    assert exc.msg_v1 == "CALL_FUNCTION_SIGNON_INCOMPL"
+
+
+def test_793_exception_tags_still_decode_after_752_support() -> None:
+    """The 7.52 fallbacks must not displace the tags kernel 793 actually sends."""
+    from saprfclib.exceptions import AbapApplicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    body = (GOLDEN / "gfi_fu_not_found_response.bin").read_bytes()[80:]
+    with pytest.raises(AbapApplicationError) as excinfo:
+        raise_for_rfc_error(body)
+    exc = excinfo.value
+    assert exc.key == "FU_NOT_FOUND"
+    assert (exc.msg_class, exc.msg_number) == ("FL", "046")
+    assert exc.msg_v1 == "RFC_ABAP_INSTALL_AND_RUN"
+
+
+def test_error_text_width_is_detected_per_value_not_assumed() -> None:
+    """Error text is single-byte on 7.52 and UTF-16LE on 793 — both must decode.
+
+    The two encodings are indistinguishable by "are all bytes < 0x80": ASCII text in
+    UTF-16LE passes that test too, and decoding it as latin-1 yields "L o g o n".
+    The interleaved NULs are what separates them.
+    """
+    from saprfclib.invoke import _decode_error_text
+
+    assert _decode_error_text(b"Logon data incomplete.") == "Logon data incomplete."
+    assert _decode_error_text("Logon data incomplete.".encode("utf-16-le")) == (
+        "Logon data incomplete."
+    )
+    assert _decode_error_text(b"") == ""
+    assert _decode_error_text(None) == ""
+    # Odd length cannot be UTF-16LE, so it decodes single-byte and the trailing
+    # NUL padding is stripped. The point is that it must not raise.
+    assert _decode_error_text(b"\x41\x42\x00") == "AB"
+
+
+def test_752_logon_response_carries_no_system_id_tags() -> None:
+    """Guards the premise of the per-connection cache key.
+
+    This release identifies itself through 0x0008/0x0006 rather than the
+    0x0450/0x0452/0x0453 the 793 logon response carries. If a future capture shows
+    0x0450 here after all, the cache-key fallback below is no longer needed.
+    """
+    body = (GOLDEN / "signon_incomplete_752_response.bin").read_bytes()[80:]
+    tags = {tag for tag, _ in _walk_tlv(body)}
+    assert 0x0450 not in tags
+    assert 0x0452 not in tags
+    assert 0x0453 not in tags
+    assert 0x0008 in tags
+
+
+def test_empty_response_frame_is_not_reported_as_malformed() -> None:
+    """A header-only refusal has no body to be malformed.
+
+    Observed on 7.52: an unauthenticated call is answered with the 80-byte frame
+    header and nothing after it. Calling that "malformed" points the reader at the
+    parser instead of at the server that sent nothing.
+    """
+    from saprfclib.exceptions import CommunicationError
+
+    with pytest.raises(CommunicationError, match="empty frame") as excinfo:
+        parse_invoke_response(b"", FunctionDesc(name="RFC_PING", parameters=[]))
+    assert "malformed" not in str(excinfo.value)
+
+    # A non-empty body that genuinely lacks a return code still reports as malformed.
+    with pytest.raises(CommunicationError, match="malformed"):
+        body = struct.pack(">HH", 0x0016, 4) + b"1101" + struct.pack(">H", 0x0016)
+        parse_invoke_response(body, FunctionDesc(name="RFC_PING", parameters=[]))
