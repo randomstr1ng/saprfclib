@@ -22,11 +22,32 @@ import pytest
 from saprfclib.transport import Transport, build_ni_frame, connect_tcp, parse_ni_frame
 from tests._mocks import MockTransport
 
+_OPEN_PAIRS: list[tuple[socket.socket, socket.socket]] = []
+
 
 def _make_loopback() -> "tuple[Transport, socket.socket]":
     """Return (client_transport, server_raw_socket) over a socketpair (no network)."""
     client_sock, server_sock = socket.socketpair()
+    _OPEN_PAIRS.append((client_sock, server_sock))
     return Transport(client_sock), server_sock
+
+
+@pytest.fixture(autouse=True)
+def _close_socketpairs():
+    """Close every socketpair a test opened.
+
+    Without this the pair survives until garbage collection and Python reports
+    ResourceWarning — invisible under the default filters, but it makes the suite
+    unrunnable with -W error and the GC is attributed to whichever unrelated test
+    happens to be running when it fires.
+    """
+    yield
+    while _OPEN_PAIRS:
+        for sock in _OPEN_PAIRS.pop():
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #

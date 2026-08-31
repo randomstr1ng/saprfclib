@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Python 3.14 is supported and tested. Added to the CI matrix and the package
+  classifiers; the suite passes under `-W error` on 3.14, including with random test
+  ordering.
+
 ### Fixed
 
+- `_LoopThread.close()` stopped the background event loop but never closed it, so every
+  synchronous classic connection leaked a loop and the file descriptors behind its
+  selector until garbage collection. Python 3.14 surfaces this as a `ResourceWarning`;
+  the cost was real on every version and accumulated in long-running processes.
+- `asyncio.iscoroutinefunction` is deprecated in 3.14 and removed in 3.16; the server
+  dispatch path now uses `inspect.iscoroutinefunction`.
+- Two test helpers leaked sockets, which made the suite unrunnable with `-W error` and
+  attributed the collection to whichever unrelated test was running at the time.
 - Multi-row XML-encoded tables are confirmed working and no longer rest on an
   assumption. A ten-row read arrives as ten `<item>` elements split across fragments
   that do not align to item boundaries, which is why they are joined before parsing.

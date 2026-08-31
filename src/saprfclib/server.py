@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import struct
 import threading
@@ -1551,7 +1552,7 @@ class AsyncRfcServer(RfcServer):
 
     Handlers may be ``async def handler(request: dict) -> dict`` (awaited) or
     plain ``def handler(request: dict) -> dict`` (called directly).  The
-    dispatch path checks ``asyncio.iscoroutinefunction`` before calling and
+    dispatch path checks ``inspect.iscoroutinefunction`` before calling and
     awaits the result if it returns a coroutine.
 
     Server I/O lifecycle::
@@ -1634,7 +1635,7 @@ class AsyncRfcServer(RfcServer):
         # Dispatch: await async handlers; call sync handlers directly.
         # CancelledError (BaseException) propagates — not caught (Pitfall 7).
         try:
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 result = await handler(request)
             else:
                 result = handler(request)

@@ -1855,9 +1855,26 @@ class _LoopThread:
         return fut.result(timeout)
 
     def close(self) -> None:
-        """Stop the background loop and join the thread."""
+        """Stop the background loop, join the thread and release the loop.
+
+        Closing matters, not just stopping: a stopped-but-unclosed event loop keeps
+        its selector and the file descriptors behind it, so every sync classic
+        connection leaked one until the interpreter collected it. Python 3.14
+        surfaces that as a ResourceWarning from BaseEventLoop.__del__; the cost is
+        real on any version, and accumulates in a long-running process that opens
+        connections through the pool.
+
+        Only closed once the thread has actually stopped — closing a running loop
+        raises. If the join times out the loop is left alone rather than risking
+        that, since a leaked descriptor beats an exception during cleanup.
+        """
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5.0)
+        if not self._thread.is_alive():
+            try:
+                self._loop.close()
+            except RuntimeError:  # pragma: no cover - loop already closed
+                pass
 
 
 class Connection:
