@@ -466,7 +466,15 @@ class SqliteTidStore:
         # check_same_thread=False: safe because threading.Lock serialises access.
         self._db: sqlite3.Connection = sqlite3.connect(path, check_same_thread=False)
         self._lock: threading.Lock = threading.Lock()
-        self._migrate()
+        try:
+            self._migrate()
+        except Exception:
+            # __init__ raising leaves this object unreachable with its sqlite
+            # connection still open; it is then finalised at some arbitrary later
+            # point and the ResourceWarning is attributed to whatever is running
+            # then. Close it on the way out.
+            self._db.close()
+            raise
 
     def _migrate(self) -> None:
         """Auto-migrate schema on first open (D-05 / Pitfall 3)."""
@@ -647,7 +655,15 @@ class SqliteUnitStore:
         # ONE persistent connection for the store lifetime (Pitfall 5).
         self._db: sqlite3.Connection = sqlite3.connect(path, check_same_thread=False)
         self._lock: threading.Lock = threading.Lock()
-        self._migrate()
+        try:
+            self._migrate()
+        except Exception:
+            # __init__ raising leaves this object unreachable with its sqlite
+            # connection still open; it is then finalised at some arbitrary later
+            # point and the ResourceWarning is attributed to whatever is running
+            # then. Close it on the way out.
+            self._db.close()
+            raise
 
     def _migrate(self) -> None:
         """Auto-migrate schema on first open (D-05 / Pitfall 3)."""

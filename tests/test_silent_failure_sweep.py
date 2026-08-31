@@ -289,7 +289,11 @@ def test_sqlite_store_refuses_a_newer_schema(store_name: str, tmp_path) -> None:
 
     cls = getattr(stores, store_name)
     path = str(tmp_path / f"{store_name}.db")
-    cls(path)  # create at the current version
+    # Close it: a store holds its sqlite connection open for its lifetime, and a
+    # leaked one is collected later and reported against whatever test is running
+    # then -- which is how this suite has misattributed resource warnings before.
+    created = cls(path)  # create at the current version
+    created.close()
 
     db = sqlite3.connect(path)
     db.execute(f"PRAGMA user_version = {stores._SCHEMA_VERSION + 1}")
@@ -313,7 +317,8 @@ def test_sqlite_store_stamps_the_version_constant_not_a_literal(store_name: str,
     import saprfclib.stores as stores
 
     path = str(tmp_path / f"{store_name}.db")
-    getattr(stores, store_name)(path)
+    store = getattr(stores, store_name)(path)
+    store.close()
     db = sqlite3.connect(path)
     try:
         assert db.execute("PRAGMA user_version").fetchone()[0] == stores._SCHEMA_VERSION
@@ -429,7 +434,6 @@ def test_a_missing_output_parameter_is_logged(caplog: pytest.LogCaptureFixture) 
     assert any("RESULTS" in r.getMessage() for r in caplog.records)
 
 
-
 # --------------------------------------------------------------------------- #
 # examples/09_bapi_user_create.py — the --commit path
 # --------------------------------------------------------------------------- #
@@ -503,3 +507,36 @@ def test_example_create_user_reports_a_failed_commit_as_failure() -> None:
             return {"RETURN": [{"TYPE": "A", "MESSAGE": "Update was terminated"}]}
 
     assert ex.create_user(_Conn(), "ZTEST", "pw") is False
+
+
+@pytest.mark.parametrize("store_name", ["SqliteTidStore", "SqliteUnitStore"])
+def test_sqlite_store_closes_its_connection_when_open_fails(store_name: str, tmp_path) -> None:
+    """A refused open must not leave the sqlite connection behind.
+
+    ``__init__`` opens the database before validating its schema, so raising from
+    the validation leaves the half-built object unreachable with a live handle. It
+    is finalised at some arbitrary later point and the ResourceWarning lands on
+    whichever unrelated test is running then — which is exactly how this suite
+    misattributes leaks.
+    """
+    import gc
+    import sqlite3
+    import warnings
+
+    import saprfclib.stores as stores
+
+    cls = getattr(stores, store_name)
+    path = str(tmp_path / f"{store_name}_leak.db")
+    created = cls(path)
+    created.close()
+
+    db = sqlite3.connect(path)
+    db.execute(f"PRAGMA user_version = {stores._SCHEMA_VERSION + 1}")
+    db.commit()
+    db.close()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        with pytest.raises(RuntimeError):
+            cls(path)
+        gc.collect()  # would raise ResourceWarning here if the handle leaked

@@ -106,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "the pool is busy" from "the pool is churning dead connections" into a constant.
 - The pool logs failed health checks and close errors at DEBUG rather than discarding
   them silently, so a pool binning every connection it checks no longer looks merely slow.
+- The SQLite stores close their connection when the open is refused. `__init__` opens
+  the database before validating its schema, so a rejected open left the half-built
+  object unreachable with a live handle, finalised at an arbitrary later point — the
+  resulting `ResourceWarning` lands on whichever unrelated test or code path is running
+  then.
 - The SQLite stores refuse a database written by a newer `saprfclib` instead of reading
   and writing it through the older schema they know — on a store whose purpose is
   surviving a crash intact. They also stamp `PRAGMA user_version` from `_SCHEMA_VERSION`
