@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Message-server and gateway ports are now sourced from SAP's *TCP/IP Ports of All SAP
+  Products*, not from observation alone. The documentation corrected an incomplete
+  conclusion: the `36<NN>` message-server formula applies **only** to systems installed
+  before SAP NetWeaver 7.0 with a central instance. On an SCS/ASCS layout — every modern
+  install — the port is `rdisp/msserv`, anywhere in 0–65535, with a documented default
+  of **9310**. There is no formula to apply, which is a stronger reason for having no
+  default than the one previously recorded. Each plausible constant is wrong for a
+  different layout: 3600 for a legacy central instance, 9310 for a default SCS, 3601 on
+  the system used for testing.
+- The gateway derivation `(4800 if snc else 3300) + sysnr` is confirmed twice over:
+  documented as `sapgw<NN>` = `33<NN>` and `sapgw<NN>s` = `48<NN>`, and independently
+  reported as `RFC 3300` / `RFCS 4800` by the message server's own service list. Note
+  `<NN>` there is the application server's instance number, unlike the message server's.
+- Reading `sapms<SID>` from `/etc/services` is confirmed as the intended client-side
+  mechanism rather than a convenience: the same table states "You can reassign service
+  names to an arbitrary value after installation in /etc/services".
+- The message-server HTTP interface is documented as `81<NN>` and **"Not active by
+  default"**, which is why its absence is reported as a configuration fact rather than
+  an error.
+
 - **The binary message-server frame layout is now confirmed, and it was wrong.**
   Validated against a live A4H message server by sending candidate frames and
   recording which drew a reply, which drew a specific error, and which were dropped.

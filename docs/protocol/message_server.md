@@ -8,42 +8,66 @@ see the warning below.
 
 ---
 
-## Ports are derived from the message server's instance, not the app server's
+## Ports — there is no formula for a modern system
 
-This is the first thing that goes wrong, and it fails by connecting to nothing.
+**Source:** SAP, *TCP/IP Ports of All SAP Products* (SAP Help Portal, Security
+guide). Cross-checked against a live scan of A4H on 2026-08-31.
 
-| Interface | Port | Example (A4H) |
-|-----------|------|---------------|
-| Binary (`sapms<SID>`) | `36<nn>` | 3601 |
-| HTTP | `81<nn>` | 8101 |
+The message server appears in that table **twice**, and the difference is the
+whole story:
 
-`<nn>` is the **message server's own instance number**. It is not the
-application server's system number, and nothing lets you infer one from the
-other.
+| Component | Service | Default | Range | Formula |
+|-----------|---------|---------|-------|---------|
+| Application Server ABAP | `sapmsSID` | 3600 | 3600–3699 | `36<NN>` |
+| SAP Central Services (SCS/ASCS) | `sapms<SID>` | **9310** | **0–65535** | **None** |
 
-On the A4H appliance the application server is system number 00 — gateway on
-3300, confirmed — while the message server runs as instance 01. So the message
-server is on 3601/8101 and **port 3600 refuses connections outright**. Any code
-that computes the message-server port from `sysnr` reaches a closed port on a
-completely ordinary system.
+The `36<NN>` row is annotated *"Relevant only for systems that have been
+installed prior to SAP NetWeaver 7.0 with a central instance (CI)."* The SCS row
+says *"Configure the message server port with profile parameter `rdisp/msserv`."*
 
-Live scan, 2026-08-31:
+So on any current system — an ASCS layout, which is every modern install — the
+message server port is **whatever the profile says, anywhere in the port range,
+with a documented default of 9310**. There is no formula to apply, and `36<NN>`
+describes only legacy central-instance systems.
 
-```
-3200 open   dispatcher        (app server, sysnr 00)
-3300 open   gateway           (app server, sysnr 00)
-3600 CLOSED
-3601 open   message server, binary
-3901 open   message server, internal
-8101 open   message server, HTTP
-```
+This is why `saprfclib` has no numeric default. Each candidate is wrong for a
+different layout:
 
-Pass `msserv` to override — a port (`msserv=3601`) or a service name
-(`msserv="sapmsA4H"`, looked up in `/etc/services` as the SAP tools do). An
-unknown service name raises rather than falling back to a default, because
-falling back means silently connecting somewhere else.
+- 3600 — right only for a pre-7.0 central instance
+- 9310 — the documented SCS default
+- 3601 — what the A4H test system actually uses
 
----
+`saprfclib` reads the instance from where SAP's own table points: the
+`sapms<SID>` entry in `/etc/services`. That table notes *"You can reassign
+service names to an arbitrary value after installation in `/etc/services`"*,
+which makes that file the client-side record rather than a convention. When it is
+absent, `msserv` must be supplied — a port, or the service name.
+
+### The other ports, and what confirms them
+
+| Port | Service | Formula | Status |
+|------|---------|---------|--------|
+| 3200 | Dispatcher | `sapdp<NN>` `32<NN>` | documented; observed on A4H |
+| 3300 | **Gateway (RFC)** | `sapgw<NN>` `33<NN>` | documented; the A4H message server reports `RFC 3300` |
+| 4800 | **Gateway secured (SNC)** | `sapgw<NN>s` `48<NN>` | documented; message server reports `RFCS 4800` |
+| 3900–3999 | Message server internal | `39<NN>`, `rdisp/msserv_internal` | documented; 3901 observed |
+| 8100–8199 | Message server HTTP | `81<NN>`, `ms/http_port_<n>` | documented **"Not active by default"**; 8101 observed |
+| 44400–44499 | Message server HTTPS | `444<NN>`, `ms/https_port_<n>` | documented; not enabled on A4H |
+| 3299 | SAProuter | fixed | documented |
+
+`saprfclib`'s gateway derivation — `(4800 if snc else 3300) + sysnr` — is
+confirmed by both the table and the message server's own service list. Note the
+`<NN>` there is the **application server's** instance number, unlike the message
+server's.
+
+### Why the instance numbers differ on one host
+
+`sapstartsrv` is `5<NN>13`. On A4H **both 50013 and 50113 answer**, so instances
+00 and 01 both exist — and the table confirms the reason: *"On the SAP Central
+Services (SCS and ASCS) instance the default instance is 01 making the default
+port 50113."* The application server is instance 00 and the ASCS, which hosts
+the message server, is instance 01. That is why the gateway is 3300 while the
+message server is 3601.
 
 ## HTTP interface — CONFIRMED
 

@@ -551,3 +551,50 @@ def test_unknown_service_name_is_refused_not_defaulted() -> None:
 
     with pytest.raises(ValueError, match="not in /etc/services"):
         _ms_port(None, "sapms_definitely_not_a_real_service")
+
+
+def test_no_message_server_port_formula_is_assumed() -> None:
+    """SAP documents no formula for a modern message server, so none is applied.
+
+    Source: SAP, "TCP/IP Ports of All SAP Products". The message server appears
+    twice in that table:
+
+      Application Server ABAP        sapmsSID     3600   3600-3699   36<NN>
+        "Relevant only for systems installed prior to SAP NetWeaver 7.0 with a
+         central instance (CI)."
+      SAP Central Services (SCS)     sapms<SID>   9310   0-65535     None
+        "Configure the message server port with profile parameter rdisp/msserv."
+
+    So 36<NN> covers legacy central instances only. On an ASCS system the port is
+    whatever the profile says, anywhere in the range, defaulting to 9310. Each
+    plausible constant is wrong for a different layout — 3600 for a legacy CI,
+    9310 for a default SCS, 3601 on the A4H test system — so the port is read
+    from /etc/services or required from the caller, never computed.
+    """
+    from saprfclib.connection import _ms_port
+
+    for candidate in (3600, 9310, 3601):
+        assert _ms_port("A4H", candidate) == candidate
+    with pytest.raises(ValueError, match="cannot determine"):
+        _ms_port("A4H")
+
+
+def test_gateway_ports_match_the_documented_formula() -> None:
+    """sapgw<NN> = 33<NN> and sapgw<NN>s = 48<NN>, both documented and observed.
+
+    Confirmed twice over: SAP's port table gives the formulas, and the A4H message
+    server independently reports RFC 3300 and RFCS 4800 for its sysnr-00
+    application server. Unlike the message server, <NN> here is the application
+    server's own instance number.
+    """
+    for sysnr in (0, 1, 42, 99):
+        assert 3300 + sysnr == int(f"33{sysnr:02d}")
+        assert 4800 + sysnr == int(f"48{sysnr:02d}")
+
+
+def test_message_server_http_base_matches_the_documented_range() -> None:
+    """81<NN>, range 8100-8199 — and documented as not active by default."""
+    from saprfclib.connection import _ms_http_port
+
+    assert _ms_http_port("A4H", 8101) == 8101
+    assert 8100 <= _ms_http_port("A4H", 8199) <= 8199

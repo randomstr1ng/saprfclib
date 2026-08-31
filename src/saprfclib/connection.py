@@ -4009,6 +4009,12 @@ def connect(
             read_timeout=read_timeout,
         )
 
+    # Gateway port. Confirmed by SAP's "TCP/IP Ports of All SAP Products":
+    #   Gateway          sapgw<NN>    3300   range 3300-3399   33<NN>
+    #   Gateway secured  sapgw<NN>s   4800   range 4800-4899   48<NN>
+    # <NN> is the application server's own instance number here, unlike the
+    # message server. Also confirmed live: the A4H message server reports
+    # RFC=3300 and RFCS=4800 for a sysnr-00 application server.
     port = (4800 if snc_lib is not None else 3300) + int(sysnr)
 
     # ------------------------------------------------------------------ #
@@ -4177,26 +4183,41 @@ def connect(
     return conn
 
 
-# Message-server ports are 36<nn> (binary) and 81<nn> (HTTP), where nn is the
-# MESSAGE SERVER's own instance number — not the application server's system
-# number. Confirmed by live scan 2026-08-31: on A4H the app server is sysnr 00
-# (gateway 3300, and the message server itself reports RFC=3300) while the message
-# server runs as instance 01, so it answers on 3601/8101 and 3600 refuses outright.
-# sapstartsrv on both 50013 and 50113 (5<nn>13) confirms the two instances exist.
+# Message-server ports. Source: SAP's "TCP/IP Ports of All SAP Products"
+# (help.sap.com, Security guide), cross-checked against a live scan of A4H.
 #
-# There is deliberately NO numeric default here.
+# There is deliberately NO numeric default, and the documentation is why.
 #
-# It is tempting to default to 3600 (instance 00) or, having seen this system, to
-# 3601. Both are one installation generalised to all of them: a single-instance
-# system puts the message server at 00 and an ASCS-split system at 01 or higher,
-# and nothing observable from the client distinguishes them. The previous default
-# of 3600 silently reached a closed port here; defaulting to 3601 would do the same
-# to everyone else. A wrong port is not a failure the caller can interpret.
+# The table gives the message server TWO different rows:
 #
-# So the instance number is resolved from something the system states rather than
-# guessed: the sapms<SID> entry in /etc/services, which is how SAP tooling has
-# always located it. If that is absent, the caller is asked for `msserv` instead of
-# being sent somewhere plausible.
+#   Application Server ABAP   Message server   sapmsSID    3600   36<NN>
+#       "Relevant only for systems that have been installed prior to
+#        SAP NetWeaver 7.0 with a central instance (CI)."
+#
+#   SAP Central Services (SCS)   Message server port   sapms<SID>   9310
+#       range 0-65535, formula: None
+#       "Configure the message server port with profile parameter rdisp/msserv."
+#
+# So the 36<NN> formula applies only to pre-NetWeaver-7.0 central-instance
+# systems. On anything modern — an ASCS/SCS layout, which is every current
+# install — the port is whatever rdisp/msserv says, over the whole port range,
+# with a documented default of 9310. There is no formula to apply.
+#
+# That makes any numeric default wrong in a different way for each layout: 3600
+# for a legacy CI, 9310 for a default SCS, and on the A4H test system 3601 (a
+# 36<NN> port with NN=01, since sapstartsrv answers on both 50013 and 50113 —
+# 5<NN>13 — so instances 00 and 01 both exist and the message server is on 01).
+# A wrong port is not a failure the caller can interpret, so nothing is guessed.
+#
+# The instance number is instead read from where the documentation says it lives:
+# the sapms<SID> entry in /etc/services. The same table notes "You can reassign
+# service names to an arbitrary value after installation in /etc/services", which
+# makes that file the client-side source of record rather than a convention. When
+# it is absent, the caller is asked for `msserv`.
+#
+# The HTTP interface is 81<NN> (range 8100-8199, profile ms/http_port_<n>) and is
+# documented as "Not active by default" — which is why the HTTP resolver reports
+# its absence as a configuration fact rather than an error.
 _MS_BINARY_BASE = 3600
 _MS_HTTP_BASE = 8100
 
