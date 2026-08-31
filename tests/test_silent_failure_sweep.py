@@ -428,3 +428,78 @@ def test_a_missing_output_parameter_is_logged(caplog: pytest.LogCaptureFixture) 
         server._build_response(desc, {})
     assert any("RESULTS" in r.getMessage() for r in caplog.records)
 
+
+
+# --------------------------------------------------------------------------- #
+# examples/09_bapi_user_create.py — the --commit path
+# --------------------------------------------------------------------------- #
+
+
+def _load_example(name: str) -> object:
+    """Import an example module by path (examples/ is not a package)."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parent.parent / "examples" / name
+    spec = importlib.util.spec_from_file_location(f"_example_{name[:2]}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_example_commit_detects_a_failure_reported_as_a_table() -> None:
+    """A failed commit must be detected whichever shape RETURN arrives in.
+
+    The check was ``isinstance(commit_return, dict)``. On a system whose
+    BAPI_TRANSACTION_COMMIT answers with a RETURN *table*, an error row fell through
+    it and the script printed "committed — user created" for a user that was not.
+    """
+    ex = _load_example("09_bapi_user_create.py")
+
+    error_row = {"TYPE": "E", "MESSAGE": "Update was terminated", "ID": "RW", "NUMBER": "609"}
+    assert ex.rows_failed(ex.as_return_rows(error_row)) is True  # structure
+    assert ex.rows_failed(ex.as_return_rows([error_row])) is True  # table
+    assert ex.rows_failed(ex.as_return_rows([{"TYPE": "S", "MESSAGE": "ok"}])) is False
+    assert ex.rows_failed(ex.as_return_rows(None)) is False  # absent RETURN = success
+    assert ex.rows_failed(ex.as_return_rows([])) is False
+
+
+def test_example_refuses_an_unrecognised_return_shape() -> None:
+    """Claiming success from a shape we did not understand is the failure mode."""
+    ex = _load_example("09_bapi_user_create.py")
+    with pytest.raises(TypeError, match="unexpected RETURN shape"):
+        ex.as_return_rows("E")
+    with pytest.raises(TypeError, match="non-row entry"):
+        ex.as_return_rows([{"TYPE": "S"}, "not a row"])
+
+
+def test_example_create_user_does_not_commit_after_a_bapi_error() -> None:
+    """The staged-then-commit contract: an error row must stop the commit."""
+    ex = _load_example("09_bapi_user_create.py")
+    calls: list[str] = []
+
+    class _Conn:
+        def call(self, func: str, **kwargs: object) -> dict:
+            calls.append(func)
+            if func == "BAPI_USER_CREATE1":
+                return {
+                    "RETURN": [{"TYPE": "E", "MESSAGE": "User exists", "ID": "01", "NUMBER": "1"}]
+                }
+            return {"RETURN": {}}
+
+    assert ex.create_user(_Conn(), "ZTEST", "pw") is False
+    assert "BAPI_TRANSACTION_COMMIT" not in calls
+
+
+def test_example_create_user_reports_a_failed_commit_as_failure() -> None:
+    ex = _load_example("09_bapi_user_create.py")
+
+    class _Conn:
+        def call(self, func: str, **kwargs: object) -> dict:
+            if func == "BAPI_USER_CREATE1":
+                return {"RETURN": [{"TYPE": "S", "MESSAGE": "staged"}]}
+            # Table-shaped commit failure — the case that used to read as success.
+            return {"RETURN": [{"TYPE": "A", "MESSAGE": "Update was terminated"}]}
+
+    assert ex.create_user(_Conn(), "ZTEST", "pw") is False

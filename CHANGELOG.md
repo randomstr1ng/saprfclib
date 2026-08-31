@@ -113,6 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would have created a new schema and recorded it as the old version.
 - The server logs, at DEBUG, an output parameter its handler did not supply. Skipping it
   is correct — outputs are optional — but the client simply saw the key missing.
+- `examples/09_bapi_user_create.py` no longer reports a failed commit as success. The
+  check inspected `RETURN` only as a structure, so on a system whose
+  `BAPI_TRANSACTION_COMMIT` answers with a table, an error row fell through it and the
+  script printed that a user had been created when it had not. Both shapes are handled,
+  and a shape it does not recognise raises rather than being read as success.
 
 
 ## [0.1.2] - 2026-08-28
