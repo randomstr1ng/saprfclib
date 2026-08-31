@@ -58,9 +58,12 @@ _HOST_MARKER = "H"
 _SERVICE_MARKER = "S"
 _PASSWORD_MARKER = "P"
 
-# NI_ROUTE control marker. The 8-byte NI control-message family (framing.md
-# lines 92-102) includes NI_RTERR / NI_ROUTE; the exact NI_ROUTE entry layout
-# below is [ASSUMED].
+# NI_ROUTE control marker.
+#
+# The NI_ROUTE payload built below is CONFIRMED — live capture 2026-06-27, golden
+# fixture tests/golden/router/ni_route_payload.bin, byte-exact. (An older comment
+# here labelled it [ASSUMED]; that predates the capture and contradicted
+# build_ni_route's own docstring.)
 _NI_ROUTE_MARKER = b"NI_ROUTE"
 
 
@@ -161,6 +164,22 @@ def build_ni_route(hops: list[RouteHop], dest_host: str, dest_service: str) -> b
     """
     if not hops:
         raise ValueError("build_ni_route: at least one hop is required")
+
+    # A /P/ password is parsed into RouteHop.password but there is no captured
+    # evidence of where it goes in the frame, so it cannot be sent. Connecting
+    # without it is not a graceful degradation: the router refuses the route and
+    # the caller is left with a rejection they have no way to attribute to the
+    # password they carefully supplied. Fail here instead, naming the gap.
+    protected = [h.host for h in hops if h.password]
+    if protected:
+        raise NotImplementedError(
+            f"SAProuter hop password (/P/) is not implemented, and hop(s) "
+            f"{', '.join(protected)} specify one. The route-string parser reads the "
+            f"password but its position in the NI_ROUTE frame has never been "
+            f"captured, so sending the route without it would simply be refused by "
+            f"the router with no indication why. See docs/protocol/message_server.md "
+            f"for what a capture needs to contain."
+        )
 
     def _null_term(s: str) -> bytes:
         return s.encode("ascii") + b"\x00"

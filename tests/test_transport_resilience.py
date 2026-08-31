@@ -283,3 +283,79 @@ def test_a_bare_connection_still_gets_its_own_cache() -> None:
         Connection.__init__(conn, None)  # type: ignore[arg-type]
     assert a._cache is not b._cache
     assert a._anon_cache_key is None
+
+
+# --------------------------------------------------------------------------- #
+# SAProuter — refusals must be reported, and unsendable routes must not be sent
+# --------------------------------------------------------------------------- #
+
+
+def test_a_router_refusal_is_reported_at_the_ni_layer() -> None:
+    """NI_RTERR means the router will not carry the route.
+
+    Without this check the refusal reaches the session as if it were the frame
+    the handshake was waiting for, and is misparsed — so a rejected route
+    surfaced as a confusing protocol error several steps later instead of as
+    "the router said no". NI control messages are the NI layer's business, which
+    is why the check lives in the transport.
+    """
+    from saprfclib.exceptions import SapRfcError
+    from saprfclib.transport import raise_for_ni_error
+
+    with pytest.raises(SapRfcError, match="NI_RTERR"):
+        raise_for_ni_error(b"NI_RTERR\x00")
+    with pytest.raises(SapRfcError, match="permission table"):
+        raise_for_ni_error(b"NI_RTERR\x00")
+
+
+def test_router_refusal_surfaces_through_recv_message() -> None:
+    """It must fire on the real read path, not only when called directly."""
+    from saprfclib.exceptions import SapRfcError
+    from saprfclib.transport import Transport, build_ni_frame
+
+    a, b = socket.socketpair()
+    try:
+        b.sendall(build_ni_frame(b"NI_RTERR\x00route to host denied"))
+        with pytest.raises(SapRfcError, match="route to host denied"):
+            Transport(a).recv_message()
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ordinary_frames_are_not_mistaken_for_ni_errors() -> None:
+    """No false positives: a normal payload must pass straight through."""
+    from saprfclib.transport import Transport, build_ni_frame
+
+    a, b = socket.socketpair()
+    try:
+        payload = b"**MESSAGE**\x00" + bytes(98)
+        b.sendall(build_ni_frame(payload))
+        assert Transport(a).recv_message() == payload
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_route_password_is_refused_rather_than_dropped() -> None:
+    """/P/ is parsed but cannot be transmitted, so the route must not be sent.
+
+    Sending it without the password is not graceful degradation: the router
+    refuses, and the caller is left with a rejection they cannot attribute to the
+    password they supplied. The position of the password in the NI_ROUTE frame
+    has never been captured.
+    """
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    hops = parse_route_string("/H/router.example.com/S/3299/P/secret")
+    assert hops[0].password == "secret"
+    with pytest.raises(NotImplementedError, match="hop password"):
+        build_ni_route(hops, "10.0.0.1", "3300")
+
+
+def test_a_route_without_a_password_still_builds() -> None:
+    """The guard must not block the ordinary case."""
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    hops = parse_route_string("/H/router.example.com/S/3299")
+    assert build_ni_route(hops, "10.0.0.1", "3300").startswith(b"NI_ROUTE\x00")

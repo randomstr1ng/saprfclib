@@ -32,6 +32,8 @@ import socket
 import struct
 from typing import cast
 
+from saprfclib.exceptions import SapRfcError
+
 __all__ = [
     "Transport",
     "build_ni_frame",
@@ -39,6 +41,7 @@ __all__ = [
     "connect_tcp",
     "AsyncTransport",
     "connect_tcp_async",
+    "raise_for_ni_error",
     "enable_keepalive",
     "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_READ_TIMEOUT",
@@ -96,6 +99,38 @@ def enable_keepalive(sock: socket.socket) -> None:
 # framing.md lines 355-368 reference implementation: 4-byte big-endian uint32.
 _NI_HEADER = struct.Struct(">I")
 _NI_HEADER_SIZE = _NI_HEADER.size  # 4
+
+
+# NI control messages are 8-byte ASCII payloads the NI layer handles itself,
+# before anything reaches the RFC layer (docs/protocol/framing.md). NI_RTERR is
+# how a SAProuter reports that it will not carry the route — wrong password,
+# route denied by the router's permission table, or the target unreachable.
+#
+# Nothing here claims to know what follows the marker, and nothing needs to: the
+# marker alone identifies the frame as a router refusal. Without this check that
+# frame reaches the session as if it were the NI version response and is
+# misparsed, so a rejected route surfaces as a confusing protocol error several
+# steps later instead of as "the router said no".
+_NI_ERROR_MARKERS: dict[bytes, str] = {
+    b"NI_RTERR": (
+        "the SAProuter refused the route. Common causes: the route is not "
+        "permitted by the router's permission table, a hop password is wrong or "
+        "missing, or the target host/port is unreachable from the router"
+    ),
+}
+
+
+def raise_for_ni_error(payload: bytes) -> None:
+    """Raise if ``payload`` is an NI-layer error control message.
+
+    Called for every inbound frame, so a router refusal is reported where it
+    happens rather than as a malformed RFC frame later.
+    """
+    for marker, explanation in _NI_ERROR_MARKERS.items():
+        if payload.startswith(marker):
+            detail = payload[len(marker) :].rstrip(b"\x00").decode("latin-1", "replace")
+            suffix = f" (router said: {detail!r})" if detail.strip() else ""
+            raise SapRfcError(f"{marker.decode()}: {explanation}{suffix}")
 
 
 def build_ni_frame(payload: bytes) -> bytes:
@@ -158,7 +193,9 @@ class Transport:
             raise ValueError(
                 f"NI frame length {length} exceeds cap {self._MAX_FRAME_BYTES} (DoS guard)"
             )
-        return _recv_exactly(self._sock, length)
+        payload = _recv_exactly(self._sock, length)
+        raise_for_ni_error(payload)
+        return payload
 
     @property
     def local_address(self) -> tuple[str, int]:
@@ -265,7 +302,9 @@ class AsyncTransport:
             raise ValueError(
                 f"NI frame length {length} exceeds cap {self._MAX_FRAME_BYTES} (DoS guard)"
             )
-        return await self._reader.readexactly(length)
+        payload = await self._reader.readexactly(length)
+        raise_for_ni_error(payload)
+        return payload
 
     @property
     def local_address(self) -> tuple[str, int]:

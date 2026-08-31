@@ -26,6 +26,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A SAProuter refusal is now reported instead of being misparsed.** After sending
+  `NI_ROUTE` the router's answer was never inspected, so an `NI_RTERR` — the router
+  declining to carry the route, whether from its permission table, a bad hop password
+  or an unreachable target — reached the session as though it were the frame the
+  handshake was waiting for. The rejection then surfaced several steps later as a
+  confusing protocol error. NI control messages are the NI layer's business, so the
+  check lives in the transport and covers every inbound frame on both the sync and
+  async paths.
+- **A route password is refused rather than silently dropped.** `/P/` was parsed into
+  `RouteHop.password` and then never transmitted, so a password-protected route was
+  sent without its password and the router simply refused it — leaving the caller a
+  rejection they had no way to connect to the password they supplied. Where the
+  password sits in the `NI_ROUTE` frame has never been captured, so `build_ni_route`
+  now raises `NotImplementedError` naming the gap.
+- Removed a stale `[ASSUMED]` label on the `NI_ROUTE` payload layout. It predated the
+  2026-06-27 capture and contradicted `build_ni_route`'s own docstring and its
+  byte-exact golden fixture.
+
 - **The SAPMS binary protocol works.** Captured from SAP GUI performing a group logon,
   then reproduced against the live message server by this library, which answered
   `errorno 0` and returned the real server list. `MessageServerClient.resolve_full`
