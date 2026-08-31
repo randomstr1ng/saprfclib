@@ -282,37 +282,53 @@ Observed while probing which targets the test router permits: `3300` and `3200`
 were accepted for the configured host and `22` was refused, so the permission
 table is per host **and** port.
 
-### Still open: hop passwords
+### Hop passwords — CONFIRMED
 
-`/P/<password>` is parsed into `RouteHop.password` and cannot be sent — its
-position in the `NI_ROUTE` frame has never been captured. `build_ni_route` raises
-rather than sending a route that will simply be refused, since a refusal gives
-the caller no way to connect the failure to the password they supplied.
-
-What has been ruled out, by asking a live router (2026-08-31). With a
-password-protected rule active, five placements were tried and every one was
-rejected with:
+A route entry is **three NUL-terminated fields**: host, service, password. An
+entry with no password still ends with the empty password's NUL.
 
 ```
-NiRRouteRepl: invalid route received   (rc -93, "internal error")
+NI_ROUTE\0            9
+talk_mode  0x02       1
+0x28                  1
+route_version 0x02    1
+hop_count             4 BE
+total_data_length     4 BE   (sum of entry data + destination data)
+per hop:
+    entry_length      4 BE
+    host\0 service\0 password\0
+destination (no length prefix):
+    host\0 service\0 \0
 ```
 
-- password appended to the hop entry, NUL-terminated
-- password appended to the hop entry, not terminated
-- password appended as a fixed 6-byte field
-- password appended to the destination data
-- host/service/password all NUL-terminated instead of the 6-byte service field
+Captured from `niping` sending a password-protected route, sanitised into
+`tests/golden/router/ni_route_password_payload.bin`:
 
-The control — the identical frame with no password — is rejected cleanly with
-`route permission denied`, which is the router *parsing* the route and then
-declining it. So the password does not simply extend an entry: appending
-anything makes the route unparseable, and the layout differs structurally.
+```
+entry_length 37   b"router.example.com\0" b"3299\0" b"s3cr3tp4s\0"
+destination       b"192.168.88.7\0" b"3300\0" b"\0"
+```
 
-That is where guessing stops being productive. To close it, capture the frame a
-real client sends through a password-protected hop and diff it against
-`ni_route_payload.bin`.
+`build_ni_route` reproduces both that frame and the unprotected
+`ni_route_payload.bin` byte for byte.
 
-Also observed: `niping` with a `/P/` route gets **no reply at all** from the
-router, where a passwordless route to the same target is answered immediately.
-Whether that means a password route uses a follow-up exchange rather than a
-single frame is exactly what the capture would settle.
+#### The old implementation was right by coincidence
+
+It padded the service into a fixed 6-byte NUL-filled field. For a four-character
+port that is byte-identical to the correct form:
+
+```
+"3299" + NUL + NUL      ==      "3299\0"  +  "\0"
+   fixed 6-byte field           service     empty password
+```
+
+So every numeric port produced a valid frame and the mistake stayed invisible.
+It would have appeared the moment anyone used a service *name*: `sapgw00` is
+seven characters, truncated to `sapgw0`, and the frame malformed. Five attempts
+to append the password to that layout were all rejected by a live router with
+`NiRRouteRepl: invalid route received` — the structure was wrong, not the
+position.
+
+The lesson worth keeping: a golden fixture proves the bytes match for the case it
+captures. It does not prove the *reasoning* behind them is right, and a
+coincidence at one input length can survive a byte-exact test indefinitely.

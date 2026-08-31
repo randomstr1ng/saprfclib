@@ -348,20 +348,20 @@ def test_ordinary_frames_are_not_mistaken_for_ni_errors() -> None:
         b.close()
 
 
-def test_a_route_password_is_refused_rather_than_dropped() -> None:
-    """/P/ is parsed but cannot be transmitted, so the route must not be sent.
+def test_a_route_password_is_transmitted() -> None:
+    """/P/ now reaches the wire; it used to be parsed and then dropped.
 
-    Sending it without the password is not graceful degradation: the router
-    refuses, and the caller is left with a rejection they cannot attribute to the
-    password they supplied. The position of the password in the NI_ROUTE frame
-    has never been captured.
+    This asserted NotImplementedError when written, which was right while the
+    password's position in the frame was unknown. A capture of niping sending a
+    password-protected route settled it the same day: it is a third
+    NUL-terminated field in the hop entry, after host and service.
     """
     from saprfclib.router import build_ni_route, parse_route_string
 
     hops = parse_route_string("/H/router.example.com/S/3299/P/secret")
     assert hops[0].password == "secret"
-    with pytest.raises(NotImplementedError, match="hop password"):
-        build_ni_route(hops, "10.0.0.1", "3300")
+    frame = build_ni_route(hops, "10.0.0.1", "3300")
+    assert b"router.example.com\x003299\x00secret\x00" in frame
 
 
 def test_a_route_without_a_password_still_builds() -> None:

@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SAProuter hop passwords (`/P/`) are implemented.** A route entry is three
+  NUL-terminated fields — host, service, password — and an entry without a password
+  still ends with the empty password's NUL. Confirmed by capturing `niping` sending a
+  password-protected route; `build_ni_route` now reproduces that frame and the
+  unprotected one byte for byte. `/P/` was previously parsed and then discarded.
+- **The route-entry layout was wrong, and correct only by coincidence.** The service
+  was padded into a fixed 6-byte NUL-filled field, which for a four-character port is
+  byte-identical to the real form (`"3299" + NUL + NUL` equals `"3299\0"` followed by
+  the empty password's `"\0"`). Every numeric port therefore produced a valid frame and
+  the mistake stayed invisible — including to a byte-exact golden test. It would have
+  surfaced the moment anyone used a service *name*: `sapgw00` is seven characters,
+  truncated to `sapgw0`, malforming the frame.
+
 - **`connect(saprouter=...)` could not work, and now does.** A SAProuter answers an
   accepted `NI_ROUTE` with `NI_PONG\0` before it starts forwarding. That frame was
   never read, so it sat at the head of the stream and the handshake's first read

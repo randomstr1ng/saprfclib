@@ -654,3 +654,55 @@ def test_a_binary_reply_names_the_right_parser() -> None:
     binary_reply = (SAPMS_DIR / "sapms_server_list.bin").read_bytes()
     with pytest.raises(ValueError, match="parse_sapms_server_list"):
         parse_ms_list_reply(binary_reply)
+
+
+def test_route_entries_are_three_null_terminated_fields() -> None:
+    """host\\0 service\\0 password\\0 — every field terminated, none padded.
+
+    Confirmed by two captures that this builder now reproduces byte for byte: a
+    password-protected route sent by niping (ni_route_password_payload.bin) and
+    the unprotected route in ni_route_payload.bin. An entry with no password
+    still ends with the empty password's NUL.
+    """
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    captured = (SAPMS_DIR / "ni_route_password_payload.bin").read_bytes()
+    ours = build_ni_route(
+        parse_route_string("/H/saprouter.example.com/S/3299/P/s3cr3tp4s"),
+        "192.168.88.7",
+        "3300",
+    )
+    assert ours == captured, "must match what SAP's own client sends"
+    assert b"saprouter.example.com\x003299\x00s3cr3tp4s\x00" in ours
+    # The destination carries an empty password: a bare trailing NUL.
+    assert ours.endswith(b"192.168.88.7\x003300\x00\x00")
+
+
+def test_the_unprotected_route_still_matches_its_fixture() -> None:
+    """The layout change must not disturb the passwordless form."""
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    captured = (SAPMS_DIR / "ni_route_payload.bin").read_bytes()
+    ours = build_ni_route(
+        parse_route_string("/H/saprouter.example.com/S/3299"), "192.168.88.7", "3300"
+    )
+    assert ours == captured
+    assert b"saprouter.example.com\x003299\x00\x00" in ours
+
+
+def test_a_service_name_is_no_longer_truncated() -> None:
+    """The old fixed 6-byte service field was right only by coincidence.
+
+    For a four-character port, "3299" plus two pad NULs happens to be identical
+    to "3299\\0" followed by the empty password's "\\0" — so every numeric port
+    worked and hid the bug. A service NAME is longer: "sapgw00" is seven
+    characters and was silently truncated to "sapgw0", malforming the frame.
+    """
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    ours = build_ni_route(
+        parse_route_string("/H/router.example.com/S/sapgw00"), "app.example.com", "sapgw01"
+    )
+    assert b"sapgw00\x00" in ours, "service name must survive intact"
+    assert b"sapgw01\x00" in ours
+    assert b"sapgw0\x00" not in ours.replace(b"sapgw00\x00", b"").replace(b"sapgw01\x00", b"")

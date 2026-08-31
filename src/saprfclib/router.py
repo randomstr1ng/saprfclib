@@ -208,36 +208,32 @@ def build_ni_route(hops: list[RouteHop], dest_host: str, dest_service: str) -> b
     if not hops:
         raise ValueError("build_ni_route: at least one hop is required")
 
-    # A /P/ password is parsed into RouteHop.password but there is no captured
-    # evidence of where it goes in the frame, so it cannot be sent. Connecting
-    # without it is not a graceful degradation: the router refuses the route and
-    # the caller is left with a rejection they have no way to attribute to the
-    # password they carefully supplied. Fail here instead, naming the gap.
-    protected = [h.host for h in hops if h.password]
-    if protected:
-        raise NotImplementedError(
-            f"SAProuter hop password (/P/) is not implemented, and hop(s) "
-            f"{', '.join(protected)} specify one. The route-string parser reads the "
-            f"password but its position in the NI_ROUTE frame has never been "
-            f"captured, so sending the route without it would simply be refused by "
-            f"the router with no indication why. See docs/protocol/message_server.md "
-            f"for what a capture needs to contain."
-        )
-
     def _null_term(s: str) -> bytes:
         return s.encode("ascii") + b"\x00"
 
-    def _pad_service(s: str) -> bytes:
-        b = s.encode("ascii")[:6]
-        return b.ljust(6, b"\x00")
+    # Every field in a route entry is NUL-TERMINATED, and each entry carries three
+    # of them: host, service, password. An entry with no password still ends with
+    # the empty password's NUL.
+    #
+    # Confirmed by two captures: a password-protected route sent by niping
+    #     b"lab.example.com\0" b"3299\0" b"R0uteP4ss\0"      (entry_length 37)
+    # and the unprotected route in tests/golden/router/ni_route_payload.bin
+    #     b"saprouter.example.com\0" b"3299\0" b"\0"          (entry_length 28)
+    #
+    # This used to pad the service into a fixed 6-byte NUL-filled field, which
+    # produced the correct bytes only by coincidence: for a four-character port
+    # "3299" plus two pad NULs is byte-identical to "3299\0" followed by the
+    # empty password's "\0". The bug was invisible for every numeric port and
+    # would have appeared the moment anyone used a service NAME — "sapgw00" is
+    # seven characters, so it was truncated to "sapgw0" and the frame malformed.
+    def _entry(host: str, service: str, password: str = "") -> bytes:
+        return _null_term(host) + _null_term(service) + _null_term(password)
 
-    hop_entries: list[tuple[bytes, bytes]] = [
-        (_null_term(h.host), _pad_service(h.service)) for h in hops
-    ]
-    dest_data = _null_term(dest_host) + _pad_service(dest_service)
+    hop_entries: list[bytes] = [_entry(h.host, h.service, h.password) for h in hops]
+    dest_data = _entry(dest_host, dest_service)
 
     # total_data_length excludes the 4-byte entry_length fields.
-    total_data = sum(len(hb) + len(sb) for hb, sb in hop_entries) + len(dest_data)
+    total_data = sum(len(e) for e in hop_entries) + len(dest_data)
 
     out = bytearray()
     out += b"NI_ROUTE\x00"  # 9 bytes, null-terminated
@@ -246,10 +242,9 @@ def build_ni_route(hops: list[RouteHop], dest_host: str, dest_service: str) -> b
     out += bytes([0x02])  # route_version
     out += struct.pack(">I", len(hops))  # hop_count
     out += struct.pack(">I", total_data)  # total_data_length
-    for hb, sb in hop_entries:
-        entry_data = hb + sb
-        out += struct.pack(">I", len(entry_data))  # entry_length
-        out += entry_data
+    for entry in hop_entries:
+        out += struct.pack(">I", len(entry))  # entry_length
+        out += entry
     out += dest_data
     return bytes(out)
 
