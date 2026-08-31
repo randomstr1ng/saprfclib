@@ -1,0 +1,47 @@
+{
+  "message_type": "CPIC_LOGON_ERROR_RESPONSE",
+  "capture_source": "live capture 2026-08-28; SAP S/4HANA 2023 kernel 793 release 758. Reply to an RFC_PING invoke sent after the gateway handshake but with NO logon frame at all. Sanitised: GW conversation handle overwritten, byte length preserved. No NI length prefix.",
+  "evidence": "byte-identical replies were produced by three separate attempts - no logon frame, logon with user/password omitted, and logon with user/password empty - while an authenticated logon on the same system succeeded",
+  "ni_header_length": 0,
+  "notes": [
+    "The body is EBCDIC, not TLV. A reader walking it as TLV finds nothing usable, which is why an unauthenticated attempt used to surface as 'the response is not a readable RFC message'.",
+    "Decoded with cp500 the 97-byte body reads 'FREE 1 00024error during logon'. The conversation is refused below the RFC layer, before any function module is considered - so RFC_PING, RFC_SYSTEM_INFO and SAP_RFC_SYSTEM_INFO are equally unreachable on this release; none of them is callable pre-authentication.",
+    "Not parsed into fields. One capture is not enough to claim the layout - what 'FREE' and the two numbers denote is unconfirmed - so only the message text is surfaced.",
+    "Distinct from _COM_HEAD, the EBCDIC 'RFC000000000' that prefixes a client logon frame in the other direction.",
+    "The trailing padding is ASCII 0x20 rather than EBCDIC 0x40, so it must be stripped before decoding or the printable-ratio check rejects the frame."
+  ],
+  "expected_parse": {
+    "raises": "CommunicationError",
+    "decoded_text": "FREE 1 00024error during logon",
+    "is_tlv": false,
+    "encoding": "cp500 (EBCDIC)",
+    "body_length": 97,
+    "total_length": 177
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    },
+    {
+      "offset": 80,
+      "length": 4,
+      "name": "cpic_state",
+      "value": "FREE",
+      "type": "variable",
+      "note": "EBCDIC; meaning unconfirmed"
+    }
+  ]
+}

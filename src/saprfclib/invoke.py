@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import struct
 from collections.abc import Iterator
 from typing import Any
@@ -785,6 +786,49 @@ def parse_gateway_error(payload: bytes) -> str | None:
     return " | ".join(parts) if parts else payload.decode("utf-8", "replace")[:200]
 
 
+_CPIC_PRINTABLE_RATIO = 0.7  # below this, the EBCDIC reading is not text
+
+
+def parse_cpic_error(payload: bytes) -> str | None:
+    """Return the text of a CPIC-layer error frame, if this payload is one.
+
+    When the conversation fails below the RFC layer the peer answers in EBCDIC
+    rather than TLV. Observed live (kernel 793) for every call attempted without a
+    completed logon — no logon frame at all, credentials omitted, and credentials
+    empty all produced the identical 97-byte body::
+
+        c6 d9 c5 c5 40 40 40 40  f1 40 00 00  f0 f0 f0 f2 f4  85 99 99 96 99 ...
+        F  R  E  E  (spaces)     1     ...    0  0  0  2  4   e  r  r  o  r  ...
+
+    decoding to ``FREE 1 00024error during logon``.
+
+    Deliberately not parsed into fields. One capture is not enough to claim the
+    layout — what "FREE" and the numbers mean is unconfirmed — but the message text
+    is plainly useful, and surfacing it beats reporting an unreadable response.
+    Distinct from ``_COM_HEAD``, the EBCDIC "RFC000000000" that prefixes a logon
+    frame in the other direction.
+
+    Returns None for anything that does not read as EBCDIC text, so a genuine TLV
+    frame is never mistaken for one; verified against every golden response fixture.
+    """
+    if not payload:
+        return None
+    raw = payload.rstrip(b"\x00\x20\x40")  # NUL, ASCII space, EBCDIC space
+    if not raw:
+        return None
+    try:
+        text = raw.decode("cp500")
+    except (UnicodeDecodeError, LookupError):
+        return None
+    printable = sum(1 for ch in text if ch.isprintable())
+    if printable / len(text) < _CPIC_PRINTABLE_RATIO:
+        return None
+    words = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    if not words or not re.search(r"[A-Za-z]{4,}", words):
+        return None
+    return words
+
+
 def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -> None:
     """Raise the typed error an RFC response carries, if it carries one.
 
@@ -814,8 +858,14 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
         try:
             tags = _parse_tlv_stream(resp)
         except ValueError as exc:
-            # Not an RFC response at all. Report that, rather than the tag and length
-            # read out of whatever the bytes actually were.
+            # Not an RFC response at all. Before reporting the tag and length read
+            # out of whatever the bytes actually were, see whether the peer answered
+            # below the RFC layer — a CPIC error frame is EBCDIC, not TLV.
+            cpic = parse_cpic_error(resp)
+            if cpic is not None:
+                raise CommunicationError(
+                    f"the connection failed below the RFC layer: {cpic}"
+                ) from exc
             preview = resp[:40].decode("utf-8", "replace")
             raise CommunicationError(
                 f"the response is not a readable RFC message ({len(resp)} bytes, "

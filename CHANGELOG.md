@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python 3.14 is supported and tested. Added to the CI matrix and the package
   classifiers; the suite passes under `-W error` on 3.14, including with random test
   ordering.
+- Connections may be opened without credentials. Passing neither `user` nor `passwd`
+  (and no `snc_lib`) omits the user and password records from the logon frame rather
+  than sending empty ones — an empty password is still a password attempt as far as
+  the server is concerned, and repeated attempts against a real account name count
+  towards lockout. Supplying exactly one of the two raises `ValueError`, since that is
+  a missing setting rather than a request to connect anonymously. WebSocket RFC
+  requires credentials and says so, because they travel on the HTTP upgrade.
+- CPIC-layer failures are decoded. When a conversation is refused below the RFC layer
+  the peer answers in EBCDIC rather than TLV; that used to surface as "the response is
+  not a readable RFC message". It now reports the message, e.g.
+  `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
 ### Fixed
 

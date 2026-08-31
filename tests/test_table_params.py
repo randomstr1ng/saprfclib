@@ -1360,3 +1360,113 @@ def test_xml_rows_are_not_blank_padded() -> None:
     columns = rows[0]["LINE"].split("|")
     assert columns[1] == "FL"  # not 'FL' + 18 spaces
     assert all(c == c.rstrip() for c in columns[:3])
+
+
+# --------------------------------------------------------------------------- #
+# CPIC-layer refusal and anonymous connections
+# --------------------------------------------------------------------------- #
+
+
+def test_cpic_error_frame_is_decoded_not_reported_as_garbage() -> None:
+    """A refusal below the RFC layer arrives in EBCDIC, not TLV.
+
+    Source: tests/golden/framing/cpic_logon_error_response.bin — the reply to an
+    RFC_PING sent with no logon frame at all on kernel 793.
+    """
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    body = (GOLDEN / "cpic_logon_error_response.bin").read_bytes()[80:]
+    with pytest.raises(CommunicationError, match="below the RFC layer") as excinfo:
+        raise_for_rfc_error(body)
+    assert "error during logon" in str(excinfo.value)
+
+
+def test_cpic_detector_rejects_genuine_tlv_frames() -> None:
+    """No false positives: a real response must never read as an EBCDIC error."""
+    from saprfclib.invoke import parse_cpic_error
+
+    for name in (
+        "rfcping_response",
+        "rfc_read_table_response",
+        "gfi_fu_not_found_response",
+        "server_response",
+        "basxml_et_data_multirow_response",
+    ):
+        raw = (GOLDEN / f"{name}.bin").read_bytes()
+        if len(raw) > 4 and struct.unpack_from(">I", raw, 0)[0] == len(raw) - 4:
+            raw = raw[4:]
+        assert parse_cpic_error(raw[80:]) is None, name
+
+
+def test_cpic_padding_is_ascii_not_ebcdic() -> None:
+    """The trailing padding is 0x20, so it must be stripped before decoding.
+
+    Left in place it drags the printable ratio below the threshold and the frame is
+    rejected as non-text — the detector would miss the very case it exists for.
+    """
+    body = (GOLDEN / "cpic_logon_error_response.bin").read_bytes()[80:]
+    assert body.endswith(b"\x20")
+    assert b"\x40" in body[:16]  # EBCDIC spaces inside the message itself
+
+
+def test_logon_omits_credential_records_when_none_given() -> None:
+    """Anonymous means the records are absent, not empty.
+
+    An empty password is still a password attempt to the server, and repeated
+    attempts against a real account name count towards lockout. Omitting the fields
+    cannot.
+    """
+    from saprfclib.connection import Connection
+
+    tlv = Connection._build_logon_request(client="001", user=None, passwd=None, seed=1)
+    tags = {tag for tag, _ in _walk_tlv(tlv)}
+    assert 0x0111 not in tags  # user
+    assert 0x0117 not in tags  # password
+    assert 0x0114 in tags  # client is still sent
+
+
+def test_logon_still_carries_credentials_when_given() -> None:
+    from saprfclib.connection import Connection
+
+    tlv = Connection._build_logon_request(client="001", user="DEVELOPER", passwd="secret", seed=1)
+    tags = {tag for tag, _ in _walk_tlv(tlv)}
+    assert 0x0111 in tags and 0x0117 in tags
+
+
+def test_partial_credentials_are_rejected() -> None:
+    """One of the two missing is a mistake, not a request to go anonymous."""
+    from saprfclib.connection import _resolve_credentials
+
+    with pytest.raises(ValueError, match="passwd is missing"):
+        _resolve_credentials("DEVELOPER", None, snc_lib=None, ashost="h")
+    with pytest.raises(ValueError, match="user is missing"):
+        _resolve_credentials(None, "secret", snc_lib=None, ashost="h")
+
+
+def test_no_credentials_is_anonymous_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """Both absent is allowed, and said out loud so it is never a silent surprise."""
+    from saprfclib.connection import _resolve_credentials
+
+    with caplog.at_level(logging.WARNING, logger="saprfclib.connection"):
+        assert _resolve_credentials(None, None, snc_lib=None, ashost="h") == (None, None)
+    assert any("without credentials" in r.getMessage() for r in caplog.records)
+
+
+def test_snc_connections_are_left_alone() -> None:
+    """SNC carries its own credentials, so the policy must not touch them."""
+    from saprfclib.connection import _resolve_credentials
+
+    assert _resolve_credentials(None, None, snc_lib="/x/libsnc.so", ashost="h") == (None, None)
+    assert _resolve_credentials("U", None, snc_lib="/x/libsnc.so", ashost="h") == ("U", None)
+
+
+def test_credentials_are_optional_on_both_connect_functions() -> None:
+    import inspect
+
+    from saprfclib.connection import connect, connect_async
+
+    for fn in (connect, connect_async):
+        params = inspect.signature(fn).parameters
+        assert params["user"].default is None
+        assert params["passwd"].default is None

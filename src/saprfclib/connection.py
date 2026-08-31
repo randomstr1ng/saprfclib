@@ -1464,6 +1464,40 @@ def _strip_gw_header(resp: bytes) -> bytes:
     return resp
 
 
+def _resolve_credentials(
+    user: str | None, passwd: str | None, *, snc_lib: str | None, ashost: str
+) -> tuple[str | None, str | None]:
+    """Decide whether this connection carries credentials, and sanity-check them.
+
+    Supplying neither a user nor a password, and no SNC library, is taken as a
+    deliberate anonymous attempt: the logon frame goes out without the user and
+    password records. Some systems answer a small set of function modules that way;
+    a hardened one refuses below the RFC layer, which now reports as a
+    CommunicationError naming the CPIC message rather than an unreadable response.
+
+    Supplying exactly one of the two is rejected. That is not a request to connect
+    anonymously, it is a missing environment variable or a typo, and turning it into
+    a silent anonymous attempt would replace a clear error with a confusing one.
+    """
+    if snc_lib is not None:
+        return user, passwd
+    if user is None and passwd is None:
+        _logger.warning(
+            "connecting to %s without credentials: no user, no password and no "
+            "snc_lib were given, so the logon frame will omit the user and password "
+            "records. Most systems refuse this.",
+            ashost,
+        )
+        return None, None
+    if user is None or passwd is None:
+        missing = "user" if user is None else "passwd"
+        raise ValueError(
+            f"{missing} is missing while the other credential was supplied. Pass both "
+            f"to authenticate, or neither to attempt an anonymous connection."
+        )
+    return user, passwd
+
+
 def _filter_call_params(
     func_name: str,
     desc: FunctionDesc,
@@ -2043,8 +2077,8 @@ class Connection:
         self,
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
         lang: str = _DEFAULT_LANG,
@@ -2061,6 +2095,15 @@ class Connection:
             from saprfclib.ws import WsTransport
 
             if isinstance(self._transport, WsTransport):
+                if user is None or passwd is None:
+                    # wRFC authenticates over HTTP on the WebSocket upgrade, so an
+                    # anonymous attempt has nowhere to go — the credentials are not
+                    # carried in the RFC logon frame at all.
+                    raise ValueError(
+                        "WebSocket RFC requires a user and password: the credentials "
+                        "are sent on the HTTP upgrade, so there is no anonymous form "
+                        "of this connection"
+                    )
                 self._ws_handshake(
                     client=client,
                     user=user,
@@ -2134,8 +2177,8 @@ class Connection:
         prev_state: SessionState,
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         ashost: str,
         sysnr: int,
         local_ip: str,
@@ -2388,8 +2431,8 @@ class Connection:
     def _build_logon_request(
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         seed: int | None = None,
         local_ip: str = "127.0.0.1",
         program_name: bytes = b"python3",
@@ -2416,8 +2459,16 @@ class Connection:
             _tlv_ext(0x0106, _TLV_CP),
             _tlv_ext(0x0514, session_token),
             _tlv_ext(_TAG_CLIENT, client.encode("ascii", "replace")),
-            _tlv_ext(_TAG_USER, user.encode("ascii", "replace")),
-            _tlv_ext(_TAG_PASSWORD, _scramble_password(passwd, seed=seed)),
+        ]
+        # No credentials: omit the user and password records rather than sending
+        # empty ones. An empty password is still a password attempt as far as the
+        # server is concerned, and repeated attempts against a real account name
+        # count towards lockout; omitting the fields cannot.
+        if user is not None:
+            parts.append(_tlv_ext(_TAG_USER, user.encode("ascii", "replace")))
+        if passwd is not None:
+            parts.append(_tlv_ext(_TAG_PASSWORD, _scramble_password(passwd, seed=seed)))
+        parts += [
             # 0x0115 and 0x0011 both carry the logon language in the capture
             # (golden logon_request.bin: b"E" on each).
             _tlv_ext(0x0115, _encode_logon_language(lang)),
@@ -3805,8 +3856,8 @@ def connect(
     ashost: str,
     sysnr: str | int,
     client: str,
-    user: str,
-    passwd: str,
+    user: str | None = None,
+    passwd: str | None = None,
     *,
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
@@ -3858,6 +3909,14 @@ def connect(
     ISO code is converted before the logon frame is built, matching the SDK's LANG
     option.
 
+    ``user`` and ``passwd`` may both be omitted. That is read as a deliberate
+    anonymous attempt and the logon frame goes out without the user and password
+    records — some systems answer a small set of function modules that way, while a
+    hardened one refuses below the RFC layer and raises ``CommunicationError``.
+    Supplying exactly one of the two raises ``ValueError``, since that is a missing
+    setting rather than a request to connect anonymously. SNC connections are
+    unaffected: ``snc_lib`` carries its own credentials.
+
     ``strict_params`` controls what ``call()`` does with a keyword argument the
     function interface does not declare. The default (False) drops it and logs a
     warning, which is what callers porting from pyrfc expect when they pass a
@@ -3878,6 +3937,8 @@ def connect(
         build_ni_route,
         parse_route_string,
     )
+
+    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
 
     if mshost is not None:
         # Message-server group logon: resolve to a concrete (ashost, sysnr).
@@ -4093,8 +4154,8 @@ class AsyncConnection:
         self,
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
         lang: str = _DEFAULT_LANG,
@@ -4869,8 +4930,8 @@ async def connect_async(
     ashost: str,
     sysnr: str | int,
     client: str,
-    user: str,
-    passwd: str,
+    user: str | None = None,
+    passwd: str | None = None,
     *,
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
@@ -4909,6 +4970,8 @@ async def connect_async(
     saprfclib.connect(): False (default) drops undeclared keyword arguments with a
     warning, True raises.
     """
+    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
+
     if snc_lib is not None or wshost is not None:
         raise NotImplementedError(
             "snc_lib/wshost async connections are not supported in Phase 9 — "
