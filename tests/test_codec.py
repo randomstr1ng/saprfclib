@@ -247,39 +247,40 @@ def test_out_of_scope_types_raise_valueerror(rfctype):
 
 
 @pytest.mark.parametrize("rfctype", [DECF16, DECF34])
-def test_decfloat_raises_notimplemented(rfctype):
-    """DecFloat16/34 ship a documented NotImplementedError gap.
+def test_decfloat_is_implemented(rfctype):
+    """DecFloat16/34 no longer raise: the wire form was captured (GAP-B-01 closed).
 
-    No reachable DECFLOAT-typed function module existed on the test system, so
-    the wire form is unconfirmed. Per the no-guessing constraint the codec
-    raises rather than guessing a DPD implementation. This is an intended
-    outcome, not a failure — see type_decf16_GAP.json.
-
-    The message must name the type and say it is unimplemented: a user hitting
-    this needs to know why, not an internal tracker id.
+    This test previously asserted NotImplementedError, which was the correct
+    behaviour while the encoding was unconfirmed. A live capture from A4H
+    (kernel 793) settled it as IEEE 754-2008 DPD, little-endian — see
+    tests/golden/serialization/decfloat_response.bin and tests/test_decfloat.py,
+    which drive every expectation from that fixture.
     """
+    from decimal import Decimal
+
     f = _scalar_field(rfctype)
-    with pytest.raises(NotImplementedError) as dec_exc:
-        decode(rfctype, b"\x00" * 8, f)
-    assert "DECF" in str(dec_exc.value) and "not implemented" in str(dec_exc.value)
-    with pytest.raises(NotImplementedError) as enc_exc:
-        encode(rfctype, None, f)
-    assert "DECF" in str(enc_exc.value) and "not implemented" in str(enc_exc.value)
+    width = 8 if rfctype == DECF16 else 16
+    raw = encode(rfctype, Decimal("42.0"), f)
+    assert len(raw) == width
+    assert decode(rfctype, raw, f) == Decimal("42.0")
 
 
-def test_decfloat_gap_marker_fixture_documents_intentional_gap():
-    """type_decf16_GAP.json records GAP-B-01 as an intentional, no-guess gap.
+def test_decfloat_gap_marker_records_the_closure():
+    """type_decf16_GAP.json now records GAP-B-01 as closed by a live capture.
 
-    The marker has no .bin pair (so the fixture runner skips it) and names both
-    DecFloat RFCTYPE ids — confirming the deferral is documented, not hidden.
+    Kept rather than deleted: it carries why the earlier probe concluded there was
+    nothing to capture, and the byte-order correction. Both are the kind of thing
+    that gets re-derived the hard way if the record is thrown away.
     """
     import json
 
     marker = json.loads((SERIALIZATION_DIR / "type_decf16_GAP.json").read_text())
     assert marker["gap_id"] == "GAP-B-01"
+    assert marker["status"].startswith("CLOSED")
     assert marker["rfctype"]["RFCTYPE_DECF16"] == DECF16
     assert marker["rfctype"]["RFCTYPE_DECF34"] == DECF34
-    assert not (SERIALIZATION_DIR / "type_decf16_GAP.bin").exists()
+    # The capture that closed it must actually be present.
+    assert (SERIALIZATION_DIR / "decfloat_response.bin").exists()
 
 
 def test_bcd_decode_returns_decimal():

@@ -105,24 +105,173 @@ _INT_FORMATS: dict[int, str] = {
     RFCTYPE_CDAY: "<h",  # protocol analysis
 }
 
-# DecFloat16/34 remain an UNCONFIRMED wire form — GAP-B-01. Plan 01 found no
-# reachable DECFLOAT-typed RFM on the SAP A4H test system (STFC_DECFLOAT /
-# RFC_DECFLOAT_TEST / DEMO_DECFLOAT_ARITH all FU_NOT_FOUND), so no live bytes
-# exist to validate a DPD codec against. Per the no-guessing constraint
-# (PROJECT.md D-04/D-05) we do NOT ship a guessed DPD implementation; decode and
-# encode raise NotImplementedError with the GAP-B-01 message until a live
-# DecFloat capture closes the gap (see _DECF_GAP_MESSAGE below). BCD (rfctype 2)
-# is implemented in this module (live-confirmed P15.2 capture, GAP-B-02 closed).
+# GAP-B-01 (DecFloat16/34) is CLOSED. Source: golden fixture
+# tests/golden/serialization/decfloat_response.bin — a live capture from A4H
+# (kernel 793) of a purpose-built remote-enabled function module returning nine
+# known DECFLOAT values at both widths.
+#
+# The wire form is IEEE 754-2008 densely packed decimal, LITTLE-ENDIAN.
+#
+# Little-endian, not big-endian: this document previously recorded big-endian as
+# "the neutral network form", which the capture disproves. Every one of the nine
+# values decodes to its known value only after reversing the bytes, and encoding
+# reproduces the captured bytes exactly. For example DECFLOAT16 42.0 arrives as
+#     20 02 00 00 00 00 34 22
+# and is 22 34 00 00 00 00 02 20 once reversed, which is 42.0 in DPD: coefficient
+# 420, exponent -1.
+#
+# DPD is worth the table below rather than a shortcut: the coefficient is packed
+# three decimal digits per ten bits, so the number twelve is 0x12 here where a
+# binary-integer encoding would put 0x0c. That difference is what identified the
+# scheme from a single captured value.
 _DEFERRED: dict[int, str] = {}
 
-# The single GAP-B-01 message both decode and encode raise for DecFloat16/34.
-_DECF_GAP_MESSAGE = (
-    "RFCTYPE_DECF16/DECF34 (DECFLOAT16/DECFLOAT34) is not implemented: the wire "
-    "encoding is unconfirmed. Big-endian DPD is documented behaviour but has "
-    "never been observed on the wire, and shipping a guessed decimal codec risks "
-    "silently corrupting values. See "
-    "https://randomstr1ng.github.io/saprfclib/protocol/serialization/"
-)
+# Per-width DPD parameters: (exponent-continuation bits, declets, exponent bias,
+# coefficient digits). DECFLOAT16 is decimal64, DECFLOAT34 is decimal128.
+_DECF_PARAMS: dict[int, tuple[int, int, int, int]] = {
+    8: (8, 5, 398, 16),
+    16: (12, 11, 6176, 34),
+}
+
+
+def _build_dpd_tables() -> tuple[dict[tuple[int, int, int], int], dict[int, tuple[int, int, int]]]:
+    """Build the declet <-> three-digit maps from the IEEE 754-2008 encoding rules.
+
+    Generated from the encoding rules rather than transcribed as a 1024-entry
+    literal: the rules are eight cases keyed on the high bit of each digit, which
+    is far easier to check by eye than a table of magic numbers. Several bit
+    patterns decode to the same digits (the redundant encodings); the decode map
+    keeps the first, and encoding always emits the canonical one.
+    """
+    encode_map: dict[tuple[int, int, int], int] = {}
+    decode_map: dict[int, tuple[int, int, int]] = {}
+    for d1 in range(10):
+        for d2 in range(10):
+            for d3 in range(10):
+                a, b, c, d = (d1 >> 3) & 1, (d1 >> 2) & 1, (d1 >> 1) & 1, d1 & 1
+                e, f, g, h = (d2 >> 3) & 1, (d2 >> 2) & 1, (d2 >> 1) & 1, d2 & 1
+                i, j, k, m = (d3 >> 3) & 1, (d3 >> 2) & 1, (d3 >> 1) & 1, d3 & 1
+                match (a << 2) | (e << 1) | i:
+                    case 0b000:
+                        pqr, stu, v, wxy = (b, c, d), (f, g, h), 0, (j, k, m)
+                    case 0b001:
+                        pqr, stu, v, wxy = (b, c, d), (f, g, h), 1, (0, 0, m)
+                    case 0b010:
+                        pqr, stu, v, wxy = (b, c, d), (j, k, h), 1, (0, 1, m)
+                    case 0b011:
+                        pqr, stu, v, wxy = (b, c, d), (1, 0, h), 1, (1, 1, m)
+                    case 0b100:
+                        pqr, stu, v, wxy = (j, k, d), (f, g, h), 1, (1, 0, m)
+                    case 0b101:
+                        pqr, stu, v, wxy = (f, g, d), (0, 1, h), 1, (1, 1, m)
+                    case 0b110:
+                        pqr, stu, v, wxy = (j, k, d), (0, 0, h), 1, (1, 1, m)
+                    case _:
+                        pqr, stu, v, wxy = (0, 0, d), (1, 1, h), 1, (1, 1, m)
+                declet = 0
+                for bit in (*pqr, *stu, v, *wxy):
+                    declet = (declet << 1) | bit
+                encode_map[(d1, d2, d3)] = declet
+                decode_map.setdefault(declet, (d1, d2, d3))
+    return encode_map, decode_map
+
+
+_DPD_ENCODE, _DPD_DECODE = _build_dpd_tables()
+
+
+def decode_decfloat(raw: bytes) -> Decimal:
+    """Decode a DECFLOAT16 (8B) or DECFLOAT34 (16B) wire value.
+
+    Source: tests/golden/serialization/decfloat_response.bin. Never `float` —
+    that cannot hold a base-10 decimal exactly, which is the whole reason this
+    type exists.
+    """
+    params = _DECF_PARAMS.get(len(raw))
+    if params is None:
+        raise ValueError(f"DECFLOAT value must be 8 or 16 bytes, got {len(raw)}")
+    econ_bits, declets, bias, _ = params
+    # The wire is little-endian; every IEEE field below is defined on the
+    # big-endian form, so reverse once here and work in that orientation.
+    value = int.from_bytes(raw[::-1], "big")
+    total = len(raw) * 8
+    sign = (value >> (total - 1)) & 1
+    combo = (value >> (total - 6)) & 0x1F
+    econ = (value >> (total - 6 - econ_bits)) & ((1 << econ_bits) - 1)
+
+    # Combination field G0..G4 (IEEE 754-2008 section 3.5.2):
+    #   11110 -> Infinity, 11111 -> NaN
+    #   G0G1 = 11 -> leading digit 8+G4, exponent high bits G2G3
+    #   otherwise -> leading digit G2G3G4, exponent high bits G0G1
+    if (combo & 0b11110) == 0b11110:
+        if combo & 1:
+            return Decimal("-NaN") if sign else Decimal("NaN")
+        return Decimal("-Infinity") if sign else Decimal("Infinity")
+    if (combo >> 3) == 0b11:
+        lead, exp_high = 8 + (combo & 1), (combo >> 1) & 0b11
+    else:
+        lead, exp_high = combo & 0b111, (combo >> 3) & 0b11
+
+    exponent = ((exp_high << econ_bits) | econ) - bias
+    coeff = value & ((1 << (total - 6 - econ_bits)) - 1)
+    digits = [lead]
+    for n in range(declets - 1, -1, -1):
+        digits.extend(_DPD_DECODE[(coeff >> (n * 10)) & 0x3FF])
+    return Decimal((sign, tuple(digits), exponent))
+
+
+def encode_decfloat(value: Decimal | int | str, width: int) -> bytes:
+    """Encode a value as DECFLOAT16 (width 8) or DECFLOAT34 (width 16).
+
+    Round-trips the golden fixture byte-for-byte in both directions.
+    """
+    params = _DECF_PARAMS.get(width)
+    if params is None:
+        raise ValueError(f"DECFLOAT width must be 8 or 16, got {width}")
+    econ_bits, declets, bias, ndigits = params
+
+    if not isinstance(value, Decimal):
+        value = Decimal(value)
+    if value.is_nan():
+        total = width * 8
+        packed = ((1 if value.is_signed() else 0) << (total - 1)) | (0b11111 << (total - 6))
+        return packed.to_bytes(width, "big")[::-1]
+    if value.is_infinite():
+        total = width * 8
+        packed = ((1 if value.is_signed() else 0) << (total - 1)) | (0b11110 << (total - 6))
+        return packed.to_bytes(width, "big")[::-1]
+
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):  # pragma: no cover - guarded by is_nan/is_infinite
+        raise ValueError(f"cannot encode special Decimal {value!r} as DECFLOAT")
+    if len(digits) > ndigits:
+        raise ValueError(
+            f"{value} has {len(digits)} significant digits; DECFLOAT{ndigits} holds {ndigits}"
+        )
+    biased = exponent + bias
+    if not 0 <= biased <= (3 << econ_bits) - 1:
+        raise ValueError(f"exponent {exponent} is outside the DECFLOAT{ndigits} range")
+
+    padded = (0,) * (ndigits - len(digits)) + tuple(digits)
+    lead = padded[0]
+    exp_high = biased >> econ_bits
+    if lead <= 7:
+        combo = (exp_high << 3) | lead
+    else:
+        combo = 0b11000 | (exp_high << 1) | (lead & 1)
+    coeff = 0
+    for n in range(declets):
+        trio = padded[1 + n * 3 : 4 + n * 3]
+        coeff = (coeff << 10) | _DPD_ENCODE[(trio[0], trio[1], trio[2])]
+
+    total = width * 8
+    packed = (
+        (sign << (total - 1))
+        | (combo << (total - 6))
+        | ((biased & ((1 << econ_bits) - 1)) << (total - 6 - econ_bits))
+        | coeff
+    )
+    return packed.to_bytes(width, "big")[::-1]
+
 
 # Types the SAP SDK documents as not serialized on the wire.
 _OUT_OF_SCOPE = frozenset({RFCTYPE_NULL, RFCTYPE_ABAPOBJECT, RFCTYPE_XMLDATA})
@@ -515,8 +664,7 @@ def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc)
 
     Raises:
         ValueError: If rfctype is out-of-scope or unknown.
-        NotImplementedError: For DecFloat16/34 (GAP-B-01 — wire form
-            unconfirmed; see saprfclib docs) and for other deferred types.
+        NotImplementedError: For deferred types.
     """
     buf = _as_bytes(data)
 
@@ -527,8 +675,7 @@ def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc)
             f"RFCTYPE {rfctype} decode not yet implemented — see {_DEFERRED[rfctype]}"
         )
     if rfctype in (RFCTYPE_DECF16, RFCTYPE_DECF34):
-        # GAP-B-01: DecFloat wire form unconfirmed — no guessing (D-04/D-05).
-        raise NotImplementedError(_DECF_GAP_MESSAGE)
+        return decode_decfloat(bytes(buf))
 
     match rfctype:
         case _ if rfctype in _INT_FORMATS:
@@ -587,7 +734,8 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
 
     Raises:
         ValueError: For out-of-scope or unknown rfctype.
-        NotImplementedError: For DecFloat16/34 (GAP-B-01) and deferred types.
+        NotImplementedError: For deferred types.
+        ValueError: For a DECFLOAT value that does not fit the target width.
         TypeError: If value is the wrong Python type for the rfctype.
     """
     if rfctype in _OUT_OF_SCOPE:
@@ -597,8 +745,9 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
             f"RFCTYPE {rfctype} encode not yet implemented — see {_DEFERRED[rfctype]}"
         )
     if rfctype in (RFCTYPE_DECF16, RFCTYPE_DECF34):
-        # GAP-B-01: DecFloat wire form unconfirmed — no guessing (D-04/D-05).
-        raise NotImplementedError(_DECF_GAP_MESSAGE)
+        return encode_decfloat(
+            cast("Decimal | int | str", value), 8 if rfctype == RFCTYPE_DECF16 else 16
+        )
 
     match rfctype:
         case _ if rfctype in _INT_FORMATS:

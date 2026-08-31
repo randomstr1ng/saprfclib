@@ -48,8 +48,8 @@ little-endian byte order were confirmed 2026-07-05.
 | 14 | `RFCTYPE_NULL` | — | — | Not supported — skip on wire |
 | 16 | `RFCTYPE_ABAPOBJECT` | — | — | ABAP object handle — skip on wire |
 | 17 | `RFCTYPE_STRUCTURE` | — | — | Nested structure, descriptor-driven |
-| 23 | `RFCTYPE_DECF16` | 8 bytes | DECFLOAT16 | IEEE 754r DPD decimal float, big-endian wire |
-| 24 | `RFCTYPE_DECF34` | 16 bytes | DECFLOAT34 | IEEE 754r DPD decimal float, big-endian wire |
+| 23 | `RFCTYPE_DECF16` | 8 bytes | DECFLOAT16 | IEEE 754-2008 DPD decimal float, **little-endian** wire |
+| 24 | `RFCTYPE_DECF34` | 16 bytes | DECFLOAT34 | IEEE 754-2008 DPD decimal float, **little-endian** wire |
 | 28 | `RFCTYPE_XMLDATA` | — | — | No longer used — skip |
 | 29 | `RFCTYPE_STRING` | variable | STRING | Null-terminated; length-prefixed on wire |
 | 30 | `RFCTYPE_XSTRING` | variable | XSTRING | Raw bytes; length-prefixed (byte count) |
@@ -351,102 +351,90 @@ exercised; the non-Unicode layout is undocumented here.
 
 ---
 
-### RFCTYPE_DECF16 (type=23) — IEEE 754r Decimal Float 16 (8 bytes)
+### RFCTYPE_DECF16 (type=23) / RFCTYPE_DECF34 (type=24) — CONFIRMED
 
-!!! note "Metadata: DECFLOAT16 arrives with EXID `a` — CONFIRMED"
-    `RFC_GET_FUNCTION_INTERFACE` reports a DECFLOAT16 parameter with `EXID = 'a'`,
-    and DECFLOAT34 with `EXID = 'e'`. Confirmed by live capture on 2026-08-31: a
-    remote-enabled function module on A4H (kernel 793) carrying seven DECFLOAT16
-    and three DECFLOAT34 parameters reported `a` for all seven and `e` for all three.
+**Encoding:** IEEE 754-2008 **densely packed decimal (DPD)**, **little-endian** on the
+wire. DECFLOAT16 is decimal64 (8 bytes), DECFLOAT34 is decimal128 (16 bytes).
 
-    `_EXID_TO_RFCTYPE` previously mapped only `v` to DECFLOAT16, which has never
-    been observed. Every DECFLOAT16 parameter therefore failed to parse and was
-    dropped from the descriptor, so the interface silently lost them and the call
-    went out short of those arguments. `a` is now mapped; `v` is retained and
-    labelled `[ASSUMED]`.
+**Evidence tier 1 — live capture.** `tests/golden/serialization/decfloat_response.bin`,
+from A4H (kernel 793, release 758, Unicode): a purpose-built remote-enabled function
+module returning nine values whose decimal magnitude was fixed in ABAP before the call.
+All nine decode correctly and re-encode byte-for-byte. `tests/test_decfloat.py` drives
+every expectation from that fixture rather than from the standard.
 
-    Note this is about the *metadata* only. The wire encoding of the value itself
-    remains unconfirmed and `encode`/`decode` still raise — the failure simply moves
-    from "parameters silently missing" to "this type is not implemented", which is
-    the right shape for an unverified format.
+| parameter | wire bytes | value |
+|-----------|------------|-------|
+| `EV_TWELVE_16` | `12 00 00 00 00 00 38 22` | `12` |
+| `EV_FORTY_TWO_DOT_ZERO` | `20 02 00 00 00 00 34 22` | `42.0` |
+| `EV_MINUS_ONE` | `01 00 00 00 00 00 38 a2` | `-1` |
+| `EV_ZERO` | `00 00 00 00 00 00 38 22` | `0` |
+| `EV_WIDE_16` | `56 8e e2 c1 b9 34 39 26` | `1234567890123456` |
+| `EV_TWELVE_34` | `12 00 …(9 zero bytes)… 00 08 22` | `12` |
+| `EV_WIDE_34` | `34 35 82 77 71 12 3c 6f e5 28 1e 9c 4b 13 08 26` | `1234567890123456789012345678901234` |
 
-| Offset | Length | Type | Name | Value (example) | Notes |
-|--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | DPD-BE | `decf16_wire` | big-endian bytes | IEEE 754r DPD, transmitted big-endian (neutral network form) |
+#### The byte order is little-endian, and this document previously said otherwise
 
-**Wire size:** Always 8 bytes.
+Earlier revisions recorded big-endian as "the neutral network byte order", sourced from
+SDK header commentary rather than from the wire. The capture disproves it. 42.0 as IEEE
+lays the fields out is `22 34 00 00 00 00 02 20`; it arrives reversed.
 
-**Encoding:** IEEE 754r **Densely Packed Decimal (DPD)** in **Big-Endian (network) byte order**.
+This matters more than a normal byte-order mistake. Read big-endian, that value decodes
+to `4.00000000801022E-128` — a well-formed number, not an error. A wrong assumption here
+does not fail loudly anywhere; it silently returns a different number, in the one type
+that exists specifically to carry money exactly.
 
-**Evidence tier: documented SDK type behaviour, not a capture.** The neutral network byte order
-for DecFloat values is big-endian, and clients convert from machine-native order before writing.
-This is HIGH confidence for the *byte order* but says nothing about how the value sits inside the
-enclosing TLV record — which is the part no capture has confirmed.
+#### DPD, not BID — and how one value settles it
 
-**Python decode:**
-```python
-import struct
-# Read 8 big-endian bytes from wire
-raw_be = wire_bytes  # 8 bytes, big-endian DPD
-# Convert BE bytes to integer for DPD decoding
-raw_int = int.from_bytes(raw_be, 'big')
-# DPD decoding is not in the stdlib — it needs an in-tree DPD↔BCD codec
+DPD packs three decimal digits into ten bits, so the coefficient is not a plain binary
+integer. The consequence is a single decisive test: **twelve is `0x12` under DPD and
+`0x0c` under BID**. Any captured value of known magnitude separates the two schemes
+outright. All nine captured values matched DPD; none matched BID.
+
+Field layout, on the big-endian orientation (reverse the wire bytes first):
+
+```
+ 1 bit   sign
+ 5 bits  combination field  -- leading digit + top 2 exponent bits, or Inf/NaN
+ N bits  exponent continuation  (8 for decimal64, 12 for decimal128)
+ rest    coefficient continuation, 10 bits per declet
+         (5 declets = 15 digits for decimal64, 11 = 33 for decimal128)
 ```
 
-**Hex Example (constructed, NOT captured — do not rely on these bytes):**
-```hex
-22 34 00 00 00 00 02 20  -- 42.0 encoded as IEEE 754-2008 decimal64, DPD, big-endian
-                         -- arithmetic from the public IEEE standard, NOT a capture.
-                         -- Whether SAP puts DPD on the wire at all is still [ASSUMED].
-```
+Combination field `G0..G4` (IEEE 754-2008 §3.5.2): `11110` is Infinity and `11111` is
+NaN; otherwise if `G0G1 = 11` the leading digit is `8 + G4` and the exponent's top bits
+are `G2G3`, and in every other case the leading digit is `G2G3G4` with exponent top bits
+`G0G1`. Exponent bias is 398 (decimal64) and 6176 (decimal128).
 
-The previous version of this example read `22 38 00 00 00 00 04 20`. Those bytes do
-not encode 42.0 — under a standard DPD reading they are `1020`. Two separate errors:
-the exponent field said 0 rather than −1 (`38` vs `34`), and the declet `0x420` spells
-the digits 2‑2‑0 rather than 4‑2‑0, which is `0x220`. Nothing depended on it, because
-the codec raises rather than encoding, but a wrong worked example is a trap for whoever
-implements this — it looks like something to check an implementation against.
+#### Implementation notes
 
-**Telling DPD from BID from one captured value.** The two schemes differ visibly at
-small integers, which makes a single capture decisive rather than suggestive: the
-number **twelve** is `…00 12` under DPD (each declet spells three decimal digits) and
-`…00 0c` under BID (the coefficient is a plain binary integer). Any captured DECFLOAT
-whose value is known settles the question immediately; no inference required.
+`decode_decfloat` / `encode_decfloat` in `src/saprfclib/codec.py`. The declet tables are
+generated from the IEEE encoding rules at import rather than transcribed as 1024 literal
+entries — eight rules keyed on the high bit of each digit are checkable by eye in a way
+a table of magic numbers is not.
 
-!!! warning "DecFloat16/34 is unconfirmed on the wire — and therefore unimplemented"
-    A live probe on 2026-06-26 found no reachable function module exposing a DECFLOAT16/34
-    parameter — `STFC_DECFLOAT`, `RFC_DECFLOAT_TEST` and `DEMO_DECFLOAT_ARITH` all returned
-    `FU_NOT_FOUND`. Big-endian DPD is HIGH confidence from documented type behaviour, but nothing
-    has been seen on the wire.
+Values are `decimal.Decimal` throughout, never `float`. Encoding refuses rather than
+rounds: more significant digits than the width holds, or an out-of-range exponent, raises
+`ValueError`. Truncating to fit is precisely the corruption this type exists to prevent.
 
-    Note what that probe actually established: three guessed function-module names do not
-    exist. That is not the same as "no such function module exists", and it should not be
-    read as one. The dictionary can be asked directly — `DD04L`/`DD03L` for DECFLOAT-typed
-    data elements and structure fields, `FUPARAREF` for the parameters referencing them, and
-    `TFDIR` (`FMODE = 'R'`) for the remote-enabled subset — which turns "we did not find one"
-    into an evidenced answer either way.
+#### Metadata
 
-    Rather than ship a plausible guess that could silently corrupt decimal values, `encode` and
-    `decode` in `src/saprfclib/codec.py` **raise `NotImplementedError`** for `RFCTYPE_DECF16` (23)
-    and `RFCTYPE_DECF34` (24). A loud failure is correct here; a wrong decimal is not.
+`RFC_GET_FUNCTION_INTERFACE` reports DECFLOAT16 as `EXID = 'a'` and DECFLOAT34 as
+`EXID = 'e'`. `a` was missing from the EXID table, so DECFLOAT16 parameters failed to
+parse and were dropped from the descriptor entirely — see the EXID note above.
 
-    This stays until a live DecFloat capture lands. Marker fixture:
-    `tests/golden/serialization/type_decf16_GAP.json`.
+#### Finding a DECFLOAT-typed function module
 
----
+The DDIC `DATATYPE` codes are four characters: `D16D`/`D16N`/`D16R`/`D16S` and
+`D34D`/`D34N`/`D34R`/`D34S`. `DF16_DEC` and friends are ABAP *type* names, not `DATATYPE`
+codes, and querying on them matches nothing — an earlier probe searched that way and
+concluded, wrongly, that the system had no DECFLOAT at all.
 
-### RFCTYPE_DECF34 (type=24) — IEEE 754r Decimal Float 34 (16 bytes)
-
-| Offset | Length | Type | Name | Value (example) | Notes |
-|--------|--------|------|------|-----------------|-------|
-| 0x00 | 16 | DPD-BE | `decf34_wire` | big-endian bytes | IEEE 754r DPD, transmitted big-endian (neutral network form) |
-
-**Wire size:** Always 16 bytes.
-
-**Encoding:** the same big-endian DPD scheme as DECF16, converted from machine-native order
-before the write.
-
-**Same gap as DECF16** — unconfirmed on the wire, and `NotImplementedError` rather than a guess.
+Asking the dictionary properly (`DD04L`/`DD03L` → `FUPARAREF` → `TFDIR` where
+`FMODE = 'R'`) found 128 DECFLOAT data elements on A4H and 38 remote-enabled function
+modules touching them — but none exposing a scalar DECFLOAT parameter, which is why the
+capture still required a purpose-built module. Note also that the built-in ABAP types
+`DECFLOAT16`/`DECFLOAT34` are accepted into a function-module interface by the dictionary
+but then fail to generate; type such parameters with a DDIC data element instead.
 
 ---
 

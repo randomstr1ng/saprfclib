@@ -588,18 +588,29 @@ def test_decfloat16_params_are_kept_in_the_descriptor() -> None:
     assert field.rfctype == RFCTYPE_DECF16
 
 
-def test_decfloat_still_refuses_to_guess_the_wire_encoding() -> None:
-    """Parsing the metadata must not be mistaken for supporting the type.
+def test_decfloat16_reaches_a_working_codec() -> None:
+    """The EXID fix and the wire codec together make DECFLOAT16 actually callable.
 
-    Now that a DECFLOAT16 parameter survives into the descriptor, a call carrying one
-    reaches the codec — which must still raise rather than invent an encoding. The
-    failure moves from "seven parameters silently missing" to "this type is not
-    implemented", which is the correct shape for an unconfirmed wire format.
+    This asserted NotImplementedError when written, which was right while the wire
+    encoding was unconfirmed. A live capture settled it the same day (DPD,
+    little-endian), so the parameter that once vanished from the descriptor now
+    round-trips end to end. See tests/test_decfloat.py.
     """
-    from saprfclib.codec import RFCTYPE_DECF16, RFCTYPE_DECF34, decode, encode
+    from decimal import Decimal
 
-    for rfctype in (RFCTYPE_DECF16, RFCTYPE_DECF34):
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            encode(rfctype, 1, None)
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            decode(rfctype, b"\x00" * 8, None)
+    from saprfclib.codec import RFCTYPE_DECF16, RFCTYPE_DECF34, decode, encode
+    from saprfclib.types import FieldDesc
+
+    for rfctype, width in ((RFCTYPE_DECF16, 8), (RFCTYPE_DECF34, 16)):
+        field = FieldDesc(
+            name="V",
+            rfctype=rfctype,
+            nuc_length=width,
+            nuc_offset=0,
+            uc_length=width,
+            uc_offset=0,
+            decimals=0,
+        )
+        raw = encode(rfctype, Decimal("42.0"), field)
+        assert len(raw) == width
+        assert decode(rfctype, raw, field) == Decimal("42.0")

@@ -134,6 +134,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still unconfirmed, so `encode`/`decode` continue to raise: the failure moves
   from "parameters silently missing" to "this type is not implemented".
 
+- **DECFLOAT16 and DECFLOAT34 are implemented (#13).** The wire form is IEEE 754-2008
+  densely packed decimal, **little-endian** — settled by live capture from A4H
+  (kernel 793) of a purpose-built remote-enabled function module returning nine values
+  of known decimal magnitude at both widths. All nine decode correctly and re-encode
+  byte-for-byte; `tests/golden/serialization/decfloat_response.bin` is the fixture and
+  every expectation in `tests/test_decfloat.py` is driven from it. `encode`/`decode` no
+  longer raise for these types, and values are `decimal.Decimal` throughout.
+- The documented byte order for DECFLOAT was wrong. `docs/protocol/serialization.md`
+  recorded big-endian as "the neutral network byte order", taken from SDK header
+  commentary rather than the wire; the capture disproves it. This mattered more than a
+  normal byte-order error: read big-endian, `42.0` decodes to `4.00000000801022E-128` —
+  a well-formed number rather than an error, so a wrong assumption here would have
+  returned a different value silently, in the one type that exists to carry money
+  exactly.
+- DECFLOAT encoding refuses rather than rounds. More significant digits than the width
+  holds, or an out-of-range exponent, raises `ValueError`; truncating to fit is the
+  corruption this type exists to prevent.
+
 ### Documentation
 
 - Corrected the worked DECFLOAT16 example in `docs/protocol/serialization.md`. It read
