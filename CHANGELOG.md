@@ -32,10 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now runs the actual exchange — attach (operation `0x08`), request (operation `0x01`,
   selector `0x1d`), detach (`0x04`) — and parses the reply. Golden fixtures for all
   five frames are in `tests/golden/router/`.
-- The reply payload is **text, not a binary entry table**: newline-separated records of
-  pipe-separated `KEY=VALUE`, as in
-  `ASNAME=…|HOSTNAME=…|PORT=3200|SAPSRV=…|SNC=…`. `parse_sapms_server_list`'s binary
-  layout was wrong about the shape of the data entirely.
+- There are **two server-list opcodes with different payload formats**, both genuine:
+  `0x1e` (version 1) carries newline-separated `KEY=VALUE` text such as
+  `ASNAME=…|HOSTNAME=…|PORT=3200|SAPSRV=…|SNC=…`, while `0x05` (version 4) carries a
+  binary fixed-width entry table. The header is identical in both. `parse_ms_list_reply`
+  handles the text form and `parse_sapms_server_list` the binary one, dispatched on the
+  opcode rather than assumed — and meeting the other form names the parser that handles
+  it. The binary parser was very nearly deleted as dead code on the strength of one
+  capture that happened to use the other opcode.
 - `PORT` in that reply is the **dispatcher** port (`32<NN>`), not the gateway — the
   captured record reads `PORT=3200` for a server whose gateway is 3300 — so the system
   number derives from the dispatcher formula and the caller adds 3300 (or 4800 for SNC).

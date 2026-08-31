@@ -215,6 +215,26 @@ that looked convincing:
   field layout — and the length alone is enough for the server to close the
   connection without a word.
 
-`parse_sapms_server_list`'s binary entry table was also wrong; the payload was
-never binary.
+### Two server-list opcodes, two payload formats
+
+A fourth correction, this one to the paragraph above: **the binary parser was not
+wrong either.** There is more than one server-list opcode, and they carry
+different payloads:
+
+| Opcode block | Payload | Capture |
+|--------------|---------|---------|
+| `1e 00 01 03` | `KEY=VALUE` text | SAP GUI group logon, 2026-08-31 |
+| `05 00 04 03` | binary fixed-width entry table | 2026-06-27 |
+
+Both are genuine replies with the identical 110-byte header; they differ only in
+the opcode block and the shape of what follows. Byte 2 of that block is the
+opcode *version*, and byte 3 is `0x01` outbound / `0x03` on the reply in both.
+
+So `parse_sapms_server_list` handles opcode `0x05` and `parse_ms_list_reply`
+handles `0x1e`. Neither supersedes the other, and a reply is dispatched on its
+opcode rather than assumed — which is why `parse_ms_list_reply` names the other
+parser when it meets a `0x05` payload instead of failing obscurely.
+
+This was nearly a regression: the binary parser was about to be deleted as dead
+code on the strength of one capture that happened to use the other opcode.
 

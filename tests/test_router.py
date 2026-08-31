@@ -581,3 +581,31 @@ def test_resolve_full_rejects_a_port_that_is_not_a_system_number() -> None:
     transport = MockTransport([_fixture("sapms_attach_reply.bin"), rebuilt])
     with pytest.raises(ValueError, match="not 3200"):
         MessageServerClient(transport).resolve_full(group="PUBLIC")
+
+
+def test_both_server_list_opcodes_are_supported() -> None:
+    """0x1e carries text, 0x05 carries a binary table — both are real replies.
+
+    Captured from two different clients against the same message server. The
+    header is identical; only the opcode block and payload shape differ. Neither
+    parser supersedes the other, and asserting that here is what stops the binary
+    one being deleted as dead code the next time only a 0x1e capture is at hand.
+    """
+    from saprfclib.router import parse_ms_list_reply, parse_sapms_server_list
+
+    text_reply = _fixture("sapms_serverlist_reply.bin")
+    assert text_reply[0x6E] == 0x1E
+    assert parse_ms_list_reply(text_reply)[0]["PORT"] == "3200"
+
+    binary_reply = (SAPMS_DIR / "sapms_server_list.bin").read_bytes()
+    assert binary_reply[4 + 0x6E] == 0x05
+    assert parse_sapms_server_list(binary_reply)
+
+
+def test_a_binary_reply_names_the_right_parser() -> None:
+    """Meeting the other opcode must point at the parser that handles it."""
+    from saprfclib.router import parse_ms_list_reply
+
+    binary_reply = (SAPMS_DIR / "sapms_server_list.bin").read_bytes()
+    with pytest.raises(ValueError, match="parse_sapms_server_list"):
+        parse_ms_list_reply(binary_reply)

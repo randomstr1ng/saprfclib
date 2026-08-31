@@ -476,11 +476,23 @@ _OP_ATTACH = 0x08
 _OP_REQUEST = 0x01
 _OP_DETACH = 0x04
 
-# The request body is a 4-byte opcode block followed by 48 bytes of parameters.
-# Byte 3 of the block is 0x01 outbound and 0x03 on the reply.
-_MS_OPCODE = 0x1E
-_OPCODE_REQUEST = bytes((_MS_OPCODE, 0x00, 0x01, 0x01))
-_OPCODE_REPLY = bytes((_MS_OPCODE, 0x00, 0x01, 0x03))
+# The request body is a 4-byte opcode block followed by 48 bytes of parameters:
+#   [0] opcode  [1] error  [2] opcode version  [3] 0x01 outbound / 0x03 on the reply
+#
+# There is more than one server-list opcode, and they carry DIFFERENT payload
+# formats. Two are captured here:
+#
+#   0x1e version 0x01 -> KEY=VALUE text      (SAP GUI group logon, 2026-08-31)
+#   0x05 version 0x04 -> binary entry table  (2026-06-27 capture)
+#
+# Both are genuine replies with the same 110-byte header; they differ only in the
+# opcode block and the shape of what follows. parse_ms_list_reply handles the text
+# form and parse_sapms_server_list the binary one — neither supersedes the other,
+# so a reply is dispatched on its opcode rather than assumed.
+_MS_OPCODE_TEXT = 0x1E
+_MS_OPCODE_BINARY = 0x05
+_OPCODE_REQUEST = bytes((_MS_OPCODE_TEXT, 0x00, 0x01, 0x01))
+_OPCODE_REPLY = bytes((_MS_OPCODE_TEXT, 0x00, 0x01, 0x03))
 
 # One byte at offset 11 of the request body selects what is being asked for.
 # Both values come from the same capture: SAP GUI sends 0x1d and gets the
@@ -580,6 +592,12 @@ def parse_ms_list_reply(frame: bytes) -> list[dict[str, str]]:
         raise ValueError(f"SAPMS list reply too short: {len(body)} bytes")
     payload = body[_SAPMS_HEADER_LEN:]
     if payload[:4] != _OPCODE_REPLY:
+        if payload and payload[0] == _MS_OPCODE_BINARY:
+            raise ValueError(
+                f"this is an opcode 0x{_MS_OPCODE_BINARY:02x} reply, whose payload is a "
+                f"binary entry table rather than KEY=VALUE text — use "
+                f"parse_sapms_server_list for that form"
+            )
         raise ValueError(
             f"unexpected message-server opcode block {payload[:4].hex(' ')}, "
             f"expected {_OPCODE_REPLY.hex(' ')}"
