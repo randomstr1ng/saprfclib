@@ -106,24 +106,77 @@ def test_build_ni_route_golden() -> None:
 # --------------------------------------------------------------------------- #
 # Message-server resolve ([ASSUMED] redirect, MockTransport-driven)
 # --------------------------------------------------------------------------- #
-def _ms_redirect(ashost: str, sysnr: int) -> bytes:
-    """Synthetic [ASSUMED] message-server group-logon redirect response.
+def test_message_server_resolve_delegates_to_the_real_exchange() -> None:
+    """resolve() runs the SAPMS exchange rather than an invented one.
 
-    Shape (the contract resolve() parses): the app-server host as a
-    length-prefixed ASCII field followed by a 2-byte big-endian system number.
+    It used to send a 2-byte length-prefixed group name — a shape that satisfied
+    MockTransport and that no message server can interpret. The test that covered
+    it passed because the stub and the test agreed on a protocol that does not
+    exist.
     """
-    host_bytes = ashost.encode("ascii")
-    return len(host_bytes).to_bytes(2, "big") + host_bytes + struct.pack(">H", sysnr)
-
-
-def test_message_server_resolve_returns_host_port() -> None:
-    """resolve(group), driven by a scripted [ASSUMED] redirect response, returns
-    (ashost, sysnr)."""
-    transport = MockTransport([_ms_redirect("vhcala4hci", 0)])
-    client = MessageServerClient(transport)
-    ashost, sysnr = client.resolve("PUBLIC")
-    assert ashost == "vhcala4hci"
+    transport = MockTransport([_MS_LOGIN_ACK, _golden_frame()])
+    ashost, sysnr = MessageServerClient(transport).resolve("PUBLIC")
+    assert ashost == "192.168.88.7"
     assert sysnr == 0
+    # What went out must be a real SAPMS body: 110 bytes, magic at offset 0
+    # (the transport seam owns the NI length prefix, so it is not in the payload).
+    sent = transport.sent[0]
+    assert len(sent) == 0x6E, f"attach body is {len(sent)} bytes, expected 110"
+    assert sent[:12] == b"**MESSAGE**\x00"
+
+
+def test_message_server_reports_the_servers_own_refusal() -> None:
+    """An attach the server refuses must say what it said.
+
+    Golden fixture: a live A4H message server answering a structurally valid
+    attach with return code -20. The previous builder got no reply at all, so
+    there was nothing to report and the caller simply waited.
+    """
+    from saprfclib.exceptions import SapRfcError
+
+    denied = Path(__file__).parent / "golden" / "router" / "sapms_attach_access_denied.bin"
+    transport = MockTransport([denied.read_bytes()])
+    with pytest.raises(SapRfcError, match="access denied") as excinfo:
+        MessageServerClient(transport).resolve("PUBLIC")
+    # The message must point at the way out, not just name the failure.
+    assert "ms/acl_info" in str(excinfo.value)
+    assert "HTTP interface" in str(excinfo.value)
+
+
+def test_sapms_attach_frame_matches_the_validated_layout() -> None:
+    """Every constant here was established by what a live server did or did not answer.
+
+    Confirmed 2026-08-31 against A4H (kernel 793) on port 3601:
+      * 110-byte body — the previous 114-byte body got the connection closed.
+      * version 4 at 0x0c — version 5 is answered with -12 "invalid client
+        version", which is what proves the field's meaning; 1-3 are dropped.
+      * byte 0x43 must be 3 — 0, 1, 2 and 4 are each dropped without a reply.
+    """
+    from saprfclib.router import build_sapms_frame
+
+    frame = build_sapms_frame(msgtype=1, toname="-", fromname="A4H")
+    assert len(frame) == 4 + 0x6E
+    body = frame[4:]
+    assert body[:12] == b"**MESSAGE**\x00"
+    assert body[0x0C] == 4
+    assert body[0x0D] == 0  # errorno is zero outbound
+    assert body[0x0E:0x36] == b"-".ljust(40, b" ")
+    assert body[0x36] == 1
+    assert body[0x43] == 3
+    assert body[0x44:0x6C] == b"A4H".ljust(40, b" ")
+
+
+def test_ms_return_codes_decode_as_signed_bytes() -> None:
+    """0xec is -20, not 236. Reading it unsigned turns an error into a number."""
+    from saprfclib.router import decode_ms_errorno, describe_ms_errorno
+
+    body = bytearray(0x6E)
+    body[0x0D] = 0xEC
+    assert decode_ms_errorno(bytes(body)) == -20
+    assert describe_ms_errorno(-20) == "access denied"
+    assert describe_ms_errorno(-12) == "invalid client version"
+    body[0x0D] = 0
+    assert decode_ms_errorno(bytes(body)) == 0
 
 
 def test_message_server_resolve_rejects_malformed() -> None:
@@ -183,7 +236,8 @@ def test_connect_message_server_binary_path_resolves_then_connects(monkeypatch) 
     """
     import saprfclib.connection as connection
 
-    ms_transport = MockTransport([_ms_redirect("vhcala4hci", 0)])
+    # A real SAPMS exchange: attach reply, then the captured server list.
+    ms_transport = MockTransport([_MS_LOGIN_ACK, _golden_frame()])
     app_transport = MockTransport(_handshake_script())
     handed_out = [ms_transport, app_transport]
 
@@ -201,6 +255,7 @@ def test_connect_message_server_binary_path_resolves_then_connects(monkeypatch) 
         mshost="mshost",
         group="PUBLIC",
         ms_use_http=False,
+        msserv=3601,  # required now: the port is never guessed
     )
     # The message-server side connection was closed after resolve.
     assert ms_transport.closed is True
@@ -448,21 +503,46 @@ def test_resolve_rfc_server_http_explains_an_unreachable_interface(monkeypatch) 
         resolve_rfc_server_http("ms", 8101)
 
 
-def test_message_server_ports_derive_from_the_ms_instance_not_the_sysnr() -> None:
-    """3600/8100 + message-server instance, which is not the app server's sysnr.
+def test_message_server_port_is_never_guessed() -> None:
+    """No numeric default: 3600 and 3601 are both one installation generalised.
 
-    Live scan 2026-08-31: on A4H the app server is sysnr 00 (gateway 3300) while
-    the message server is instance 01 — binary on 3601, HTTP on 8101, and 3600
-    refuses connections outright. Deriving either from `sysnr` reaches nothing.
+    The port is 3600/8100 + the MESSAGE SERVER's instance number, which is not the
+    application server's system number. Live scan 2026-08-31: on A4H the app server
+    is sysnr 00 (gateway 3300) while the message server is instance 01 — 3601 and
+    8101 answer, 3600 refuses outright. A single-instance system puts it at 00
+    instead, and nothing observable from the client tells the two apart. Whichever
+    number were defaulted would silently reach a closed port on the other layout.
     """
     from saprfclib.connection import _ms_http_port, _ms_port
 
-    assert _ms_port(None) == 3601
-    assert _ms_http_port() == 8101
+    with pytest.raises(ValueError, match="cannot determine the binary"):
+        _ms_port("A4H")
+    with pytest.raises(ValueError, match="cannot determine the HTTP"):
+        _ms_http_port("A4H")
+    # The message is actionable: it must name the way out, not just the problem.
+    with pytest.raises(ValueError, match="msserv="):
+        _ms_port("A4H")
+
     # Explicit values win, as a port or as a numeric string.
-    assert _ms_port(None, 3600) == 3600
-    assert _ms_port(None, "3699") == 3699
-    assert _ms_http_port(8199) == 8199
+    assert _ms_port("A4H", 3601) == 3601
+    assert _ms_port("A4H", "3699") == 3699
+    assert _ms_http_port("A4H", 8101) == 8101
+
+
+def test_message_server_port_comes_from_etc_services_when_present(monkeypatch) -> None:
+    """sapms<SID> states the instance number rather than assuming it."""
+    from saprfclib import connection as connection_mod
+
+    monkeypatch.setattr(
+        connection_mod._socket_module,
+        "getservbyname",
+        lambda name: 3601 if name == "sapmsA4H" else (_ for _ in ()).throw(OSError()),
+    )
+    from saprfclib.connection import _ms_http_port, _ms_port
+
+    assert _ms_port("A4H") == 3601
+    # The same instance number drives the HTTP port: 8100 + 1.
+    assert _ms_http_port("A4H") == 8101
 
 
 def test_unknown_service_name_is_refused_not_defaulted() -> None:

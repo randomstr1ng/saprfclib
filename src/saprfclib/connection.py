@@ -4177,16 +4177,28 @@ def connect(
     return conn
 
 
-# Message-server ports are derived from the MESSAGE SERVER's own instance number,
-# which is not the application server's system number. On A4H the app server is
-# sysnr 00 (gateway 3300) while the message server runs as instance 01: binary on
-# 3601 and HTTP on 8101, with 3600 refusing connections outright. Deriving either
-# from `sysnr` therefore connects to nothing on a perfectly ordinary system.
+# Message-server ports are 36<nn> (binary) and 81<nn> (HTTP), where nn is the
+# MESSAGE SERVER's own instance number — not the application server's system
+# number. Confirmed by live scan 2026-08-31: on A4H the app server is sysnr 00
+# (gateway 3300, and the message server itself reports RFC=3300) while the message
+# server runs as instance 01, so it answers on 3601/8101 and 3600 refuses outright.
+# sapstartsrv on both 50013 and 50113 (5<nn>13) confirms the two instances exist.
 #
-# Confirmed by live scan 2026-08-31. There is no way to infer the message server's
-# instance number from the application server's, so it has to be supplied; these
-# defaults match the common single-instance case and are overridable.
-_DEFAULT_MS_INSTANCE = 1
+# There is deliberately NO numeric default here.
+#
+# It is tempting to default to 3600 (instance 00) or, having seen this system, to
+# 3601. Both are one installation generalised to all of them: a single-instance
+# system puts the message server at 00 and an ASCS-split system at 01 or higher,
+# and nothing observable from the client distinguishes them. The previous default
+# of 3600 silently reached a closed port here; defaulting to 3601 would do the same
+# to everyone else. A wrong port is not a failure the caller can interpret.
+#
+# So the instance number is resolved from something the system states rather than
+# guessed: the sapms<SID> entry in /etc/services, which is how SAP tooling has
+# always located it. If that is absent, the caller is asked for `msserv` instead of
+# being sent somewhere plausible.
+_MS_BINARY_BASE = 3600
+_MS_HTTP_BASE = 8100
 
 
 def _resolve_via_message_server(
@@ -4215,7 +4227,7 @@ def _resolve_via_message_server(
     from saprfclib.router import MessageServerClient, resolve_rfc_server_http
 
     if use_http:
-        http_port = _ms_http_port(ms_http_port if ms_http_port is not None else msserv)
+        http_port = _ms_http_port(sysid, ms_http_port if ms_http_port is not None else msserv)
         host, rfc_port = resolve_rfc_server_http(mshost, http_port, group=group)
         # The list gives an RFC port; the rest of connect() wants a system number.
         # 3300 + sysnr is the confirmed gateway convention. Anything else is a
@@ -4250,27 +4262,28 @@ def _resolve_via_message_server(
         ms_transport.close()
 
 
-def _ms_port(sysid: str | None, msserv: int | str | None = None) -> int:
-    """Binary message-server port (36<nn>, nn = message-server instance number).
+def _ms_instance_from_services(sysid: str | None) -> int | None:
+    """Recover the message server's instance number from ``sapms<SID>``.
 
-    Args:
-        sysid: unused; kept for call compatibility. The system ID does not encode
-            the message server's instance number.
-        msserv: an explicit port, or a service name such as ``"sapmsA4H"`` which
-            is looked up in /etc/services the way the SAP tools do.
+    This is the mechanism SAP tooling uses to find the message server, and it is
+    the only client-side source that states the instance number rather than
+    assuming it. Returns None when the entry is absent, which is common on hosts
+    that were never configured as SAP clients.
     """
-    return _resolve_ms_service(msserv, 3600 + _DEFAULT_MS_INSTANCE)
+    if not sysid:
+        return None
+    try:
+        port = _socket_module.getservbyname(f"sapms{sysid.upper()}")
+    except OSError:
+        return None
+    instance = port - _MS_BINARY_BASE
+    return instance if 0 <= instance <= 99 else None
 
 
-def _ms_http_port(msserv: int | str | None = None) -> int:
-    """HTTP message-server port (81<nn>, nn = message-server instance number)."""
-    return _resolve_ms_service(msserv, 8100 + _DEFAULT_MS_INSTANCE)
-
-
-def _resolve_ms_service(msserv: int | str | None, default: int) -> int:
-    """Turn an explicit port, a service name, or nothing into a port number."""
+def _resolve_ms_service(msserv: int | str | None) -> int | None:
+    """Turn an explicit port or service name into a port number; None if unset."""
     if msserv is None:
-        return default
+        return None
     if isinstance(msserv, int):
         return msserv
     text = msserv.strip()
@@ -4279,12 +4292,41 @@ def _resolve_ms_service(msserv: int | str | None, default: int) -> int:
     try:
         return _socket_module.getservbyname(text)
     except OSError:
-        # A name that /etc/services does not know is a configuration mistake, not
-        # something to paper over by silently connecting somewhere else.
+        # A name /etc/services does not know is a configuration mistake, not
+        # something to paper over by connecting somewhere else.
         raise ValueError(
             f"message-server service {msserv!r} is not in /etc/services; give the "
             f"port number instead (for example msserv=3601)"
         ) from None
+
+
+def _ms_port_or_raise(sysid: str | None, msserv: int | str | None, base: int, what: str) -> int:
+    """Resolve a message-server port, or explain why it cannot be resolved."""
+    explicit = _resolve_ms_service(msserv)
+    if explicit is not None:
+        return explicit
+    instance = _ms_instance_from_services(sysid)
+    if instance is not None:
+        return base + instance
+    raise ValueError(
+        f"cannot determine the {what} message-server port: no msserv was given and "
+        f"there is no sapms{(sysid or '<SID>').upper()} entry in /etc/services. The "
+        f"port is {base} + the message server's instance number, which is NOT the "
+        f"application server's system number and cannot be derived from it — on a "
+        f"system with a separate ASCS they differ. Pass msserv explicitly (a port "
+        f"such as msserv={base + 1}, or the service name msserv='sapms"
+        f"{(sysid or 'SID').upper()}')."
+    )
+
+
+def _ms_port(sysid: str | None, msserv: int | str | None = None) -> int:
+    """Binary message-server port (36<nn>, nn = message-server instance number)."""
+    return _ms_port_or_raise(sysid, msserv, _MS_BINARY_BASE, "binary")
+
+
+def _ms_http_port(sysid: str | None = None, msserv: int | str | None = None) -> int:
+    """HTTP message-server port (81<nn>, nn = message-server instance number)."""
+    return _ms_port_or_raise(sysid, msserv, _MS_HTTP_BASE, "HTTP")
 
 
 # ---------------------------------------------------------------------------

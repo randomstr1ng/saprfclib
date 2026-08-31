@@ -35,6 +35,10 @@ from saprfclib.exceptions import SapRfcError
 
 __all__ = [
     "RouteHop",
+    "build_sapms_frame",
+    "parse_sapms_reply",
+    "decode_ms_errorno",
+    "describe_ms_errorno",
     "parse_route_string",
     "build_ni_route",
     "parse_sapms_server_list",
@@ -326,51 +330,15 @@ class MessageServerClient:
         self._transport = transport
 
     def resolve(self, group: str) -> tuple[str, int]:
-        """Resolve a logon ``group`` to (ashost, sysnr).
+        """Resolve a logon ``group`` to (ashost, sysnr) over the binary protocol.
 
-        TRANS-03 confirmed from live capture 2026-06-27: the full SAPMS exchange
-        uses multi-frame **MESSAGE** protocol (magic + 4-byte header + 40-byte
-        sender + opcode fields). Full frame parsing is deferred to Phase 4 when
-        the RFC invoke path is available for end-to-end testing. This method
-        exposes the mock-testable seam interface used by Phase 3 tests.
-
-        The simplified mock contract (used by MockTransport tests):
-          Request: the group name as a 2-byte BE length-prefixed ASCII field.
-          Response: app-server host as a 2-byte BE length-prefixed ASCII field
-                    followed by a 2-byte BE system number.
-
-        Phase 4 will replace request/response with the full **MESSAGE** exchange
-        (login frame → login ack → get-server list → server list parse → IP+port
-        → sysnr = port - 3300).
-
-        The resolved (ashost, sysnr) is validated before use (threat T-03-REDIR).
+        Delegates to :meth:`resolve_full`, which runs the real SAPMS exchange.
+        Until 2026-08-31 this method ran a different, invented protocol: a 2-byte
+        length-prefixed group name, shaped to satisfy MockTransport and
+        uninterpretable by any real message server. Two implementations of one
+        thing, one of them fictional, is worse than one that reports its limits.
         """
-        group_bytes = group.encode("ascii", "replace")
-        request = struct.pack(">H", len(group_bytes)) + group_bytes
-        self._transport.send_message(request)  # type: ignore[attr-defined]
-        resp = self._transport.recv_message()  # type: ignore[attr-defined]
-
-        if len(resp) < 2:
-            raise ValueError(
-                "malformed message-server redirect: response too short for a host length"
-            )
-        (host_len,) = struct.unpack_from(">H", resp, 0)
-        host_end = 2 + host_len
-        if host_len == 0 or host_end + 2 > len(resp):
-            raise ValueError(
-                "malformed message-server redirect: host field exceeds response bounds"
-            )
-        ashost = resp[2:host_end].decode("ascii", "replace")
-        (sysnr,) = struct.unpack_from(">H", resp, host_end)
-
-        # T-03-REDIR: validate the resolved target is well-formed before use.
-        if not ashost.strip():
-            raise ValueError("malformed message-server redirect: empty application-server host")
-        if not 0 <= sysnr <= 99:
-            raise ValueError(
-                f"malformed message-server redirect: system number {sysnr} out of range 0-99"
-            )
-        return ashost, sysnr
+        return self.resolve_full(group=group)
 
     def resolve_full(self, group: str, sysid: str = "") -> tuple[str, int]:
         """Resolve a logon ``group`` to (ashost, sysnr) using the full SAPMS MESSAGE
@@ -395,19 +363,36 @@ class MessageServerClient:
         # 40-88 in phase03_msgserver_capture_output.txt). For the Phase 4 MVP the
         # full live path is exercised by the integration test; the unit test uses
         # MockTransport scripted with [login_ack, server_list_response].
-        login_frame = _build_sapms_login_frame(group=group, sysid=sysid)
-        self._transport.send_message(login_frame)  # type: ignore[attr-defined]
+        # The transport seam is NI-framed: send_message adds the 4-byte length
+        # prefix and recv_message strips it, so everything here is the bare SAPMS
+        # body. This used to send frames that already carried a prefix — the
+        # transport then added a second one — and to look for the magic at offset
+        # 4 of a payload whose prefix had already been removed. Both mistakes
+        # cancelled out under MockTransport, whose scripted frames included the
+        # prefix, and neither could have worked on a socket.
+        self._transport.send_message(  # type: ignore[attr-defined]
+            _build_sapms_login_frame(group=group, sysid=sysid)
+        )
 
-        # Step 2: receive login ack. Validate magic only (content is [ASSUMED]).
-        login_ack = self._transport.recv_message()  # type: ignore[attr-defined]
-        if len(login_ack) < 15 or login_ack[4:15] != _SAPMS_MAGIC:
-            raise ValueError(
-                "SAPMS login ack invalid: missing **MESSAGE** magic or response too short"
+        # Step 2: receive the attach reply and report the server's own return code.
+        login_ack = bytes(self._transport.recv_message())  # type: ignore[attr-defined]
+        errorno, _toname, _fromname, _msgtype = parse_sapms_reply(login_ack)
+        if errorno != 0:
+            raise SapRfcError(
+                f"message server refused the attach: {describe_ms_errorno(errorno)} "
+                f"(return code {errorno}). An external attach has to be permitted by "
+                f"the server; that is governed by ms/acl_info. The HTTP interface "
+                f"needs no attach — see docs/protocol/message_server.md."
             )
 
-        # Step 3: send server-list request. Wire-captured opcode 0x0500 / sub 0x0403.
-        server_list_req = _build_sapms_server_list_request()
-        self._transport.send_message(server_list_req)  # type: ignore[attr-defined]
+        # Step 3: send the server-list request.
+        #
+        # [ASSUMED] which msgtype asks for a server list. Every attach against a
+        # live server so far has been refused before this point, so no request has
+        # ever been answered with a list to compare against.
+        self._transport.send_message(  # type: ignore[attr-defined]
+            _build_sapms_server_list_request()
+        )
 
         # Step 4: receive server-list response and parse.
         server_list_frame = self._transport.recv_message()  # type: ignore[attr-defined]
@@ -447,113 +432,160 @@ class MessageServerClient:
 # ---------------------------------------------------------------------------
 
 
-def _build_sapms_header(
-    msg_type: int,
-    direction: int,
-    opcode_name: str,
-    opcode_field: int,
-    sub_opcode: int,
-    sender: str = "",
-) -> bytes:
-    """Build a SAPMS MESSAGE frame header (118 bytes, wire-captured layout).
+# ---------------------------------------------------------------------------
+# SAPMS MESSAGE frame builders (wire-captured field layout, 2026-06-27)
+# ---------------------------------------------------------------------------
 
-    Offsets confirmed from live capture 2026-06-27 (TRANS-03):
-      [0:4]   NI length prefix (placeholder, caller must fix)
-      [4:15]  "**MESSAGE**" magic
-      [15]    key 0x00
-      [16]    version 0x04
-      [17]    padding 0x00
-      [18]    sender_type 0x2D ('-') for empty sender
-      [19:59] sender_name (40 bytes: space-padded + null)
-      [59:70] 11 zero bytes
-      [70]    msg_type
-      [71]    direction
-      [72:82] opcode_name (10-byte ASCII, space-padded)
-      [82:112] opcode padding (30 space bytes)
-      [112:114] 0x0000
-      [114:116] opcode_field
-      [116:118] sub_opcode
+
+# --------------------------------------------------------------------------- #
+# SAPMS binary frame — CONFIRMED against a live message server 2026-08-31
+# --------------------------------------------------------------------------- #
+#
+# The attach frame is exactly 110 bytes (0x6e) of body behind the 4-byte NI
+# length prefix. The header runs to 0x6c and ends with the 2-byte service
+# number, so the header IS the whole frame — there is no body after it.
+#
+#   0x00  12  "**MESSAGE**\0"
+#   0x0c   1  version          — 4. Sending 5 is answered with -12
+#                                "invalid client version"; 1-3 get the
+#                                connection dropped without a reply.
+#   0x0d   1  errorno          — 0 outbound; the server's return code inbound.
+#   0x0e  40  toname           — ASCII, space-padded.
+#   0x36   1  msgtype          — 0 gets no reply; 1-7 are all answered.
+#   0x43   1  must be 3        — 0, 1, 2 and 4 each get the connection dropped.
+#   0x44  40  fromname         — ASCII, space-padded; the client's own name.
+#   0x6c   2  service number   — network order.
+#
+# Every value above was established by sending candidate frames to a live
+# message server (A4H, kernel 793, port 3601) and recording which drew a reply,
+# which drew a specific error, and which were dropped. Golden fixture:
+# tests/golden/router/sapms_attach_access_denied.bin.
+#
+# What the previous implementation sent: a 114-byte body, with 0x0e read as a
+# one-byte "sender type" and a 10-byte "opcode name" placed at 0x44 — which is
+# where the 40-byte fromname belongs. The message server closes the connection
+# on that frame without replying at all. The mistake survived because both
+# fields are space-padded, so the bytes looked plausible next to a partial
+# capture.
+
+_SAPMS_MAGIC_FULL = b"**MESSAGE**\x00"
+_SAPMS_FRAME_LEN = 0x6E  # 110 — confirmed: the SDK writes exactly this many
+_SAPMS_VERSION = 4
+_SAPMS_FLAG_43 = 3  # confirmed mandatory; any other value drops the connection
+
+_OFF_VERSION = 0x0C
+_OFF_ERRORNO = 0x0D
+_OFF_TONAME = 0x0E
+_OFF_MSGTYPE = 0x36
+_OFF_FLAG43 = 0x43
+_OFF_FROMNAME = 0x44
+_OFF_SERVNO = 0x6C
+_NAME_LEN = 40
+
+# Message-server return codes, as the server reports them in the errorno byte.
+# Confirmed live: -20 for an attach this server's ACL refuses, and -12 by sending
+# version 5 deliberately. The remainder are decoded to the same scheme.
+_MS_ERRORS: dict[int, str] = {
+    -12: "invalid client version",
+    -18: "message server shutdown",
+    -20: "access denied",
+    -25: "message server soft shutdown",
+}
+
+
+def decode_ms_errorno(body: bytes) -> int:
+    """Return the signed message-server return code from a SAPMS reply.
+
+    0 means success. The field is one signed byte at 0x0d.
     """
-    buf = bytearray(118)
-    # NI length placeholder (0 — caller fixes after appending body)
-    struct.pack_into(">I", buf, 0, 0)
-    # Magic
-    buf[4:15] = _SAPMS_MAGIC
-    # key=0, version=4, padding=0, sender_type='-'
-    buf[15] = 0x00
-    buf[16] = 0x04
-    buf[17] = 0x00
-    buf[18] = 0x2D
-    # sender_name: 39 chars space-padded + null
-    sender_bytes = sender.encode("ascii", "replace")[:39]
-    buf[19 : 19 + len(sender_bytes)] = sender_bytes
-    buf[19 + len(sender_bytes) : 58] = b" " * (39 - len(sender_bytes))
-    buf[58] = 0x00  # null terminator
-    # zeros [59:70]
-    buf[59:70] = b"\x00" * 11
-    # msg_type, direction
-    buf[70] = msg_type & 0xFF
-    buf[71] = direction & 0xFF
-    # opcode_name: 10 bytes space-padded
-    op_bytes = opcode_name.encode("ascii", "replace")[:10]
-    buf[72 : 72 + len(op_bytes)] = op_bytes
-    buf[72 + len(op_bytes) : 82] = b" " * (10 - len(op_bytes))
-    # opcode padding [82:112]: 30 space bytes
-    buf[82:112] = b" " * 30
-    # unknown [112:114]: zeros
-    buf[112:114] = b"\x00\x00"
-    # opcode_field [114:116] and sub_opcode [116:118]
-    struct.pack_into(">H", buf, 114, opcode_field)
-    struct.pack_into(">H", buf, 116, sub_opcode)
-    return bytes(buf)
+    if len(body) <= _OFF_ERRORNO:
+        raise ValueError(f"SAPMS frame too short to hold a return code: {len(body)} bytes")
+    raw = body[_OFF_ERRORNO]
+    return raw - 256 if raw > 127 else raw
+
+
+def describe_ms_errorno(code: int) -> str:
+    """Human-readable text for a message-server return code."""
+    return _MS_ERRORS.get(code, f"message server error {code}")
+
+
+def build_sapms_frame(
+    *,
+    msgtype: int,
+    toname: str = "-",
+    fromname: str = "-",
+    servno: int = 0,
+    version: int = _SAPMS_VERSION,
+) -> bytes:
+    """Build a SAPMS frame with its NI length prefix (114 bytes total).
+
+    Defaults match what the SDK's attach path sends: ``"-"`` for a name the
+    caller has not set, and service number 0 when none applies.
+    """
+    body = bytearray(_SAPMS_FRAME_LEN)
+    body[0 : len(_SAPMS_MAGIC_FULL)] = _SAPMS_MAGIC_FULL
+    body[_OFF_VERSION] = version
+    body[_OFF_ERRORNO] = 0
+    body[_OFF_TONAME : _OFF_TONAME + _NAME_LEN] = _ms_name(toname)
+    body[_OFF_MSGTYPE] = msgtype & 0xFF
+    body[_OFF_FLAG43] = _SAPMS_FLAG_43
+    body[_OFF_FROMNAME : _OFF_FROMNAME + _NAME_LEN] = _ms_name(fromname)
+    struct.pack_into(">H", body, _OFF_SERVNO, servno)
+    return struct.pack(">I", len(body)) + bytes(body)
+
+
+def _ms_name(name: str) -> bytes:
+    """A 40-byte space-padded ASCII name field."""
+    return name.encode("ascii", "replace")[:_NAME_LEN].ljust(_NAME_LEN, b" ")
+
+
+def parse_sapms_reply(frame: bytes) -> tuple[int, str, str, int]:
+    """Parse a SAPMS reply into (errorno, toname, fromname, msgtype).
+
+    The server swaps the names round: the name sent as ``fromname`` comes back in
+    ``toname``. Confirmed against the live reply in the golden fixture.
+    """
+    body = frame[4:] if len(frame) > 4 and frame[4 : 4 + 12] == _SAPMS_MAGIC_FULL else frame
+    if len(body) < _SAPMS_FRAME_LEN:
+        raise ValueError(f"SAPMS reply is {len(body)} bytes, expected at least {_SAPMS_FRAME_LEN}")
+    if body[: len(_SAPMS_MAGIC_FULL)] != _SAPMS_MAGIC_FULL:
+        raise ValueError(f"not a SAPMS frame: magic is {body[:12]!r}")
+    return (
+        decode_ms_errorno(body),
+        body[_OFF_TONAME : _OFF_TONAME + _NAME_LEN].decode("ascii", "replace").rstrip(),
+        body[_OFF_FROMNAME : _OFF_FROMNAME + _NAME_LEN].decode("ascii", "replace").rstrip(),
+        body[_OFF_MSGTYPE],
+    )
 
 
 def _build_sapms_login_frame(group: str = "", sysid: str = "") -> bytes:
-    """Build a SAPMS login frame (118 bytes).
+    """Build a SAPMS attach frame (110-byte body + 4-byte NI prefix).
 
-    Wire-captured: CLIENT→MS first frame has msg_type=0x02, direction=0x08,
-    opcode_name='-' (space-padded), opcode_field=0x0000, sub_opcode=0x0000.
-    The opcode fields at [112:118] are 0x00 0x00 0x40 0x00 0x01 0x00 in the
-    live capture — [ASSUMED] content is not validated by the server in the
-    Phase 4 mock exchange.
+    ``msgtype=1`` is used: 0 draws no reply at all, while 1 through 7 are each
+    answered. Which of them the server treats as a logon-group query is not yet
+    established — this server refuses the attach with "access denied" before
+    getting that far, so the distinction has not been observable here.
     """
-    # [ASSUMED] login frame body is empty beyond the 118-byte header.
-    # The live exchange sends a 114-byte frame (NI len 110 = 114 - 4 bytes content
-    # of 110 bytes). For the Phase 4 mock test, the server-list request is the
-    # meaningful frame — the login frame just opens the exchange.
-    header = _build_sapms_header(
-        msg_type=0x02,
-        direction=0x08,
-        opcode_name="-",
-        opcode_field=0x0000,
-        sub_opcode=0x0000,
-    )
-    buf = bytearray(header)
-    # Fix NI length: total frame = 118 bytes, NI prefix covers the body after prefix.
-    struct.pack_into(">I", buf, 0, len(buf) - 4)
-    return bytes(buf)
+    return build_sapms_frame(
+        msgtype=1,
+        toname="-",
+        fromname=sysid or "-",
+    )[4:]  # body only: the transport adds the NI length prefix
 
 
 def _build_sapms_server_list_request() -> bytes:
-    """Build a SAPMS server-list request frame (118 bytes).
+    """Build a SAPMS server-list request frame.
 
-    Wire-captured: CLIENT→MS frame has msg_type=0x02, direction=0x01,
-    opcode_name='MSG_SERVER', opcode_field=0x0500 [ASSUMED], sub_opcode=0x0403 [ASSUMED].
-    The wire capture shows opcode bytes 0x05 0x00 at offset [114:116] and 0x68 0x03
-    at [116:118] but these are in a different (earlier) request; the server responds
-    with opcode_field=0x0500/sub=0x0403 in the response (golden fixture). [ASSUMED]
-    the request uses the same opcode pair to trigger the server-list response.
+    The frame is structurally valid — same 110-byte layout as the attach, which a
+    live message server parses and answers. What is NOT established is which
+    ``msgtype`` asks for a server list: this server refuses the attach that
+    precedes it with "access denied", so no request has ever been answered with
+    a list to compare against.
+
+    ``msgtype=4`` is a placeholder, not a finding. Do not read it as one.
     """
-    header = _build_sapms_header(
-        msg_type=0x02,
-        direction=0x01,
-        opcode_name="MSG_SERVER",
-        opcode_field=0x0500,  # [ASSUMED] triggers server-list response
-        sub_opcode=0x0403,  # [ASSUMED]
-    )
-    buf = bytearray(header)
-    struct.pack_into(">I", buf, 0, len(buf) - 4)
-    return bytes(buf)
+    # body only: the transport adds the NI length prefix
+    return build_sapms_frame(msgtype=4, toname="-", fromname="-")[4:]
 
 
 # --------------------------------------------------------------------------- #

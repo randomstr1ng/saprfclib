@@ -259,9 +259,7 @@ def test_pool_shares_one_cache_across_its_connections() -> None:
     try:
         # min_size=0: the default of 1 pre-fills during __init__, which would
         # open a real socket before the factory seam is in place.
-        pool = pool_mod.ConnectionPool(
-            {"ashost": "h", "sysnr": 0, "client": "001"}, min_size=0
-        )
+        pool = pool_mod.ConnectionPool({"ashost": "h", "sysnr": 0, "client": "001"}, min_size=0)
         first = pool._open()
         second = pool._open()
     finally:

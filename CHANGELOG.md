@@ -26,6 +26,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The binary message-server frame layout is now confirmed, and it was wrong.**
+  Validated against a live A4H message server by sending candidate frames and
+  recording which drew a reply, which drew a specific error, and which were dropped.
+  The attach frame is **110 bytes**, not the 114 the builder produced — the server
+  closes the connection on the old frame without replying at all. `0x0e` is the start
+  of a 40-byte `toname`, not a one-byte "sender type", and `0x44` holds the 40-byte
+  `fromname`, not a 10-byte "opcode name". Both fields are space-padded, which is why
+  the mistake survived beside a partial capture: the bytes looked plausible.
+- Two constants are now evidenced rather than assumed: version `4` at `0x0c` (sending
+  5 is answered with −12 *"invalid client version"*, which is what proves the field's
+  meaning) and the byte at `0x43`, which must be `3` — 0, 1, 2 and 4 each get the
+  connection dropped.
+- Message-server return codes are decoded, from a **signed** byte at `0x0d`. Read
+  unsigned, `0xec` is 236 rather than −20, turning *"access denied"* into a number.
+- `MessageServerClient.resolve` no longer runs an invented protocol. It sent a 2-byte
+  length-prefixed group name — a shape created to satisfy `MockTransport` and
+  uninterpretable by any message server. Its test passed because the stub and the test
+  agreed on a protocol that does not exist. It now delegates to the real SAPMS
+  exchange, and reports the server's own return code instead of waiting.
+- Both message-server builders carried their own NI length prefix while handing the
+  result to a transport seam that adds one, and read the reply magic at offset 4 of a
+  payload whose prefix had already been stripped. The two errors cancelled out under
+  `MockTransport` and could not have worked on a socket.
+- **No numeric default for the message-server port.** The previous commit replaced a
+  hardcoded 3600 with 3601, which is the same mistake with a different number: 3600 is
+  right for a single-instance system and 3601 for an ASCS split, and nothing observable
+  from the client distinguishes them. The instance number now comes from the
+  `sapms<SID>` entry in `/etc/services`, and when that is absent the caller is asked for
+  `msserv` rather than sent somewhere plausible.
+
+### Added
+
+- `CLAUDE.md` gains **"Nothing ships unvalidated — including defaults"**. The evidence
+  tiers governed wire values; this governs commits, and names the things that do not
+  look like protocol facts but are: default values, fallback paths, and anything
+  learned from reverse engineering. RE establishes what to *test*; the wire establishes
+  what is true.
+
 - **Load-balanced logon could not work, and failed silently.** `connect(mshost=...)`
   derived the message-server port as a hardcoded 3600 — the function took a `sysid`
   argument and ignored it, while its docstring claimed "3600 + sysnr". Both are wrong:

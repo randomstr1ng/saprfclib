@@ -104,24 +104,80 @@ though resolution succeeded — pass `ashost` directly in that case.
 
 ---
 
-!!! warning "The binary message-server protocol is UNVERIFIED"
+## Binary protocol — the frame layout is CONFIRMED
 
-    `router.py` builds `**MESSAGE**` frames from a partial capture, and most of
-    the `[ASSUMED]` labels in this project are in that code: the login frame
-    body, the opcode pair believed to request a server list, the per-entry field
-    layout, and how the entry count is derived.
+Validated 2026-08-31 against A4H (kernel 793) on port 3601 by sending candidate
+frames and recording which drew a reply, which drew a specific error, and which
+were dropped.
 
-    Tested against a live message server on 2026-08-31, it does not work. The
-    server accepts the TCP connection on 3601 and then answers **nothing** — no
-    login acknowledgement, no server list, no error. Both the login frame and
-    the opcode pair are wrong.
+The attach frame is **110 bytes** of body behind the 4-byte NI length prefix.
+The header runs to `0x6c` and ends with the service number, so the header *is*
+the whole frame — nothing follows it.
 
-    This is why the HTTP interface is the default. An unverified path deciding
-    which application server a caller talks to is not a failure the caller can
-    see. `ms_use_http=False` forces the binary path for anyone wanting to work
-    on it.
+| Offset | Size | Field | Evidence |
+|--------|------|-------|----------|
+| `0x00` | 12 | `**MESSAGE**\0` | magic |
+| `0x0c` | 1 | version = **4** | version 5 is answered with −12 *"invalid client version"*; 1–3 are dropped without a reply |
+| `0x0d` | 1 | errorno (signed) | 0 outbound; the server's return code inbound |
+| `0x0e` | 40 | toname, space-padded | |
+| `0x36` | 1 | msgtype | 0 draws no reply; 1–7 are each answered |
+| `0x43` | 1 | must be **3** | 0, 1, 2 and 4 each get the connection dropped |
+| `0x44` | 40 | fromname, space-padded | |
+| `0x6c` | 2 | service number, network order | |
 
-    **To close this gap:** capture a real client performing a group logon
-    (SAP GUI with a logon group, or `sapcontrol`) against the message server
-    port and record both directions. The frames are small and the exchange is
-    short.
+The server swaps the names in its reply: what you send as `fromname` comes back
+in `toname`.
+
+### Return codes
+
+`0x0d` is a **signed** byte. Reading it unsigned turns an error into a plausible
+number — `0xec` is −20, not 236.
+
+| Code | Meaning |
+|------|---------|
+| 0 | success |
+| −12 | invalid client version |
+| −18 | message server shutdown |
+| −20 | access denied |
+| −25 | message server soft shutdown |
+
+−20 and −12 were both reproduced live. Golden fixture:
+`tests/golden/router/sapms_attach_access_denied.bin`.
+
+### What the previous implementation sent
+
+A 114-byte body, with `0x0e` read as a one-byte "sender type" and a 10-byte
+"opcode name" placed at `0x44` — which is where the 40-byte `fromname` belongs.
+**The message server closes the connection on that frame without replying.** The
+mistake survived because both fields are space-padded, so the bytes looked
+plausible beside a partial capture.
+
+`MessageServerClient.resolve` was worse than wrong: it sent a 2-byte
+length-prefixed group name — a shape invented to satisfy `MockTransport`, which
+no message server can interpret. Its test passed because the stub and the test
+agreed on a protocol that does not exist.
+
+Both builders also carried their own NI length prefix while handing the result
+to a transport seam that adds one, and looked for the magic at offset 4 of a
+payload whose prefix had already been stripped. The two errors cancelled under
+`MockTransport` and could never have worked on a socket.
+
+---
+
+!!! warning "What is still open: the server-list request"
+
+    The attach frame is confirmed, but **which `msgtype` asks for a server list
+    is not**. Every attach against a live server so far is refused with
+    *access denied* before the request is reached, so no request has ever been
+    answered with a list to compare against. `_build_sapms_server_list_request`
+    uses `msgtype=4` as a **placeholder, not a finding**.
+
+    Access is governed by the server's `ms/acl_info`. External binary attach is
+    restricted by default on current kernels — which is why the HTTP interface
+    remains the default path.
+
+    **To close this:** either permit an external attach on a test system, or
+    capture a real client performing a group logon (SAP GUI with a logon group,
+    or `sapcontrol`) against the message-server port, both directions.
+
+
