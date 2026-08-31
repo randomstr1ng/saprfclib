@@ -210,10 +210,17 @@ class Transport:
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
+        # Cumulative wire bytes, including the 4-byte NI length prefix, so the
+        # figure matches what a packet capture would show rather than the
+        # payload the RFC layer sees.
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
     def send_message(self, payload: bytes) -> None:
         """Send one NI-framed message (4-byte BE length prefix + payload)."""
-        self._sock.sendall(build_ni_frame(payload))
+        frame = build_ni_frame(payload)
+        self._sock.sendall(frame)
+        self.bytes_sent += len(frame)
 
     def recv_message(self) -> bytes:
         """Receive one NI-framed message; loop until complete (short-read guard).
@@ -228,6 +235,7 @@ class Transport:
                 f"NI frame length {length} exceeds cap {self._MAX_FRAME_BYTES} (DoS guard)"
             )
         payload = _recv_exactly(self._sock, length)
+        self.bytes_received += _NI_HEADER_SIZE + len(payload)
         raise_for_ni_error(payload)
         return payload
 
@@ -312,13 +320,17 @@ class AsyncTransport:
     ) -> None:
         self._reader = reader
         self._writer = writer
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
     async def send_message(self, payload: bytes) -> None:
         """Send one NI-framed message (4-byte BE length prefix + payload).
 
         Awaits drain() after write to enforce backpressure (Pitfall 6).
         """
-        self._writer.write(_NI_HEADER.pack(len(payload)) + payload)
+        frame = _NI_HEADER.pack(len(payload)) + payload
+        self._writer.write(frame)
+        self.bytes_sent += len(frame)
         await self._writer.drain()
 
     async def recv_message(self) -> bytes:
@@ -337,6 +349,7 @@ class AsyncTransport:
                 f"NI frame length {length} exceeds cap {self._MAX_FRAME_BYTES} (DoS guard)"
             )
         payload = await self._reader.readexactly(length)
+        self.bytes_received += _NI_HEADER_SIZE + len(payload)
         raise_for_ni_error(payload)
         return payload
 

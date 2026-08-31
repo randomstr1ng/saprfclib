@@ -287,7 +287,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
 | 0x0513    | analysis          | Function call begin (type B)                                         |
 | 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
-| 0x0667    | capture     | Server call duration: float64 LITTLE-endian, microseconds            |
+| 0x0667    | capture     | 8-byte float64 LITTLE-endian. Meaning [ASSUMED] — see below          |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
@@ -331,7 +331,7 @@ NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
     0x0203  ext len=510    result param value (CHAR(255) UTF-16LE, space-padded)
     ...                    (one name/value pair per output param)
     0x0130  len=80         calling program name "SAPLSTFC" (UTF-16LE padded)
-    0x0667  len=8          server call duration — float64 LE, microseconds
+    0x0667  len=8          float64 LE — meaning unconfirmed, see the note below
     0xFFFF  len=0          TLV stream terminator
 ```
 
@@ -367,7 +367,7 @@ APPC header (76B) + RFC marker 00000002 (4B)
     0x0420  len=4          return code uint32 BE (0 = success)
     0x0512  len=0          parameter section start (no parameters follow)
     0x0130  len=80         handling program "SAPLSYSU" (UTF-16LE, padded to 40 chars)
-    0x0667  len=8          call duration — float64 LE, microseconds (138.0 here)
+    0x0667  len=8          float64 LE = 138.0 here — meaning unconfirmed
     0xFFFF  len=0          TLV stream terminator
 ```
 
@@ -591,7 +591,7 @@ Server → client (response: COUNTER=2, RESULT=11):
     0x0201  len=14         'COUNTER'    ← CHANGING param (new value)
     0x0203  len=4          02 00 00 00  ← value = 2 (INT4 LE)
     0x0130  len=80         'SAPLMRFC' (program name)
-    0x0667  len=8          server call duration — float64 LE, microseconds
+    0x0667  len=8          float64 LE — meaning unconfirmed, see the note below
     0xFFFF  len=0          terminator
 ```
 
@@ -952,6 +952,38 @@ against a live logon. See [handshake.md](handshake.md) for the derivation.
 parsed out of the response TLV, and the tags carrying it on a system failure have not been
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
+
+### Tag 0x0667 — the bytes are confirmed, the meaning is not
+
+The field is 8 bytes and decodes cleanly as a little-endian IEEE-754 double.
+That much is capture-confirmed. What the number *means* is not, and this table
+previously recorded "server call duration, microseconds" at capture tier — which
+a capture cannot establish. A capture shows `138.0`; it does not say what 138.0
+counts.
+
+The two golden fixtures disagree with each other:
+
+| Fixture | Value | Recorded as |
+|---------|-------|-------------|
+| `rfcping_response.json` | 138.0 | "call duration ... in microseconds" |
+| `stfc_connection_response.json` | 74.0 | "[ASSUMED] RFC timeout or similar (timeout in seconds?)" |
+
+Three readings fit both numbers and they are far apart:
+
+- **microseconds** — RFCPING took 138 µs. Plausible.
+- **milliseconds** — RFCPING took 138 ms. Also plausible.
+- **not a duration at all** — 138 and 74 are settings, e.g. a timeout. Also fits,
+  and would make the field name wrong rather than just its unit.
+
+Nothing in `saprfclib` reads this tag, and the metrics in `ConnectionMetrics`
+deliberately measure latency with a local clock instead. Timing a call by a field
+whose unit might be off by a thousand is worse than not timing it: the number
+looks authoritative and is quietly wrong by three orders of magnitude.
+
+**To settle it:** make calls whose server-side cost differs by orders of
+magnitude and watch the value. If it tracks the work it is a duration, and the
+ratio against wall-clock gives the unit; if it stays put while the work grows, it
+is a setting and the field needs renaming.
 
 ### Exception TLV semantics — the tag set varies by release
 

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-connection call metrics (#22).** `Connection.metrics` and
+  `AsyncConnection.metrics` expose a `ConnectionMetrics`: call count, failure count,
+  total/mean/max latency, and wire bytes in and out. `as_dict()` returns a flat
+  JSON-ready mapping for an exporter, and `metrics.last` holds a `CallStats` for the
+  most recent call. Failures are counted **and timed** — a view that measures only
+  successes hides the case where a system starts failing slowly, which is the trend
+  worth alerting on.
+- Latency is stored as a total plus a count rather than a list of samples. Keeping
+  every sample would be a slow memory leak on a pooled connection that lives for weeks,
+  and mean plus max is what a dashboard plots.
+- `Transport` and `AsyncTransport` count cumulative wire bytes, including the 4-byte NI
+  length prefix, so the figures match a packet capture rather than the payload the RFC
+  layer sees.
+
 - Python 3.14 is supported and tested. Added to the CI matrix and the package
   classifiers; the suite passes under `-W error` on 3.14, including with random test
   ordering.
@@ -25,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
 ### Fixed
+
+- Corrected the recorded meaning of TLV tag `0x0667`. `docs/protocol/framing.md` gave it
+  as "server call duration, float64 LE, microseconds" at **capture** tier, but a capture
+  shows bytes (`138.0`), not what they count. The two golden fixtures disagree with each
+  other — one reads it as microseconds, the other as `[ASSUMED]` "timeout in seconds" —
+  and three readings fit both observed values: microseconds, milliseconds, or not a
+  duration at all. The tag is now labelled `[ASSUMED]` with what would settle it. The
+  new metrics deliberately time calls with a local clock instead: a latency number
+  quietly wrong by three orders of magnitude is worse than no latency number.
 
 - **SAProuter hop passwords (`/P/`) are implemented.** A route entry is three
   NUL-terminated fields — host, service, password — and an entry without a password

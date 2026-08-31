@@ -40,7 +40,9 @@ import random
 import socket as _socket_module
 import struct
 import threading
+import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from saprfclib.compress import DecompressError, sap_lz4_frame_decompress
@@ -1918,6 +1920,91 @@ class _LoopThread:
                 pass
 
 
+@dataclass(frozen=True)
+class CallStats:
+    """What one RFC call cost, measured by this client.
+
+    Every field here is measured locally: the clock is ours, the byte counts are
+    what crossed our own socket. Nothing is taken from the server's own reporting,
+    because the one field that looks like it carries that (tag 0x0667) has a
+    documented meaning that does not survive scrutiny — two golden fixtures give
+    it contradictory readings, and neither the unit nor whether it is a duration
+    at all is established. See docs/protocol/framing.md.
+    """
+
+    func_name: str
+    duration_s: float
+    request_bytes: int
+    response_bytes: int
+    failed: bool = False
+
+
+class ConnectionMetrics:
+    """Running totals for one connection, for exporting to a metrics system.
+
+    Deliberately not a global registry: a connection is owned by one thread or
+    task at a time (the pool is the concurrency boundary), so these need no
+    locking, and a caller aggregating across a pool can sum them itself.
+
+    Latency is kept as a total plus a count rather than a list of samples: an
+    unbounded sample list on a long-running connection is a slow memory leak, and
+    a mean plus a max is what a dashboard actually plots.
+    """
+
+    __slots__ = (
+        "calls",
+        "failures",
+        "total_duration_s",
+        "max_duration_s",
+        "request_bytes",
+        "response_bytes",
+        "last",
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.failures = 0
+        self.total_duration_s = 0.0
+        self.max_duration_s = 0.0
+        self.request_bytes = 0
+        self.response_bytes = 0
+        self.last: CallStats | None = None
+
+    def record(self, stats: CallStats) -> None:
+        self.calls += 1
+        if stats.failed:
+            self.failures += 1
+        self.total_duration_s += stats.duration_s
+        self.max_duration_s = max(self.max_duration_s, stats.duration_s)
+        self.request_bytes += stats.request_bytes
+        self.response_bytes += stats.response_bytes
+        self.last = stats
+
+    @property
+    def mean_duration_s(self) -> float:
+        """Mean call latency, or 0.0 before any call has been made."""
+        return self.total_duration_s / self.calls if self.calls else 0.0
+
+    def as_dict(self) -> dict[str, float | int]:
+        """A flat mapping, shaped for a metrics exporter."""
+        return {
+            "calls": self.calls,
+            "failures": self.failures,
+            "total_duration_s": self.total_duration_s,
+            "mean_duration_s": self.mean_duration_s,
+            "max_duration_s": self.max_duration_s,
+            "request_bytes": self.request_bytes,
+            "response_bytes": self.response_bytes,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"ConnectionMetrics(calls={self.calls}, failures={self.failures}, "
+            f"mean={self.mean_duration_s * 1000:.1f}ms, "
+            f"max={self.max_duration_s * 1000:.1f}ms)"
+        )
+
+
 class Connection:
     """Sync RFC Connection facade binding a Transport to a Session (TRANS-04/05/06).
 
@@ -1950,6 +2037,7 @@ class Connection:
         # shared value, since its connections were opened from identical
         # parameters and therefore reach the same system by construction.
         self._anon_cache_key: str | None = metadata_cache_key
+        self._metrics = ConnectionMetrics()
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
         self._ws_call_key: bytes = b"\x01" + b"\x00" * 36  # set by _ws_begin / _ws_handshake
@@ -2514,6 +2602,17 @@ class Connection:
     # ------------------------------------------------------------------ #
     # Public surface
     # ------------------------------------------------------------------ #
+    @property
+    def metrics(self) -> ConnectionMetrics:
+        """Per-connection call counters and latency.
+
+        Delegates to the async core for classic TCP connections (D-07), so the
+        numbers are the same object whichever facade the caller holds.
+        """
+        if self._async_conn is not None:
+            return self._async_conn.metrics
+        return self._metrics
+
     @property
     def _metadata_cache_key(self) -> str | None:
         """Key this connection's cached descriptors live under; None to not cache.
@@ -4391,6 +4490,7 @@ class AsyncConnection:
         # Unknown-parameter policy (issue #24) - see Connection.__init__.
         self._strict_params = strict_params
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
+        self.metrics = ConnectionMetrics()
         # Shareable across connections to one system — see Connection.__init__.
         self._cache = metadata_cache if metadata_cache is not None else MetadataCache()
         self._anon_cache_key: str | None = metadata_cache_key
@@ -4688,6 +4788,31 @@ class AsyncConnection:
         remain on the sync Connection path). CancelledError propagates (Pitfall 7).
         Credentials are never logged (T-09-03-CRED).
         """
+        started = time.perf_counter()
+        sent_before = getattr(self._transport, "bytes_sent", 0)
+        received_before = getattr(self._transport, "bytes_received", 0)
+        failed = True
+        try:
+            result = await self._call_instrumented(func_name, params)
+            failed = False
+            return result
+        finally:
+            # Recorded on the failure path too: a metrics view that counts only
+            # successes hides exactly the trend worth alerting on.
+            self.metrics.record(
+                CallStats(
+                    func_name=func_name,
+                    duration_s=time.perf_counter() - started,
+                    request_bytes=getattr(self._transport, "bytes_sent", 0) - sent_before,
+                    response_bytes=(
+                        getattr(self._transport, "bytes_received", 0) - received_before
+                    ),
+                    failed=failed,
+                )
+            )
+
+    async def _call_instrumented(self, func_name: str, params: dict[str, object]) -> dict[str, Any]:
+        """The call itself; :meth:`call` wraps it to time and count."""
         async with self._lock:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()

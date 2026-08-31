@@ -34,7 +34,13 @@ except (
     __version__ = "0.0.0.dev0"
 
 from saprfclib.codec import decode, encode
-from saprfclib.connection import AsyncConnection, connect, connect_async
+from saprfclib.connection import (
+    AsyncConnection,
+    CallStats,
+    ConnectionMetrics,
+    connect,
+    connect_async,
+)
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
@@ -84,6 +90,8 @@ __all__ = [
     # Async connection + pool + server (Phase 9 / D-08)
     "connect_async",
     "AsyncConnection",
+    "CallStats",
+    "ConnectionMetrics",
     "AsyncConnectionPool",
     "AsyncRfcServer",
     # Sync server
