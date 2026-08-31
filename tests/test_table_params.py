@@ -1547,6 +1547,93 @@ def test_752_logon_response_carries_no_system_id_tags() -> None:
     assert 0x0008 in tags
 
 
+# --------------------------------------------------------------------------- #
+# Metadata cache key
+# --------------------------------------------------------------------------- #
+
+
+class _FakeConn:
+    """Minimal connection-like for get_function_desc (D-21/META-01)."""
+
+    def __init__(self, cache_key: str | None, desc: FunctionDesc) -> None:
+        self._metadata_cache_key = cache_key
+        self._desc = desc
+        self.bootstrap_calls = 0
+
+    def _call_bootstrap(self, name: str) -> FunctionDesc:
+        self.bootstrap_calls += 1
+        return self._desc
+
+
+def _desc_named(name: str) -> FunctionDesc:
+    return FunctionDesc(name=name, parameters=[])
+
+
+def test_metadata_cache_reuses_descriptors_within_one_system() -> None:
+    from saprfclib.metadata import MetadataCache, get_function_desc
+
+    cache = MetadataCache()
+    conn = _FakeConn("A4H", _desc_named("Z_F"))
+    assert get_function_desc(conn, "Z_F", cache=cache).name == "Z_F"
+    assert get_function_desc(conn, "Z_F", cache=cache).name == "Z_F"
+    assert conn.bootstrap_calls == 1  # second call served from cache
+
+
+def test_unidentified_systems_do_not_share_a_cache_bucket() -> None:
+    """Two systems that send no system ID must not collide under "".
+
+    A FunctionDesc carries no record of the system it came from, so a collision here
+    hands one system's parameter list to the other silently — the caller sees a
+    plausible descriptor and a corrupt call, not an error.
+    """
+    from saprfclib.metadata import MetadataCache, get_function_desc
+
+    cache = MetadataCache()
+    a = _FakeConn("\x00anon-aaaa", _desc_named("Z_SAME"))
+    b = _FakeConn("\x00anon-bbbb", _desc_named("Z_SAME"))
+    got_a = get_function_desc(a, "Z_SAME", cache=cache)
+    got_b = get_function_desc(b, "Z_SAME", cache=cache)
+    assert b.bootstrap_calls == 1  # b did NOT read a's descriptor
+    assert got_a is a._desc
+    assert got_b is b._desc
+
+
+def test_empty_cache_key_disables_caching_rather_than_colliding() -> None:
+    """A connection-like with no usable key round-trips instead of sharing ""."""
+    from saprfclib.metadata import MetadataCache, get_function_desc
+
+    cache = MetadataCache()
+    conn = _FakeConn("", _desc_named("Z_F"))
+    get_function_desc(conn, "Z_F", cache=cache)
+    get_function_desc(conn, "Z_F", cache=cache)
+    assert conn.bootstrap_calls == 2
+
+
+def test_connection_cache_key_falls_back_when_the_system_sends_no_sys_id() -> None:
+    """Connection substitutes a per-connection token for an empty system ID."""
+    from saprfclib.connection import Connection
+
+    conn = Connection.__new__(Connection)
+    conn._anon_cache_key = None
+
+    # Not READY: nothing to key on, so nothing is cached.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Connection, "sys_id", property(lambda self: None))
+        assert conn._metadata_cache_key is None
+
+        mp.setattr(Connection, "sys_id", property(lambda self: "A4H"))
+        assert conn._metadata_cache_key == "A4H"
+
+    conn2 = Connection.__new__(Connection)
+    conn2._anon_cache_key = None
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Connection, "sys_id", property(lambda self: ""))
+        key1 = conn._metadata_cache_key
+        assert key1 and key1.startswith("\x00anon-")
+        assert conn._metadata_cache_key == key1  # stable across reads
+        assert conn2._metadata_cache_key != key1  # distinct per connection
+
+
 def test_empty_response_frame_is_not_reported_as_malformed() -> None:
     """A header-only refusal has no body to be malformed.
 

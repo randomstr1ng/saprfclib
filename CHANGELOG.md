@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separable by inspecting for high bytes — ASCII in UTF-16LE has none either, and
   decoding it single-byte turns `Logon data incomplete.` into `L o g o n`. The
   interleaved-NUL pattern is what distinguishes them.
+- Descriptor caching no longer keys on an empty system ID. A 7.52 logon response carries
+  no `0x0450`/`0x0452`/`0x0453` at all, leaving `sys_id` empty; a process holding
+  connections to two such systems filed both under `""` and could be served the other
+  system's parameter list for a same-named function module — silently, since a
+  `FunctionDesc` records no system of origin. An unidentified system now falls back to a
+  key unique to the connection, so repeat calls still skip the round-trip and nothing is
+  shared across systems. A SID is deliberately *not* reconstructed from the `0x0008`
+  instance name; that shape is a naming convention, not a protocol guarantee.
 - An empty response frame is no longer reported as a malformed one. A header-only refusal
   (observed on 7.52, where kernel 793 sends an EBCDIC CPIC error instead) has no body to
   be malformed, and saying so pointed at the parser rather than at the server.

@@ -1929,6 +1929,7 @@ class Connection:
         self._session = Session()
         self._lock = threading.Lock()
         self._cache = MetadataCache()  # in-process FunctionDesc cache (META-03)
+        self._anon_cache_key: str | None = None  # set only if the system sends no sys_id
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
         self._ws_call_key: bytes = b"\x01" + b"\x00" * 36  # set by _ws_begin / _ws_handshake
@@ -2494,6 +2495,32 @@ class Connection:
     # Public surface
     # ------------------------------------------------------------------ #
     @property
+    def _metadata_cache_key(self) -> str | None:
+        """Key this connection's cached descriptors live under; None to not cache.
+
+        Normally the system ID, so every connection to the same system shares one
+        set of descriptors. But the logon response does not always carry one: a
+        7.52 system answers with no 0x0450/0x0452/0x0453 at all, leaving sys_id
+        empty. Caching under "" would file every such system in one bucket, and a
+        process holding connections to two of them would be served the wrong
+        system's descriptor for a same-named function module — silently, since a
+        FunctionDesc carries no system of origin.
+
+        So an unidentified system falls back to a token unique to this connection.
+        Repeat calls on the connection still skip the round-trip; nothing is
+        shared between systems that never identified themselves.
+        """
+        sys_id = self.sys_id
+        if sys_id is None:
+            return None  # not READY — nothing to key on yet
+        if sys_id:
+            return sys_id
+        if self._anon_cache_key is None:
+            # NUL prefix: a real SID is 3 alphanumerics, so this cannot collide.
+            self._anon_cache_key = f"\x00anon-{uuid.uuid4().hex}"
+        return self._anon_cache_key
+
+    @property
     def sys_id(self) -> str | None:
         """System ID from the negotiated ConnectionAttributes; None if not READY.
 
@@ -2991,9 +3018,9 @@ class Connection:
         )
 
         # Pre-populate cache with the builtin desc to skip GFI round-trip.
-        classic_sys_id = classic._session.attributes.sys_id if classic._session.attributes else ""
-        if classic_sys_id:
-            classic._cache.put(classic_sys_id, desc)
+        classic_key = classic._metadata_cache_key
+        if classic_key:
+            classic._cache.put(classic_key, desc)
 
         result = classic.call(func_name, **params)
 
@@ -3051,8 +3078,10 @@ class Connection:
             # Fall back to classic TCP RFC transparently.
             return self._ws_e163_classic_fallback(func_name, desc, params, attrs_ws)
         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
-        # Cache the descriptor now that we know sys_id.
-        self._cache.put(attrs_ws.sys_id, desc)
+        # Cache the descriptor now that the attributes are on the session.
+        ws_key = self._metadata_cache_key
+        if ws_key:
+            self._cache.put(ws_key, desc)
 
         # Step 2: INVOKE + func_name with params (pcap-verified Q-marker format, frame 233).
         invoke_key = self._next_ws_invoke_key()  # counter=2 for first post-logon invoke
@@ -4139,6 +4168,7 @@ class AsyncConnection:
         self._strict_params = strict_params
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self._cache = MetadataCache()
+        self._anon_cache_key: str | None = None
         self._struct_desc_cache: dict[str, TypeDesc] = {}
         # Retry + durable-store attributes (D-01/D-02/D-03/D-03b)
         self._max_retries = max_retries  # max auto-retry attempts (D-02)
@@ -4388,6 +4418,32 @@ class AsyncConnection:
     # ------------------------------------------------------------------ #
 
     @property
+    def _metadata_cache_key(self) -> str | None:
+        """Key this connection's cached descriptors live under; None to not cache.
+
+        Normally the system ID, so every connection to the same system shares one
+        set of descriptors. But the logon response does not always carry one: a
+        7.52 system answers with no 0x0450/0x0452/0x0453 at all, leaving sys_id
+        empty. Caching under "" would file every such system in one bucket, and a
+        process holding connections to two of them would be served the wrong
+        system's descriptor for a same-named function module — silently, since a
+        FunctionDesc carries no system of origin.
+
+        So an unidentified system falls back to a token unique to this connection.
+        Repeat calls on the connection still skip the round-trip; nothing is
+        shared between systems that never identified themselves.
+        """
+        sys_id = self.sys_id
+        if sys_id is None:
+            return None  # not READY — nothing to key on yet
+        if sys_id:
+            return sys_id
+        if self._anon_cache_key is None:
+            # NUL prefix: a real SID is 3 alphanumerics, so this cannot collide.
+            self._anon_cache_key = f"\x00anon-{uuid.uuid4().hex}"
+        return self._anon_cache_key
+
+    @property
     def sys_id(self) -> str | None:
         """System ID from negotiated ConnectionAttributes; None if not READY."""
         attrs = self._session.attributes
@@ -4412,15 +4468,15 @@ class AsyncConnection:
             self._session.mark_in_call()
             try:
                 # Metadata: cache hit or async bootstrap (META-03/D-21).
-                sys_id = self.sys_id
-                desc = self._cache.get(sys_id, func_name) if sys_id is not None else None
+                cache_key = self._metadata_cache_key
+                desc = self._cache.get(cache_key, func_name) if cache_key is not None else None
                 if desc is None:
                     try:
                         desc = await self._call_bootstrap(func_name)
                     except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                         raise CommunicationError(str(exc), original_exception=exc) from exc
-                    if sys_id is not None:
-                        self._cache.put(sys_id, desc)
+                    if cache_key is not None:
+                        self._cache.put(cache_key, desc)
 
                 # Classic GW-framed invoke.
                 call_params = _filter_call_params(

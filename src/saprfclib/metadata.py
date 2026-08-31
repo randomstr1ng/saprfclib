@@ -341,14 +341,23 @@ def get_function_desc(
     from Task 1). DoS guards (_MAX_ROWS, _MAX_RECURSION_DEPTH) are retained.
 
     Connection requirements (D-21/META-01):
-      - connection.sys_id: str  — used as the cache key
+      - connection._metadata_cache_key: str | None — the cache key, falling back
+        to connection.sys_id for connection-likes that do not define it
       - connection._call_bootstrap(name: str) -> FunctionDesc — bootstrap invoke
     """
-    sys_id = getattr(connection, "sys_id", None)
+    cache_key = getattr(connection, "_metadata_cache_key", None)
+    if cache_key is None:
+        cache_key = getattr(connection, "sys_id", None)
+    # An empty system ID is not a key. Some releases send no system ID in the logon
+    # response (observed on 7.52), and filing every one of them under "" would serve
+    # one system's descriptors to another. Connection substitutes a per-connection
+    # token for that case; anything else duck-typed here simply goes uncached.
+    if not cache_key:
+        cache_key = None
 
     # Cache hit (META-03): return immediately with no round-trip.
-    if cache is not None and sys_id is not None:
-        hit = cache.get(sys_id, name)
+    if cache is not None and cache_key is not None:
+        hit = cache.get(cache_key, name)
         if hit is not None:
             return hit
 
@@ -364,9 +373,9 @@ def get_function_desc(
         )
     desc: FunctionDesc = bootstrap_fn(name)
 
-    # Cache the result (META-03): subsequent calls for (sys_id, name) are served
+    # Cache the result (META-03): subsequent calls for (cache_key, name) are served
     # from the cache with no second round-trip.
-    if cache is not None and sys_id is not None:
-        cache.put(sys_id, desc)
+    if cache is not None and cache_key is not None:
+        cache.put(cache_key, desc)
 
     return desc
