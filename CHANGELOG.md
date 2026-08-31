@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parse_invoke_response`. `raise_for_rfc_error` runs first and already handles a
   non-zero return code; the second copy could only drift out of step with the one that
   actually runs, and had already begun to.
+- Pinned `asyncio_default_fixture_loop_scope` so a `pytest-asyncio` upgrade cannot change
+  fixture loop scoping under the suite. Unset, it also aborted any run under `-W error`.
 
 ## [0.1.2] - 2026-08-28
 

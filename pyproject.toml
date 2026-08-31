@@ -97,6 +97,9 @@ deploy = "mkdocs gh-deploy --force"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Pinned to the scope pytest-asyncio announces as its future default, so the
+# behaviour does not change under us on an upgrade (and -W error stays usable).
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = [
     "integration: requires a live SAP system (set SAPRFC_ASHOST and other SAPRFC_* env vars)",
