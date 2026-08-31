@@ -289,7 +289,30 @@ position in the `NI_ROUTE` frame has never been captured. `build_ni_route` raise
 rather than sending a route that will simply be refused, since a refusal gives
 the caller no way to connect the failure to the password they supplied.
 
-To close it: capture a client connecting through a **password-protected** hop and
-diff the `NI_ROUTE` payload against the unprotected form in
-`ni_route_payload.bin`. The frames are small and the difference should be
-localised.
+What has been ruled out, by asking a live router (2026-08-31). With a
+password-protected rule active, five placements were tried and every one was
+rejected with:
+
+```
+NiRRouteRepl: invalid route received   (rc -93, "internal error")
+```
+
+- password appended to the hop entry, NUL-terminated
+- password appended to the hop entry, not terminated
+- password appended as a fixed 6-byte field
+- password appended to the destination data
+- host/service/password all NUL-terminated instead of the 6-byte service field
+
+The control — the identical frame with no password — is rejected cleanly with
+`route permission denied`, which is the router *parsing* the route and then
+declining it. So the password does not simply extend an entry: appending
+anything makes the route unparseable, and the layout differs structurally.
+
+That is where guessing stops being productive. To close it, capture the frame a
+real client sends through a password-protected hop and diff it against
+`ni_route_payload.bin`.
+
+Also observed: `niping` with a `/P/` route gets **no reply at all** from the
+router, where a passwordless route to the same target is answered immediately.
+Whether that means a password route uses a follow-up exchange rather than a
+single frame is exactly what the capture would settle.
