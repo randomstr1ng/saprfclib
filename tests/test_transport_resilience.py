@@ -302,10 +302,21 @@ def test_a_router_refusal_is_reported_at_the_ni_layer() -> None:
     from saprfclib.exceptions import SapRfcError
     from saprfclib.transport import raise_for_ni_error
 
-    with pytest.raises(SapRfcError, match="NI_RTERR"):
+    # A bare marker with no *ERR* record still reports the refusal.
+    with pytest.raises(SapRfcError, match="SAProuter refused the route"):
         raise_for_ni_error(b"NI_RTERR\x00")
     with pytest.raises(SapRfcError, match="permission table"):
         raise_for_ni_error(b"NI_RTERR\x00")
+
+    # A real refusal carries the router's own message, which names the source,
+    # the target and the port. Live capture from a SAProuter that denied a route.
+    from pathlib import Path
+
+    denied = Path(__file__).parent / "golden" / "router" / "ni_rterr_route_denied.bin"
+    with pytest.raises(SapRfcError, match="route permission denied") as excinfo:
+        raise_for_ni_error(denied.read_bytes()[4:])
+    assert "10.99.99.99" in str(excinfo.value), "the target must be named"
+    assert "3300" in str(excinfo.value)
 
 
 def test_router_refusal_surfaces_through_recv_message() -> None:
@@ -315,8 +326,8 @@ def test_router_refusal_surfaces_through_recv_message() -> None:
 
     a, b = socket.socketpair()
     try:
-        b.sendall(build_ni_frame(b"NI_RTERR\x00route to host denied"))
-        with pytest.raises(SapRfcError, match="route to host denied"):
+        b.sendall(build_ni_frame(b"NI_RTERR\x00"))
+        with pytest.raises(SapRfcError, match="SAProuter refused the route"):
             Transport(a).recv_message()
     finally:
         a.close()

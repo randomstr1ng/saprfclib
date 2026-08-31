@@ -32,6 +32,7 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 from saprfclib.exceptions import SapRfcError
+from saprfclib.transport import is_ni_pong
 
 __all__ = [
     "RouteHop",
@@ -41,6 +42,8 @@ __all__ = [
     "describe_ms_errorno",
     "parse_route_string",
     "build_ni_route",
+    "open_route",
+    "open_route_async",
     "parse_sapms_server_list",
     "MessageServerClient",
     "MessageServerHttpError",
@@ -65,6 +68,46 @@ _PASSWORD_MARKER = "P"
 # here labelled it [ASSUMED]; that predates the capture and contradicted
 # build_ni_route's own docstring.)
 _NI_ROUTE_MARKER = b"NI_ROUTE"
+
+
+def open_route(transport: object, hops: list[RouteHop], dest_host: str, dest_service: str) -> None:
+    """Send an NI_ROUTE over ``transport`` and consume the router's answer.
+
+    A SAProuter that accepts the route replies ``NI_PONG\0`` before it begins
+    forwarding; one that refuses replies NI_RTERR. Both confirmed live against a
+    real router (tests/golden/router/ni_pong_route_accepted.bin and
+    ni_rterr_route_denied.bin).
+
+    That acknowledgement has to be read. Sending the route and going straight into
+    the handshake leaves NI_PONG at the head of the stream, so the handshake's
+    first read returns it instead of the NI version response and every frame
+    afterwards is off by one. A refusal is raised by the transport's own NI check
+    before it ever gets here.
+    """
+    transport.send_message(build_ni_route(hops, dest_host, dest_service))  # type: ignore[attr-defined]
+    ack = bytes(transport.recv_message())  # type: ignore[attr-defined]
+    if not is_ni_pong(ack):
+        raise SapRfcError(
+            f"SAProuter answered the route request with {ack[:16]!r} rather than the "
+            f"expected NI_PONG acknowledgement; refusing to continue on a connection "
+            f"whose framing is no longer known"
+        )
+
+
+async def open_route_async(
+    transport: object, hops: list[RouteHop], dest_host: str, dest_service: str
+) -> None:
+    """Async counterpart of :func:`open_route`."""
+    await transport.send_message(  # type: ignore[attr-defined]
+        build_ni_route(hops, dest_host, dest_service)
+    )
+    ack = bytes(await transport.recv_message())  # type: ignore[attr-defined]
+    if not is_ni_pong(ack):
+        raise SapRfcError(
+            f"SAProuter answered the route request with {ack[:16]!r} rather than the "
+            f"expected NI_PONG acknowledgement; refusing to continue on a connection "
+            f"whose framing is no longer known"
+        )
 
 
 @dataclass

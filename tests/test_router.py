@@ -146,7 +146,11 @@ def test_connect_saprouter_routes_through_router(monkeypatch) -> None:
     then completes the normal handshake — verified offline via MockTransport."""
     import saprfclib.connection as connection
 
-    transport = MockTransport(_handshake_script())
+    # A router that accepts the route answers NI_PONG before it starts
+    # forwarding, so the script must begin with it. Confirmed live against a real
+    # SAProuter; the previous script omitted it because the code never read it,
+    # which left the handshake reading NI_PONG as its NI version response.
+    transport = MockTransport([b"NI_PONG\x00", *_handshake_script()])
     monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
 
     conn = connection.connect(
@@ -160,6 +164,47 @@ def test_connect_saprouter_routes_through_router(monkeypatch) -> None:
     # First sent frame is the NI_ROUTE prefix from router.build_ni_route.
     assert transport.sent[0].startswith(b"NI_ROUTE")
     assert conn.get_connection_attributes().sys_id == "A4H"
+
+
+def test_connect_stops_if_the_router_does_not_acknowledge(monkeypatch) -> None:
+    """An unexpected answer to NI_ROUTE must not be treated as handshake data.
+
+    Continuing would mean reading every later frame one position out of step,
+    which surfaces far from the cause.
+    """
+    import saprfclib.connection as connection
+    from saprfclib.exceptions import SapRfcError
+
+    transport = MockTransport([b"SOMETHING ELSE", *_handshake_script()])
+    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
+
+    with pytest.raises(SapRfcError, match="rather than the expected NI_PONG"):
+        connection.connect(
+            ashost="app",
+            sysnr="00",
+            client="001",
+            user="DEVELOPER",
+            passwd="secret",
+            saprouter="/H/host/S/3299",
+        )
+
+
+def test_router_reply_fixtures_are_what_a_real_router_sends() -> None:
+    """Both captured against a live SAProuter on 2026-08-31."""
+    from saprfclib.transport import is_ni_pong
+
+    router_dir = Path(__file__).parent / "golden" / "router"
+    accepted = (router_dir / "ni_pong_route_accepted.bin").read_bytes()[4:]
+    assert is_ni_pong(accepted)
+    assert accepted == b"NI_PONG\x00"
+
+    denied = (router_dir / "ni_rterr_route_denied.bin").read_bytes()[4:]
+    assert denied.startswith(b"NI_RTERR")
+    assert not is_ni_pong(denied)
+    # The refusal carries a *ERR* record, the same NUL-separated shape the
+    # gateway uses for its own errors.
+    assert b"*ERR*" in denied
+    assert b"route permission denied" in denied
 
 
 # --------------------------------------------------------------------------- #

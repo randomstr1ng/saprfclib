@@ -42,6 +42,7 @@ __all__ = [
     "AsyncTransport",
     "connect_tcp_async",
     "raise_for_ni_error",
+    "is_ni_pong",
     "enable_keepalive",
     "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_READ_TIMEOUT",
@@ -111,26 +112,59 @@ _NI_HEADER_SIZE = _NI_HEADER.size  # 4
 # frame reaches the session as if it were the NI version response and is
 # misparsed, so a rejected route surfaces as a confusing protocol error several
 # steps later instead of as "the router said no".
-_NI_ERROR_MARKERS: dict[bytes, str] = {
-    b"NI_RTERR": (
-        "the SAProuter refused the route. Common causes: the route is not "
-        "permitted by the router's permission table, a hop password is wrong or "
-        "missing, or the target host/port is unreachable from the router"
-    ),
-}
+_NI_RTERR = b"NI_RTERR"
+_NI_PONG = b"NI_PONG"
+
+_NI_ERROR_FALLBACK = (
+    "the SAProuter refused the route. Common causes: the route is not permitted "
+    "by the router's permission table, a hop password is wrong or missing, or the "
+    "target host/port is unreachable from the router"
+)
+
+
+def _ni_error_text(payload: bytes) -> str:
+    """Pull the router's own message out of an NI_RTERR frame.
+
+    Confirmed by live capture (tests/golden/router/ni_rterr_route_denied.bin): the
+    frame carries a NUL-separated ``*ERR*`` record — the same shape the gateway
+    uses — whose second field is the human-readable reason, for example
+    ``saprouter: route permission denied (203.0.113.42 to 10.99.99.99, 3300)``.
+
+    That text names the source address, the target and the port, which is exactly
+    what someone debugging a denied route needs. Falls back to a generic
+    explanation when the record is absent or unreadable, since the marker alone
+    already establishes that the route was refused.
+    """
+    start = payload.find(b"*ERR*")
+    if start < 0:
+        return _NI_ERROR_FALLBACK
+    fields = [f for f in payload[start:].split(b"\x00") if f.strip()]
+    # fields[0] is the "*ERR*" sentinel, fields[1] a record number, fields[2] the
+    # message. Anything shorter means a shape this has not seen.
+    if len(fields) < 3:
+        return _NI_ERROR_FALLBACK
+    message = fields[2].decode("latin-1", "replace").strip()
+    return message or _NI_ERROR_FALLBACK
 
 
 def raise_for_ni_error(payload: bytes) -> None:
     """Raise if ``payload`` is an NI-layer error control message.
 
     Called for every inbound frame, so a router refusal is reported where it
-    happens rather than as a malformed RFC frame later.
+    happens rather than as a malformed RFC frame several steps later.
     """
-    for marker, explanation in _NI_ERROR_MARKERS.items():
-        if payload.startswith(marker):
-            detail = payload[len(marker) :].rstrip(b"\x00").decode("latin-1", "replace")
-            suffix = f" (router said: {detail!r})" if detail.strip() else ""
-            raise SapRfcError(f"{marker.decode()}: {explanation}{suffix}")
+    if payload.startswith(_NI_RTERR):
+        raise SapRfcError(f"SAProuter refused the route: {_ni_error_text(payload)}")
+
+
+def is_ni_pong(payload: bytes) -> bool:
+    """True if ``payload`` is the NI acknowledgement a SAProuter sends.
+
+    Confirmed live: a router that accepts an NI_ROUTE answers with the 8-byte
+    ``NI_PONG\0`` control message before it begins forwarding, and one that
+    refuses answers with NI_RTERR instead.
+    """
+    return payload.startswith(_NI_PONG)
 
 
 def build_ni_frame(payload: bytes) -> bytes:

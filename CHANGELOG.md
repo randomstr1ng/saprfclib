@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`connect(saprouter=...)` could not work, and now does.** A SAProuter answers an
+  accepted `NI_ROUTE` with `NI_PONG\0` before it starts forwarding. That frame was
+  never read, so it sat at the head of the stream and the handshake's first read
+  returned it instead of the NI version response — putting every subsequent frame one
+  position out of step. Confirmed against a live SAProuter 40.4, where the full
+  handshake now completes through the route.
+- A refused route reports the router's own message. `NI_RTERR` carries a NUL-separated
+  `*ERR*` record — the same shape the gateway uses — naming the source address, target
+  and port, as in `saprouter: route permission denied (203.0.113.42 to 10.99.99.99,
+  3300)`. That is reported verbatim instead of a generic explanation, because it is
+  what someone debugging a denied route needs.
+- An unexpected answer to `NI_ROUTE` now stops the connection rather than being fed to
+  the handshake as if it were data.
+
 - **A SAProuter refusal is now reported instead of being misparsed.** After sending
   `NI_ROUTE` the router's answer was never inspected, so an `NI_RTERR` — the router
   declining to carry the route, whether from its permission table, a bad hop password

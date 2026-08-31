@@ -1,5 +1,9 @@
 # Message Server — load-balanced logon
 
+!!! note "SAProuter is documented in this file too"
+    See **SAProuter route acknowledgement** near the end.
+
+
 A load-balanced connection asks the message server which application server to
 use, then connects to that server normally. `saprfclib` reaches the message
 server over its **HTTP interface**, which is line-oriented and confirmed against
@@ -238,3 +242,54 @@ parser when it meets a `0x05` payload instead of failing obscurely.
 This was nearly a regression: the binary parser was about to be deleted as dead
 code on the strength of one capture that happened to use the other opcode.
 
+
+
+---
+
+## SAProuter route acknowledgement — CONFIRMED
+
+Confirmed against a live SAProuter (version 40.4) on 2026-08-31.
+
+After the `NI_ROUTE` frame, the router answers **before** it begins forwarding:
+
+| Outcome | Reply | Fixture |
+|---------|-------|---------|
+| Route accepted | `NI_PONG\0` (8 bytes) | `ni_pong_route_accepted.bin` |
+| Route refused | `NI_RTERR` + `*ERR*` record | `ni_rterr_route_denied.bin` |
+
+**That acknowledgement must be read.** Sending the route and going straight into
+the RFC handshake leaves `NI_PONG` at the head of the stream, so the handshake's
+first read returns it instead of the NI version response — and every frame after
+that is one position out of step. `saprfclib` did exactly this until 2026-08-31,
+which meant `connect(saprouter=...)` could not work at all.
+
+### The refusal carries the router's own message
+
+`NI_RTERR` is followed by a NUL-separated `*ERR*` record — the same shape the
+gateway uses for its errors:
+
+```
+NI_RTERR\0 … *ERR*\0 1\0
+saprouter: route permission denied (203.0.113.42 to 10.99.99.99, 3300)\0
+-94\0 NI (network interface)\0 753\0 40\0 … SAProuter 40.4 on 'saprouter'\0 *ERR*\0
+```
+
+The message names the source address, the target and the port, which is what
+someone debugging a denied route actually needs, so it is reported verbatim
+rather than replaced with a generic explanation.
+
+Observed while probing which targets the test router permits: `3300` and `3200`
+were accepted for the configured host and `22` was refused, so the permission
+table is per host **and** port.
+
+### Still open: hop passwords
+
+`/P/<password>` is parsed into `RouteHop.password` and cannot be sent — its
+position in the `NI_ROUTE` frame has never been captured. `build_ni_route` raises
+rather than sending a route that will simply be refused, since a refusal gives
+the caller no way to connect the failure to the password they supplied.
+
+To close it: capture a client connecting through a **password-protected** hop and
+diff the `NI_ROUTE` payload against the unprotected form in
+`ni_route_payload.bin`. The frames are small and the difference should be
+localised.

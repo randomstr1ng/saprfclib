@@ -3989,7 +3989,8 @@ def connect(
     # Imported lazily so the direct-TCP facade has no hard dependency on the
     # [ASSUMED] alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
-        build_ni_route,
+        open_route,
+        open_route_async,
         parse_route_string,
     )
 
@@ -4142,7 +4143,7 @@ def connect(
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
             if _saprouter is not None:
                 hops = parse_route_string(_saprouter)
-                await at.send_message(build_ni_route(hops, _ashost, str(_port)))
+                await open_route_async(at, hops, _ashost, str(_port))
             ac = AsyncConnection(
                 at,  # type: ignore[arg-type]
                 max_retries=_max_retries,
@@ -4175,7 +4176,7 @@ def connect(
         # Wire format confirmed from live capture 2026-06-27.
         # NOTE: only reached by SNC/wRFC branches (classic path returns above).
         hops = parse_route_string(saprouter)
-        transport.send_message(build_ni_route(hops, ashost, str(port)))
+        open_route(transport, hops, ashost, str(port))
 
     conn._handshake(
         client=client, user=user, passwd=passwd, ashost=ashost, sysnr=int(sysnr), lang=lang
@@ -5263,7 +5264,7 @@ async def connect_async(
 
     from saprfclib.router import (
         MessageServerClient,
-        build_ni_route,
+        open_route_async,
         parse_route_string,
     )
 
@@ -5290,7 +5291,7 @@ async def connect_async(
 
     if saprouter is not None:
         hops = parse_route_string(saprouter)
-        await transport.send_message(build_ni_route(hops, ashost, str(port)))
+        await open_route_async(transport, hops, ashost, str(port))
 
     conn = AsyncConnection(
         transport,
