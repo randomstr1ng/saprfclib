@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Coverage is measured and gated.** CI now runs with `--cov` and a floor in
+  `pyproject.toml`, so coverage cannot quietly fall — deleting tests or adding a large
+  untested branch fails the build instead of passing silently. There was previously no
+  measurement at all: 781 tests and no idea what they reached.
+- Branch coverage is enabled, which is stricter than counting statements — the same
+  suite reads 74% by statements and **72% by branches**. Almost all of that difference
+  is error handling, reached only when something goes wrong, which is exactly where this
+  project keeps finding bugs.
+
 - **Per-connection call metrics (#22).** `Connection.metrics` and
   `AsyncConnection.metrics` expose a `ConnectionMetrics`: call count, failure count,
   total/mean/max latency, and wire bytes in and out. `as_dict()` returns a flat

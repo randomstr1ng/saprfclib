@@ -42,7 +42,7 @@ jobs:
         run: hatch run lint:type
 
       - name: Test (pytest — offline only, no live SAP)
-        run: hatch run test -m "not integration"
+        run: hatch run test -m "not integration" --cov --cov-report=term-missing
 
       - name: Build distribution
         run: hatch build

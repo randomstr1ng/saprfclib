@@ -158,6 +158,23 @@ Python.
    "Unreleased".
 5. Ensure `hatch run lint:check`, `hatch run lint:type`, and
    `hatch run test -m "not integration"` all pass.
+6. Coverage must not fall. CI runs with `--cov` and a floor set in
+   `pyproject.toml`. **Raise the floor when real coverage rises; never lower it to
+   make a build green** — that turns the guard into a rubber stamp, which is worse
+   than not having one.
+
+   Branch coverage is on, which is stricter than counting statements: the same
+   suite reads 74% by statements and 72% by branches. The difference is almost all
+   error handling, reached only when something goes wrong — and those are exactly
+   the paths where bugs in this project keep being found, because they are the
+   ones nobody exercises by accident.
+
+   Some code cannot be covered offline at all (SNC, WebSocket RFC, the server's
+   gateway registration). Those need a live system and are marked `integration`.
+   Adding more of that kind of code is the one legitimate reason to lower the
+   floor — say so in the commit message, with which path and why it cannot be
+   reached offline. An adjustment with no reason attached is the rubber stamp the
+   floor exists to prevent.
 
 ## Security Issues
 

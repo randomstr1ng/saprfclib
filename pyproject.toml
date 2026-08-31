@@ -45,6 +45,7 @@ Changelog = "https://github.com/randomstr1ng/saprfclib/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "hypothesis>=6",
     "mypy>=2.0",
     "ruff>=0.5",
@@ -118,3 +119,43 @@ python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 exclude = ["tests/"]
+
+
+[tool.coverage.run]
+source = ["saprfclib"]
+branch = true
+
+[tool.coverage.report]
+# The floor is the level the offline suite actually reaches today, not an
+# aspiration. Set here so coverage cannot quietly fall: a change that deletes
+# tests, or adds a large untested branch, fails CI instead of passing silently.
+#
+# branch = true above makes this stricter than a statement-only figure: the same
+# suite reads 74% by statements and 72% by branches, because a great deal of the
+# uncovered code is error handling reached only when something goes wrong. Those
+# are precisely the paths this project keeps finding bugs in, so the stricter
+# measure is the useful one.
+#
+# Raise it when real coverage rises. Do not lower it to make a build green --
+# that converts the guard into a rubber stamp, which is worse than not having it.
+#
+# There is one legitimate reason to lower it: adding code that genuinely cannot be
+# covered offline, such as a new SNC or WebSocket path needing a live system. That
+# is a real trade, not an excuse, so it belongs in the commit message alongside the
+# change -- "lowered to N because X can only be exercised against a live system".
+# An adjustment with no such reason attached is the rubber stamp this guards
+# against. The margin above the floor is deliberately thin so the question gets
+# asked rather than drifting unnoticed.
+#
+# Much of what is uncovered needs a live SAP system (SNC, WebSocket RFC, the
+# server's registration path), so this will not approach 100 from offline tests
+# alone. See docs for which paths are integration-only.
+fail_under = 72
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
