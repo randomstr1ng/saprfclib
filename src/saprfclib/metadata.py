@@ -190,8 +190,20 @@ _EXID_TO_RFCTYPE: dict[str, int] = {
     "s": RFCTYPE_INT2,
     "b": RFCTYPE_INT1,
     "u": RFCTYPE_STRUCTURE,
+    # DECFLOAT16 arrives as 'a'. Confirmed by live capture on 2026-08-31: a custom
+    # remote-enabled function module on A4H (kernel 793) with seven DECFLOAT16
+    # parameters returned EXID 'a' for every one of them, while its DECFLOAT34
+    # parameters returned 'e' as this table already had. Before this entry existed
+    # every DECFLOAT16 parameter failed _parse_params_row and was dropped from the
+    # descriptor, so the function interface silently lost them -- the call then went
+    # out missing those parameters rather than failing.
+    "a": RFCTYPE_DECF16,
+    # [ASSUMED] 'v' for DECFLOAT16 predates that capture and has never been observed.
+    # Kept because removing an untested entry is no better evidenced than keeping it,
+    # and a stray 'v' would otherwise drop the row. If a capture shows 'v' is
+    # something else, replace it rather than relabelling.
     "v": RFCTYPE_DECF16,
-    "e": RFCTYPE_DECF34,
+    "e": RFCTYPE_DECF34,  # confirmed by the same 2026-08-31 capture
     "g": RFCTYPE_STRING,
     "y": RFCTYPE_XSTRING,
     "8": RFCTYPE_INT8,

@@ -353,6 +353,23 @@ exercised; the non-Unicode layout is undocumented here.
 
 ### RFCTYPE_DECF16 (type=23) — IEEE 754r Decimal Float 16 (8 bytes)
 
+!!! note "Metadata: DECFLOAT16 arrives with EXID `a` — CONFIRMED"
+    `RFC_GET_FUNCTION_INTERFACE` reports a DECFLOAT16 parameter with `EXID = 'a'`,
+    and DECFLOAT34 with `EXID = 'e'`. Confirmed by live capture on 2026-08-31: a
+    remote-enabled function module on A4H (kernel 793) carrying seven DECFLOAT16
+    and three DECFLOAT34 parameters reported `a` for all seven and `e` for all three.
+
+    `_EXID_TO_RFCTYPE` previously mapped only `v` to DECFLOAT16, which has never
+    been observed. Every DECFLOAT16 parameter therefore failed to parse and was
+    dropped from the descriptor, so the interface silently lost them and the call
+    went out short of those arguments. `a` is now mapped; `v` is retained and
+    labelled `[ASSUMED]`.
+
+    Note this is about the *metadata* only. The wire encoding of the value itself
+    remains unconfirmed and `encode`/`decode` still raise — the failure simply moves
+    from "parameters silently missing" to "this type is not implemented", which is
+    the right shape for an unverified format.
+
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
 | 0x00 | 8 | DPD-BE | `decf16_wire` | big-endian bytes | IEEE 754r DPD, transmitted big-endian (neutral network form) |

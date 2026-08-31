@@ -124,6 +124,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script printed that a user had been created when it had not. Both shapes are handled,
   and a shape it does not recognise raises rather than being read as success.
 
+- DECFLOAT16 parameters no longer disappear from a function interface.
+  `RFC_GET_FUNCTION_INTERFACE` reports them with `EXID = 'a'`, which was absent from
+  the EXID table, so every such row failed to parse and was dropped — a function
+  module with seven DECFLOAT16 parameters came back describing only its three
+  DECFLOAT34 ones, and the call then went out missing seven arguments instead of
+  failing. Confirmed by live capture on A4H (kernel 793). The previously mapped `v`
+  has never been observed and is now labelled `[ASSUMED]`. The wire encoding itself
+  is still unconfirmed, so `encode`/`decode` continue to raise: the failure moves
+  from "parameters silently missing" to "this type is not implemented".
+
 ### Documentation
 
 - Corrected the worked DECFLOAT16 example in `docs/protocol/serialization.md`. It read

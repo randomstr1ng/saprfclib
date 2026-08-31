@@ -540,3 +540,66 @@ def test_sqlite_store_closes_its_connection_when_open_fails(store_name: str, tmp
         with pytest.raises(RuntimeError):
             cls(path)
         gc.collect()  # would raise ResourceWarning here if the handle leaked
+
+
+# --------------------------------------------------------------------------- #
+# EXID 'a' — DECFLOAT16 (live capture, A4H kernel 793, 2026-08-31)
+# --------------------------------------------------------------------------- #
+
+
+def test_exid_a_is_decfloat16() -> None:
+    """A DECFLOAT16 parameter must survive metadata parsing.
+
+    Live capture: a remote-enabled function module with seven DECFLOAT16 parameters
+    on A4H (kernel 793) reported EXID 'a' for every one of them. 'a' was absent from
+    the table, so each row raised and was dropped, and the descriptor came back
+    holding only the DECFLOAT34 parameters — the call then went out missing seven
+    arguments rather than failing.
+    """
+    from saprfclib.codec import RFCTYPE_DECF16, RFCTYPE_DECF34
+    from saprfclib.metadata import _EXID_TO_RFCTYPE
+
+    assert _EXID_TO_RFCTYPE["a"] == RFCTYPE_DECF16
+    assert _EXID_TO_RFCTYPE["e"] == RFCTYPE_DECF34
+
+
+def test_decfloat16_params_are_kept_in_the_descriptor() -> None:
+    """The whole point: the parameter reaches the descriptor instead of vanishing."""
+    from saprfclib.codec import RFCTYPE_DECF16
+    from saprfclib.metadata import _parse_params_row
+
+    row = {
+        "PARAMCLASS": "E",
+        "PARAMETER": "EV_TWELVE",
+        "TABNAME": "",
+        "FIELDNAME": "",
+        "EXID": "a",
+        "POSITION": "1",
+        "OFFSET": "0",
+        "INTLENGTH": "8",
+        "DECIMALS": "0",
+        "DEFAULT": "",
+        "PARAMTEXT": "",
+        "OPTIONAL": "",
+    }
+    field = _parse_params_row(row)
+    assert field is not None
+    assert field.name == "EV_TWELVE"
+    assert field.rfctype == RFCTYPE_DECF16
+
+
+def test_decfloat_still_refuses_to_guess_the_wire_encoding() -> None:
+    """Parsing the metadata must not be mistaken for supporting the type.
+
+    Now that a DECFLOAT16 parameter survives into the descriptor, a call carrying one
+    reaches the codec — which must still raise rather than invent an encoding. The
+    failure moves from "seven parameters silently missing" to "this type is not
+    implemented", which is the correct shape for an unconfirmed wire format.
+    """
+    from saprfclib.codec import RFCTYPE_DECF16, RFCTYPE_DECF34, decode, encode
+
+    for rfctype in (RFCTYPE_DECF16, RFCTYPE_DECF34):
+        with pytest.raises(NotImplementedError, match="not implemented"):
+            encode(rfctype, 1, None)
+        with pytest.raises(NotImplementedError, match="not implemented"):
+            decode(rfctype, b"\x00" * 8, None)
