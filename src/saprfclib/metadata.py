@@ -24,6 +24,7 @@
 # The uncached live-fetch path is deferred to Phase 4 (invoke path not yet available).
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -76,27 +77,44 @@ class MetadataCache:
 
     Func names are normalised to upper-case so lookups are case-insensitive
     (ABAP function-module names are upper-case canonical).
+
+    Safe to share between threads, and meant to be: one cache per pool rather
+    than one per connection. A descriptor is a property of the *system*, not of
+    the socket it arrived on, so a pool of N connections calling M function
+    modules otherwise pays N*M RFC_GET_FUNCTION_INTERFACE round-trips to learn
+    the same M answers. Sharing makes that M.
+
+    The lock is held only around the dict operations, never across the fetch —
+    two threads racing for the same uncached descriptor will both fetch it and
+    the second simply overwrites with an equal value. Holding the lock across a
+    network round-trip would serialise every first call in the pool behind one
+    connection, which is a worse trade than a rare duplicate fetch.
     """
 
     def __init__(self) -> None:
         # {sys_id: {func_name_upper: FunctionDesc}}
         self._cache: dict[str, dict[str, FunctionDesc]] = {}
+        self._lock = threading.Lock()
 
     def get(self, sys_id: str, name: str) -> FunctionDesc | None:
         """Return the cached descriptor or None on miss (never raises KeyError)."""
-        return self._cache.get(sys_id, {}).get(name.upper())
+        with self._lock:
+            return self._cache.get(sys_id, {}).get(name.upper())
 
     def put(self, sys_id: str, desc: FunctionDesc) -> None:
         """Cache a descriptor under (sys_id, desc.name.upper())."""
-        self._cache.setdefault(sys_id, {})[desc.name.upper()] = desc
+        with self._lock:
+            self._cache.setdefault(sys_id, {})[desc.name.upper()] = desc
 
     def get_or_fetch(
         self, sys_id: str, name: str, fetch: Callable[[str], FunctionDesc]
     ) -> FunctionDesc:
         """Return the cached descriptor, or call fetch(name) once and cache it.
 
-        fetch is invoked at most once per (sys_id, name): a subsequent call for
-        the same key is served from the cache with no second round-trip (META-03).
+        fetch is invoked at most once per (sys_id, name) in the common case: a
+        subsequent call for the same key is served from the cache with no second
+        round-trip (META-03). See the class docstring on why the lock is not held
+        across ``fetch``.
         """
         hit = self.get(sys_id, name)
         if hit is not None:

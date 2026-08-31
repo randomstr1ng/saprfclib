@@ -94,7 +94,7 @@ def test_end_to_end_connect_attributes_metadata(monkeypatch) -> None:
     import saprfclib.connection as connection
 
     transport = MockTransport(_scripted_handshake_responses())
-    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, timeout=None: transport)
+    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
 
     conn = connect(
         ashost="testhost",
@@ -136,7 +136,7 @@ def test_ping_close_lifecycle(monkeypatch) -> None:
     import saprfclib.connection as connection
 
     transport = MockTransport(_scripted_handshake_responses(extra=[_rfcping_ok()]))
-    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, timeout=None: transport)
+    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
 
     conn = connect(
         ashost="testhost",

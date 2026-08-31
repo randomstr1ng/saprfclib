@@ -157,7 +157,7 @@ def test_connect_saprouter_routes_through_router(monkeypatch) -> None:
     import saprfclib.connection as connection
 
     transport = MockTransport(_handshake_script())
-    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, timeout=None: transport)
+    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
 
     conn = connection.connect(
         ashost="app",
@@ -181,7 +181,7 @@ def test_connect_message_server_resolves_then_connects(monkeypatch) -> None:
     app_transport = MockTransport(_handshake_script())
     handed_out = [ms_transport, app_transport]
 
-    def fake_connect_tcp(host, port, timeout=None):
+    def fake_connect_tcp(host, port, **_kwargs):
         return handed_out.pop(0)
 
     monkeypatch.setattr(connection, "connect_tcp", fake_connect_tcp)

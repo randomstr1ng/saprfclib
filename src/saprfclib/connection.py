@@ -79,7 +79,14 @@ from saprfclib.metadata import (
 )
 from saprfclib.session import ConnectionAttributes, Session, SessionState
 from saprfclib.stores import TidStore, UnitState, UnitStore
-from saprfclib.transport import AsyncTransport, Transport, connect_tcp, connect_tcp_async
+from saprfclib.transport import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_READ_TIMEOUT,
+    AsyncTransport,
+    Transport,
+    connect_tcp,
+    connect_tcp_async,
+)
 from saprfclib.types import (
     RFC_EXPORT,
     RFC_IMPORT,
@@ -1919,7 +1926,14 @@ class Connection:
     ``get_connection_attributes`` are available; ``close`` is safe in any state.
     """
 
-    def __init__(self, transport: Transport, *, strict_params: bool = False) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        *,
+        strict_params: bool = False,
+        metadata_cache: MetadataCache | None = None,
+        metadata_cache_key: str | None = None,
+    ) -> None:
         self._transport = transport
         # Unknown-parameter policy (issue #24). Default False mirrors what callers
         # porting from pyrfc expect; set True to have call() reject an argument the
@@ -1928,8 +1942,14 @@ class Connection:
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self._session = Session()
         self._lock = threading.Lock()
-        self._cache = MetadataCache()  # in-process FunctionDesc cache (META-03)
-        self._anon_cache_key: str | None = None  # set only if the system sends no sys_id
+        # A descriptor describes the system, not this socket, so the cache can be
+        # shared: a pool passes one in and its connections stop each paying for
+        # the same interfaces. Falls back to a private cache when none is given.
+        self._cache = metadata_cache if metadata_cache is not None else MetadataCache()
+        # Used in place of sys_id when the system sends none. A pool supplies one
+        # shared value, since its connections were opened from identical
+        # parameters and therefore reach the same system by construction.
+        self._anon_cache_key: str | None = metadata_cache_key
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
         self._ws_call_key: bytes = b"\x01" + b"\x00" * 36  # set by _ws_begin / _ws_handshake
@@ -3891,6 +3911,10 @@ def connect(
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
     timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
+    metadata_cache: MetadataCache | None = None,
+    metadata_cache_key: str | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
     sysid: str | None = None,
@@ -3971,7 +3995,13 @@ def connect(
 
     if mshost is not None:
         # Message-server group logon: resolve to a concrete (ashost, sysnr).
-        ms_transport = connect_tcp(mshost, _ms_port(sysid), timeout=timeout)
+        ms_transport = connect_tcp(
+            mshost,
+            _ms_port(sysid),
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
         try:
             resolved_host, resolved_sysnr = MessageServerClient(ms_transport).resolve(
                 group or "PUBLIC"
@@ -4009,7 +4039,12 @@ def connect(
             verify=ws_tls_verify,
             timeout=timeout,
         )
-        conn = Connection(transport, strict_params=strict_params)  # type: ignore[arg-type]
+        conn = Connection(
+            transport,  # type: ignore[arg-type]
+            strict_params=strict_params,
+            metadata_cache=metadata_cache,
+            metadata_cache_key=metadata_cache_key,
+        )
     elif snc_lib is not None:
         # SNC (SEC-02/03/04/06, D-13): SAP protocol order requires the NI
         # version exchange to complete on the plain channel BEFORE the GSS
@@ -4020,7 +4055,13 @@ def connect(
         # straight through — never placed into a log or an exception string.
         from saprfclib.snc import SncTransport
 
-        _inner = connect_tcp(ashost, port, timeout=timeout)
+        _inner = connect_tcp(
+            ashost,
+            port,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
 
         # Step 1: NI version exchange on the plain inner transport.
         _snc_sess = Session()
@@ -4044,7 +4085,12 @@ def connect(
 
         # Step 3: Connection with the pre-versioned session so _handshake()
         # resumes from NI_VERSIONED (skips the NI leg, starts at GW connect).
-        conn = Connection(transport, strict_params=strict_params)  # type: ignore[arg-type]
+        conn = Connection(
+            transport,  # type: ignore[arg-type]
+            strict_params=strict_params,
+            metadata_cache=metadata_cache,
+            metadata_cache_key=metadata_cache_key,
+        )
         conn._session = _snc_sess
         conn._snc_mode = True
     else:
@@ -4061,6 +4107,10 @@ def connect(
         _ashost = ashost
         _port = port
         _timeout = timeout
+        _connect_timeout = connect_timeout
+        _read_timeout = read_timeout
+        _metadata_cache = metadata_cache
+        _metadata_cache_key = metadata_cache_key
         _saprouter = saprouter
         _client = client
         _user = user
@@ -4077,7 +4127,13 @@ def connect(
             # Use connect_tcp (sync, patchable in tests) wrapped in a thin async shim.
             # connect_async() uses real asyncio open_connection for non-blocking I/O.
             # This keeps the existing test suite (which patches connect_tcp) green (D-07).
-            sync_t = connect_tcp(_ashost, _port, timeout=_timeout)
+            sync_t = connect_tcp(
+                _ashost,
+                _port,
+                timeout=_timeout,
+                connect_timeout=_connect_timeout,
+                read_timeout=_read_timeout,
+            )
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
             if _saprouter is not None:
                 hops = parse_route_string(_saprouter)
@@ -4089,6 +4145,8 @@ def connect(
                 tid_store=_tid_store,
                 unit_store=_unit_store,
                 strict_params=_strict,
+                metadata_cache=_metadata_cache,
+                metadata_cache_key=_metadata_cache_key,
             )
             await ac._handshake(
                 client=_client,
@@ -4160,6 +4218,8 @@ class AsyncConnection:
         tid_store: TidStore | None = None,
         unit_store: UnitStore | None = None,
         strict_params: bool = False,
+        metadata_cache: MetadataCache | None = None,
+        metadata_cache_key: str | None = None,
     ) -> None:
         self._transport = transport
         self._session = Session()
@@ -4167,8 +4227,9 @@ class AsyncConnection:
         # Unknown-parameter policy (issue #24) - see Connection.__init__.
         self._strict_params = strict_params
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
-        self._cache = MetadataCache()
-        self._anon_cache_key: str | None = None
+        # Shareable across connections to one system — see Connection.__init__.
+        self._cache = metadata_cache if metadata_cache is not None else MetadataCache()
+        self._anon_cache_key: str | None = metadata_cache_key
         self._struct_desc_cache: dict[str, TypeDesc] = {}
         # Retry + durable-store attributes (D-01/D-02/D-03/D-03b)
         self._max_retries = max_retries  # max auto-retry attempts (D-02)
@@ -4992,6 +5053,9 @@ async def connect_async(
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
     timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    metadata_cache: MetadataCache | None = None,
+    metadata_cache_key: str | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
     sysid: str | None = None,
@@ -5043,7 +5107,12 @@ async def connect_async(
     if mshost is not None:
         # Message-server resolve: sync I/O; run off the event loop via to_thread.
         def _ms_resolve() -> tuple[str, int]:
-            ms_transport = connect_tcp(mshost, _ms_port(sysid), timeout=timeout)
+            ms_transport = connect_tcp(
+                mshost,
+                _ms_port(sysid),
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+            )
             try:
                 return MessageServerClient(ms_transport).resolve(group or "PUBLIC")
             finally:
@@ -5052,7 +5121,9 @@ async def connect_async(
         ashost, sysnr = await asyncio.to_thread(_ms_resolve)
 
     port = 3300 + int(sysnr)
-    transport = await connect_tcp_async(ashost, port, timeout=timeout)
+    transport = await connect_tcp_async(
+        ashost, port, timeout=timeout, connect_timeout=connect_timeout
+    )
 
     if saprouter is not None:
         hops = parse_route_string(saprouter)
@@ -5065,6 +5136,8 @@ async def connect_async(
         tid_store=tid_store,
         unit_store=unit_store,
         strict_params=strict_params,
+        metadata_cache=metadata_cache,
+        metadata_cache_key=metadata_cache_key,
     )
     await conn._handshake(
         client=client,

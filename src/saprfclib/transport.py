@@ -39,7 +39,58 @@ __all__ = [
     "connect_tcp",
     "AsyncTransport",
     "connect_tcp_async",
+    "enable_keepalive",
+    "DEFAULT_CONNECT_TIMEOUT",
+    "DEFAULT_READ_TIMEOUT",
 ]
+
+# Connecting and waiting for an answer are different waits and need different
+# limits. A TCP connect that has not completed in 10s is not going to; an RFC
+# call that has not answered in 10s may simply be a large BAPI still running.
+# Passing one number for both — which socket.create_connection does, since its
+# timeout becomes the socket's per-operation timeout — forces a choice between
+# hanging forever on a wedged work process and aborting legitimate long calls.
+DEFAULT_CONNECT_TIMEOUT = 10.0
+
+# None means "wait as long as the server takes". That is the correct default for
+# a protocol with no server-side call-duration bound: capping it would abort
+# valid work. It is dangerous only when the peer goes away silently without
+# closing the socket, which is what keepalive below is for.
+DEFAULT_READ_TIMEOUT: float | None = None
+
+# TCP keepalive probing. A stateful firewall or NAT between client and SAP will
+# silently drop an idle mapping, and neither end is told. Without keepalive the
+# next recv() blocks until the OS default gives up (two hours on Linux), which
+# in practice means a hung application. These values start probing after 60s of
+# idle and give up after 5 failed probes at 10s intervals, so a dead path is
+# detected in ~110s rather than ~2h.
+_KEEPALIVE_IDLE = 60
+_KEEPALIVE_INTERVAL = 10
+_KEEPALIVE_COUNT = 5
+
+
+def enable_keepalive(sock: socket.socket) -> None:
+    """Turn on TCP keepalive with probe timings suited to RFC connections.
+
+    The per-timing options are platform-specific and simply absent on some
+    systems; each is applied only if this platform defines it, so enabling
+    keepalive never fails on a platform that spells the knobs differently. The
+    base SO_KEEPALIVE flag is portable and is what actually matters — the
+    timings only shorten the detection window from the OS default.
+    """
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for name, value in (
+        ("TCP_KEEPIDLE", _KEEPALIVE_IDLE),
+        ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL),
+        ("TCP_KEEPCNT", _KEEPALIVE_COUNT),
+    ):
+        option = getattr(socket, name, None)
+        if option is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+            except OSError:  # pragma: no cover - platform-dependent
+                # The flag is set; only the timing refinement was refused.
+                pass
 
 
 # framing.md lines 355-368 reference implementation: 4-byte big-endian uint32.
@@ -128,13 +179,41 @@ class Transport:
         self._sock.close()
 
 
-def connect_tcp(host: str, port: int, *, timeout: float | None = None) -> Transport:
+def connect_tcp(
+    host: str,
+    port: int,
+    *,
+    timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
+) -> Transport:
     """Open a blocking TCP socket and return a Transport bound to it.
 
-    Sets TCP_NODELAY so small RFC frames are not delayed by Nagle's algorithm.
+    Sets TCP_NODELAY so small RFC frames are not delayed by Nagle's algorithm,
+    and enables TCP keepalive so a silently dropped path is detected rather than
+    blocking a later read indefinitely.
+
+    Args:
+        connect_timeout: how long to wait for the TCP handshake. Defaults to
+            :data:`DEFAULT_CONNECT_TIMEOUT`; ``None`` waits indefinitely.
+        read_timeout: how long a single read may block once connected. Defaults
+            to :data:`DEFAULT_READ_TIMEOUT` (``None`` — wait for the server),
+            because RFC has no server-side bound on how long a call may take.
+        timeout: deprecated single value applied to both. Kept so existing
+            callers keep working; prefer the two explicit arguments, since one
+            number cannot express "connect quickly, then wait as long as the
+            call needs".
     """
-    sock = socket.create_connection((host, port), timeout=timeout)
+    if timeout is not None:
+        connect_timeout = timeout
+        read_timeout = timeout
+    sock = socket.create_connection((host, port), timeout=connect_timeout)
+    # create_connection leaves its connect timeout on the socket, where it would
+    # then apply to every later recv. Set the read timeout explicitly so the two
+    # are never conflated by accident.
+    sock.settimeout(read_timeout)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    enable_keepalive(sock)
     return Transport(sock)
 
 
@@ -215,17 +294,29 @@ async def connect_tcp_async(
     port: int,
     *,
     timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
 ) -> AsyncTransport:
     """Open an asyncio TCP connection and return an AsyncTransport.
 
-    Sets TCP_NODELAY so small RFC frames are not delayed by Nagle's algorithm,
-    mirroring the sync connect_tcp behaviour (transport.py:119-126).
+    Sets TCP_NODELAY and enables TCP keepalive, mirroring :func:`connect_tcp`.
+
+    There is no ``read_timeout`` here on purpose: an asyncio caller bounds a read
+    with ``asyncio.wait_for`` around the await, which cancels cleanly. Setting a
+    socket-level timeout underneath the event loop would not do that.
+
+    Args:
+        connect_timeout: how long to wait for the connection. Defaults to
+            :data:`DEFAULT_CONNECT_TIMEOUT`; ``None`` waits indefinitely.
+        timeout: deprecated alias for ``connect_timeout``.
     """
+    if timeout is not None:
+        connect_timeout = timeout
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(host, port),
-        timeout=timeout,
+        timeout=connect_timeout,
     )
     sock = writer.get_extra_info("socket")
     if sock is not None:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        enable_keepalive(sock)
     return AsyncTransport(reader, writer)

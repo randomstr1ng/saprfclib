@@ -26,6 +26,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Connections no longer wait forever.** `connect_tcp` was called with `timeout=None`
+  by default, so a wedged SAP work process blocked the caller indefinitely with no
+  recovery. `connect_timeout` now defaults to 10 seconds.
+- **Connect and read timeouts are separate settings.** `socket.create_connection` leaves
+  its connect timeout on the socket, where it silently becomes the per-read timeout — so
+  being strict about connecting (`timeout=5`) also aborted any RFC call running longer
+  than five seconds. `connect()` and `connect_async()` now take `connect_timeout`, and
+  `connect()` also takes `read_timeout` (default `None`: RFC puts no bound on how long a
+  call may legitimately take). The single `timeout` argument still works and still
+  applies to both.
+- **TCP keepalive is enabled on every connection.** A stateful firewall or NAT between
+  client and SAP silently drops an idle mapping and tells neither end; without keepalive
+  the next read blocked until the OS default gave up, two hours on Linux. Probing now
+  starts after 60s idle and gives up after 5 probes at 10s, detecting a dead path in
+  about 110 seconds. The pool's health check could never cover this: it runs at acquire
+  time, and this is a connection that was healthy when it was lent out.
+- **A pool now shares one metadata cache.** Each connection built its own, so a pool of N
+  connections calling M function modules paid N×M `RFC_GET_FUNCTION_INTERFACE`
+  round-trips to learn the same M answers — 1000 avoidable calls for a 20-connection pool
+  and 50 function modules. A descriptor describes the system, not the socket it arrived
+  on. `MetadataCache` is now thread-safe, and `connect()`/`connect_async()` accept
+  `metadata_cache` so callers can share one explicitly. The lock is deliberately not held
+  across the fetch: that would serialise every first call in the pool behind one
+  connection, a worse trade than a rare duplicate fetch.
+
 - `_LoopThread.close()` stopped the background event loop but never closed it, so every
   synchronous classic connection leaked a loop and the file descriptors behind its
   selector until garbage collection. Python 3.14 surfaces this as a `ResourceWarning`;

@@ -37,6 +37,7 @@ import asyncio
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -44,6 +45,7 @@ from typing import Any
 
 import saprfclib.connection as _connection
 from saprfclib.exceptions import PoolTimeoutError
+from saprfclib.metadata import MetadataCache
 
 _logger = logging.getLogger(__name__)
 
@@ -74,6 +76,14 @@ class ConnectionPool:
 
         self._params: dict[str, Any] = dict(params)
         self._max_size = max_size
+        # One descriptor cache for the whole pool. A FunctionDesc describes the
+        # system, not the socket it arrived over, so a per-connection cache made
+        # a pool of N connections pay N round-trips to learn each interface. The
+        # key hint covers the case where the system reports no sys_id: these
+        # connections are opened from identical parameters, so they reach the
+        # same system by construction and may share a bucket.
+        self._metadata_cache = MetadataCache()
+        self._metadata_cache_key = f"\x00pool-{uuid.uuid4().hex}"
         self._cv = threading.Condition()
         self._idle: deque[Any] = deque()
         self._in_use: set[Any] = set()
@@ -95,7 +105,11 @@ class ConnectionPool:
         Dispatches through the ``saprfclib.connection`` module attribute (not a
         bound name) so the factory seam stays patchable for offline tests.
         """
-        return _connection.connect(**self._params)
+        return _connection.connect(
+            **self._params,
+            metadata_cache=self._metadata_cache,
+            metadata_cache_key=self._metadata_cache_key,
+        )
 
     def _ping_ok(self, conn: Any) -> bool:
         """True iff ``conn.ping()`` reports liveness. Any False/exception is dead.
@@ -305,6 +319,8 @@ class AsyncConnectionPool:
         self._idle: deque[Any] = deque()
         self._in_use: set[Any] = set()
         self._created = 0
+        self._metadata_cache = MetadataCache()
+        self._metadata_cache_key = f"\x00pool-{uuid.uuid4().hex}"
         # Cumulative, not per-checkout: _checkout runs inside a wait_for, so a
         # timeout unwinds it and any counter local to it is lost with the frame.
         # acquire() snapshots this before and after to get the per-wait figure.
@@ -340,7 +356,11 @@ class AsyncConnectionPool:
         bound name) so the factory seam stays patchable for offline tests —
         mirrors ConnectionPool._open().
         """
-        return await _connection.connect_async(**self._params)
+        return await _connection.connect_async(
+            **self._params,
+            metadata_cache=self._metadata_cache,
+            metadata_cache_key=self._metadata_cache_key,
+        )
 
     async def _ping_ok(self, conn: Any) -> bool:
         """True iff ``await conn.ping()`` reports liveness.  Called OUTSIDE the lock.
