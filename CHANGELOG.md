@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Load-balanced logon could not work, and failed silently.** `connect(mshost=...)`
+  derived the message-server port as a hardcoded 3600 — the function took a `sysid`
+  argument and ignored it, while its docstring claimed "3600 + sysnr". Both are wrong:
+  the port is `36<nn>` where `nn` is the **message server's own instance number**, which
+  is not the application server's system number and cannot be inferred from it. On A4H
+  the app server is sysnr 00 while the message server is instance 01, so it listens on
+  3601 and **3600 refuses connections outright**. Added `msserv`, accepting a port or a
+  service name resolved through `/etc/services` as the SAP tools do; an unknown service
+  name raises rather than defaulting, since defaulting means silently connecting
+  somewhere else.
+- Group logon now resolves over the message server's **HTTP interface**, which is
+  line-oriented, documented, and confirmed against a live server (golden fixtures in
+  `tests/golden/router/`). The binary `**MESSAGE**` protocol in `router.py` carries most
+  of this project's `[ASSUMED]` labels and, tested live on 2026-08-31, does not work at
+  all: the server accepts the connection on 3601 and then answers nothing — no
+  acknowledgement, no list, no error. Letting an unverified path choose which
+  application server a caller talks to is not a failure the caller can see, so it is no
+  longer the default. `ms_use_http=False` still selects it for anyone working on it, and
+  `docs/protocol/message_server.md` records what a capture would need to close the gap.
+
 - **Connections no longer wait forever.** `connect_tcp` was called with `timeout=None`
   by default, so a wedged SAP work process blocked the caller indefinitely with no
   recovery. `connect_timeout` now defaults to 10 seconds.

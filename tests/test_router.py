@@ -172,9 +172,15 @@ def test_connect_saprouter_routes_through_router(monkeypatch) -> None:
     assert conn.get_connection_attributes().sys_id == "A4H"
 
 
-def test_connect_message_server_resolves_then_connects(monkeypatch) -> None:
-    """connect(..., mshost=..., group=...) resolves via MessageServerClient then
-    runs the direct-TCP handshake against the resolved (ashost, sysnr)."""
+def test_connect_message_server_binary_path_resolves_then_connects(monkeypatch) -> None:
+    """The binary message-server path still works when explicitly selected.
+
+    ``ms_use_http=False`` is required now: the HTTP interface is the default,
+    because the binary frames are built from a partial capture and a live message
+    server does not answer them. This test covers the code, not its correctness
+    on the wire -- MockTransport replays a script we wrote, so it cannot tell us
+    the frames are right.
+    """
     import saprfclib.connection as connection
 
     ms_transport = MockTransport([_ms_redirect("vhcala4hci", 0)])
@@ -194,6 +200,7 @@ def test_connect_message_server_resolves_then_connects(monkeypatch) -> None:
         passwd="secret",
         mshost="mshost",
         group="PUBLIC",
+        ms_use_http=False,
     )
     # The message-server side connection was closed after resolve.
     assert ms_transport.closed is True
@@ -371,3 +378,96 @@ def test_resolve_full_redir_bounds_rejects_empty_host() -> None:
         ValueError, match=r"(?i)(redirect|redir|host|empty|invalid|address|0\.0\.0\.0)"
     ):
         client.resolve_full(group="PUBLIC", sysid="A4H")
+
+
+# --------------------------------------------------------------------------- #
+# Message-server HTTP interface — live capture 2026-08-31
+# Golden fixtures: tests/golden/router/ms_http_*.txt
+# --------------------------------------------------------------------------- #
+
+MS_HTTP_DIR = Path(__file__).parent / "golden" / "router"
+
+
+def test_parse_ms_http_logon_finds_the_rfc_row() -> None:
+    """The RFC row is what a load-balanced connect actually needs."""
+    from saprfclib.router import parse_ms_http_logon
+
+    rows = parse_ms_http_logon((MS_HTTP_DIR / "ms_http_logon_v12.txt").read_text())
+    by_service = {service: (host, port) for service, host, port, _ in rows}
+    assert by_service["RFC"] == ("sapdemo1", 3300)
+    # RFCS is the SNC-protected endpoint on a different port; picking it by
+    # accident would hand back a port that needs SNC parameters the caller may
+    # not have supplied.
+    assert by_service["RFCS"] == ("sapdemo1", 4800)
+
+
+def test_parse_ms_http_logon_skips_rows_it_cannot_read() -> None:
+    """The service list is open-ended; one odd row must not lose the RFC row."""
+    from saprfclib.router import parse_ms_http_logon
+
+    body = "version 1.2\ninstance\nRFC\thost\t3300\t\nGARBAGE\nNEW\thost\tnotaport\t\n"
+    rows = parse_ms_http_logon(body)
+    assert [r[0] for r in rows] == ["RFC"]
+
+
+def test_parse_ms_http_lglist_reads_the_logon_groups() -> None:
+    from saprfclib.router import parse_ms_http_lglist
+
+    groups = parse_ms_http_lglist((MS_HTTP_DIR / "ms_http_lglist.txt").read_text())
+    assert ("PUBLIC", "192.0.2.1", 3200) in groups
+    assert {g[0] for g in groups} == {"PUBLIC", "SPACE"}
+
+
+def test_resolve_rfc_server_http_reports_a_missing_rfc_row(monkeypatch) -> None:
+    """Answering without an RFC service must raise, not fall back to a guess.
+
+    Connecting to the wrong application server is not a failure the caller can
+    see, so there is nothing safe to guess here.
+    """
+    import io
+
+    from saprfclib import router
+    from saprfclib.router import MessageServerHttpError, resolve_rfc_server_http
+
+    body = b"version 1.2\ninstance\nHTTP\thost\t50000\t\n"
+    monkeypatch.setattr(router, "urlopen", lambda *a, **k: io.BytesIO(body))
+    with pytest.raises(MessageServerHttpError, match="no RFC service"):
+        resolve_rfc_server_http("ms", 8101)
+
+
+def test_resolve_rfc_server_http_explains_an_unreachable_interface(monkeypatch) -> None:
+    """The HTTP port only exists when the profile enables it — say so."""
+    from saprfclib import router
+    from saprfclib.router import MessageServerHttpError, resolve_rfc_server_http
+
+    def boom(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(router, "urlopen", boom)
+    with pytest.raises(MessageServerHttpError, match="ms/server_port_0"):
+        resolve_rfc_server_http("ms", 8101)
+
+
+def test_message_server_ports_derive_from_the_ms_instance_not_the_sysnr() -> None:
+    """3600/8100 + message-server instance, which is not the app server's sysnr.
+
+    Live scan 2026-08-31: on A4H the app server is sysnr 00 (gateway 3300) while
+    the message server is instance 01 — binary on 3601, HTTP on 8101, and 3600
+    refuses connections outright. Deriving either from `sysnr` reaches nothing.
+    """
+    from saprfclib.connection import _ms_http_port, _ms_port
+
+    assert _ms_port(None) == 3601
+    assert _ms_http_port() == 8101
+    # Explicit values win, as a port or as a numeric string.
+    assert _ms_port(None, 3600) == 3600
+    assert _ms_port(None, "3699") == 3699
+    assert _ms_http_port(8199) == 8199
+
+
+def test_unknown_service_name_is_refused_not_defaulted() -> None:
+    """Silently connecting somewhere else is the failure mode to avoid."""
+    from saprfclib.connection import _ms_port
+
+    with pytest.raises(ValueError, match="not in /etc/services"):
+        _ms_port(None, "sapms_definitely_not_a_real_service")

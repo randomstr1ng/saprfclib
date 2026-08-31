@@ -3917,6 +3917,9 @@ def connect(
     metadata_cache_key: str | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
+    msserv: int | str | None = None,
+    ms_http_port: int | str | None = None,
+    ms_use_http: bool = True,
     sysid: str | None = None,
     group: str | None = None,
     wshost: str | None = None,
@@ -3986,7 +3989,6 @@ def connect(
     # Imported lazily so the direct-TCP facade has no hard dependency on the
     # [ASSUMED] alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
-        MessageServerClient,
         build_ni_route,
         parse_route_string,
     )
@@ -3995,20 +3997,17 @@ def connect(
 
     if mshost is not None:
         # Message-server group logon: resolve to a concrete (ashost, sysnr).
-        ms_transport = connect_tcp(
+        ashost, sysnr = _resolve_via_message_server(
             mshost,
-            _ms_port(sysid),
+            group=group,
+            sysid=sysid,
+            msserv=msserv,
+            ms_http_port=ms_http_port,
+            use_http=ms_use_http,
             timeout=timeout,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
         )
-        try:
-            resolved_host, resolved_sysnr = MessageServerClient(ms_transport).resolve(
-                group or "PUBLIC"
-            )
-        finally:
-            ms_transport.close()
-        ashost, sysnr = resolved_host, resolved_sysnr
 
     port = (4800 if snc_lib is not None else 3300) + int(sysnr)
 
@@ -4178,13 +4177,114 @@ def connect(
     return conn
 
 
-def _ms_port(sysid: str | None) -> int:
-    """Message-server port: 3600 + sysnr is the conventional sapms<SID> port.
+# Message-server ports are derived from the MESSAGE SERVER's own instance number,
+# which is not the application server's system number. On A4H the app server is
+# sysnr 00 (gateway 3300) while the message server runs as instance 01: binary on
+# 3601 and HTTP on 8101, with 3600 refusing connections outright. Deriving either
+# from `sysnr` therefore connects to nothing on a perfectly ordinary system.
+#
+# Confirmed by live scan 2026-08-31. There is no way to infer the message server's
+# instance number from the application server's, so it has to be supplied; these
+# defaults match the common single-instance case and are overridable.
+_DEFAULT_MS_INSTANCE = 1
 
-    [ASSUMED] message-server port derivation (RESEARCH A2) — gated behind the
-    plan 03-03 checkpoint. Defaults to 3600 when no system number is encoded.
+
+def _resolve_via_message_server(
+    mshost: str,
+    *,
+    group: str | None,
+    sysid: str | None,
+    msserv: int | str | None,
+    ms_http_port: int | str | None,
+    use_http: bool,
+    timeout: float | None,
+    connect_timeout: float | None,
+    read_timeout: float | None,
+) -> tuple[str, int]:
+    """Resolve a logon group to a concrete (ashost, sysnr).
+
+    Prefers the message server's HTTP interface, which is line-oriented and was
+    confirmed against a live server (tests/golden/router/ms_http_logon_v12.txt).
+    The binary protocol in router.py is still built from a partial capture: on a
+    live message server it accepts the connection and then answers nothing, so
+    every frame it sends is unverified. Letting it choose silently would mean an
+    unverified path deciding which application server the caller talks to.
+
+    Pass ``ms_use_http=False`` to force the binary path anyway.
     """
-    return 3600
+    from saprfclib.router import MessageServerClient, resolve_rfc_server_http
+
+    if use_http:
+        http_port = _ms_http_port(ms_http_port if ms_http_port is not None else msserv)
+        host, rfc_port = resolve_rfc_server_http(mshost, http_port, group=group)
+        # The list gives an RFC port; the rest of connect() wants a system number.
+        # 3300 + sysnr is the confirmed gateway convention. Anything else is a
+        # non-standard port that cannot be expressed as a system number, so say so
+        # rather than truncating it into a wrong one.
+        sysnr = rfc_port - 3300
+        if not 0 <= sysnr <= 99:
+            raise ValueError(
+                f"message server returned RFC port {rfc_port} for group "
+                f"{group or 'PUBLIC'}, which is not 3300 + a system number. Connect to "
+                f"{host}:{rfc_port} directly with ashost/sysnr instead."
+            )
+        _logger.debug(
+            "message server %s resolved group %s to %s (sysnr %02d)",
+            mshost,
+            group or "PUBLIC",
+            host,
+            sysnr,
+        )
+        return host, sysnr
+
+    ms_transport = connect_tcp(
+        mshost,
+        _ms_port(sysid, msserv),
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
+    try:
+        return MessageServerClient(ms_transport).resolve(group or "PUBLIC")
+    finally:
+        ms_transport.close()
+
+
+def _ms_port(sysid: str | None, msserv: int | str | None = None) -> int:
+    """Binary message-server port (36<nn>, nn = message-server instance number).
+
+    Args:
+        sysid: unused; kept for call compatibility. The system ID does not encode
+            the message server's instance number.
+        msserv: an explicit port, or a service name such as ``"sapmsA4H"`` which
+            is looked up in /etc/services the way the SAP tools do.
+    """
+    return _resolve_ms_service(msserv, 3600 + _DEFAULT_MS_INSTANCE)
+
+
+def _ms_http_port(msserv: int | str | None = None) -> int:
+    """HTTP message-server port (81<nn>, nn = message-server instance number)."""
+    return _resolve_ms_service(msserv, 8100 + _DEFAULT_MS_INSTANCE)
+
+
+def _resolve_ms_service(msserv: int | str | None, default: int) -> int:
+    """Turn an explicit port, a service name, or nothing into a port number."""
+    if msserv is None:
+        return default
+    if isinstance(msserv, int):
+        return msserv
+    text = msserv.strip()
+    if text.isdigit():
+        return int(text)
+    try:
+        return _socket_module.getservbyname(text)
+    except OSError:
+        # A name that /etc/services does not know is a configuration mistake, not
+        # something to paper over by silently connecting somewhere else.
+        raise ValueError(
+            f"message-server service {msserv!r} is not in /etc/services; give the "
+            f"port number instead (for example msserv=3601)"
+        ) from None
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,10 @@ from __future__ import annotations
 import socket
 import struct
 from dataclasses import dataclass
+from urllib.parse import quote
+from urllib.request import urlopen
+
+from saprfclib.exceptions import SapRfcError
 
 __all__ = [
     "RouteHop",
@@ -35,6 +39,10 @@ __all__ = [
     "build_ni_route",
     "parse_sapms_server_list",
     "MessageServerClient",
+    "MessageServerHttpError",
+    "parse_ms_http_logon",
+    "parse_ms_http_lglist",
+    "resolve_rfc_server_http",
 ]
 
 
@@ -546,3 +554,120 @@ def _build_sapms_server_list_request() -> bytes:
     buf = bytearray(header)
     struct.pack_into(">I", buf, 0, len(buf) - 4)
     return bytes(buf)
+
+
+# --------------------------------------------------------------------------- #
+# Message server HTTP interface (evidence tier 1 — live capture 2026-08-31)
+# --------------------------------------------------------------------------- #
+#
+# The message server also answers over HTTP, and that interface is documented,
+# line-oriented, and needs no reverse engineering. The binary protocol above is
+# still built from a partial capture: against a live message server on A4H it
+# accepts the connection and then answers nothing, so the [ASSUMED] login frame
+# and opcode pair are wrong. Until a capture fixes them, this is the path that
+# actually resolves a load-balanced logon.
+#
+# Captured responses are in tests/golden/router/ms_http_*.txt.
+#
+#   /msgserver/text/logon?version=1.2[&group=NAME]
+#       version 1.2
+#       <instance name>
+#       RFC<TAB><host><TAB><port><TAB><extra>
+#       ... one line per service (DIAG, DIAGS, RFC, RFCS, HTTP, HTTPS)
+#
+#   /msgserver/text/lglist
+#       version 1.0
+#       <group><TAB><host><TAB><port><TAB><load or release>
+#
+# The port is 8100 + the message server's instance number, NOT the application
+# server's system number — see _ms_http_port in connection.py.
+
+_MS_HTTP_TIMEOUT = 10.0
+
+
+class MessageServerHttpError(SapRfcError):
+    """The message server's HTTP interface could not be reached or understood."""
+
+
+def parse_ms_http_logon(body: str) -> list[tuple[str, str, int, str]]:
+    """Parse ``/msgserver/text/logon`` into (service, host, port, extra) rows.
+
+    Source: tests/golden/router/ms_http_logon_v12.txt. Tab-separated, one row per
+    service; the first two lines are the format version and the instance name.
+    Rows that do not parse are skipped rather than failing the whole response —
+    the service list is open-ended and a future release adding a row must not
+    break resolution of the RFC row we came for.
+    """
+    rows: list[tuple[str, str, int, str]] = []
+    for line in body.splitlines()[2:]:
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            port = int(parts[2].strip())
+        except ValueError:
+            continue
+        extra = parts[3].strip() if len(parts) > 3 else ""
+        rows.append((parts[0].strip(), parts[1].strip(), port, extra))
+    return rows
+
+
+def parse_ms_http_lglist(body: str) -> list[tuple[str, str, int]]:
+    """Parse ``/msgserver/text/lglist`` into (group, host, port) rows.
+
+    Source: tests/golden/router/ms_http_lglist.txt.
+    """
+    groups: list[tuple[str, str, int]] = []
+    for line in body.splitlines()[1:]:
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            groups.append((parts[0].strip(), parts[1].strip(), int(parts[2].strip())))
+        except ValueError:
+            continue
+    return groups
+
+
+def resolve_rfc_server_http(
+    mshost: str,
+    http_port: int,
+    *,
+    group: str | None = None,
+    timeout: float = _MS_HTTP_TIMEOUT,
+) -> tuple[str, int]:
+    """Resolve the RFC (host, port) for a logon group via the message server's HTTP API.
+
+    Returns the ``RFC`` service row, which is the plaintext RFC endpoint — not
+    ``RFCS``, which is the SNC-protected one and needs SNC parameters the caller
+    has not necessarily supplied.
+
+    Raises:
+        MessageServerHttpError: the interface is unreachable, or answers without
+            an RFC row. Both are reported rather than falling back to a guess:
+            connecting to the wrong application server is not a failure the
+            caller can see.
+    """
+    url = f"http://{mshost}:{http_port}/msgserver/text/logon?version=1.2"
+    if group:
+        url += f"&group={quote(group)}"
+    try:
+        with urlopen(url, timeout=timeout) as response:  # noqa: S310 - fixed http scheme
+            body = response.read().decode("utf-8", "replace")
+    except (OSError, ValueError) as exc:
+        raise MessageServerHttpError(
+            f"message server HTTP interface at {mshost}:{http_port} is unreachable "
+            f"({type(exc).__name__}: {exc}). It is only present when the profile sets "
+            f"ms/server_port_0; pass ashost/sysnr directly if it is not enabled."
+        ) from exc
+
+    rows = parse_ms_http_logon(body)
+    for service, host, port, _extra in rows:
+        if service == "RFC":
+            return host, port
+    available = ", ".join(sorted({row[0] for row in rows})) or "none"
+    raise MessageServerHttpError(
+        f"message server at {mshost}:{http_port} listed no RFC service"
+        + (f" for group {group!r}" if group else "")
+        + f" (services offered: {available})"
+    )
