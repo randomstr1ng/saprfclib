@@ -128,80 +128,93 @@ though resolution succeeded — pass `ashost` directly in that case.
 
 ---
 
-## Binary protocol — the frame layout is CONFIRMED
+## Binary protocol — CONFIRMED end to end
 
-Validated 2026-08-31 against A4H (kernel 793) on port 3601 by sending candidate
-frames and recording which drew a reply, which drew a specific error, and which
-were dropped.
+Captured from SAP GUI performing a group logon (`tcpdump` on port 3601), then
+**reproduced against the live server by this library**, which answered
+`errorno 0` and returned the real server list. Golden fixtures:
+`tests/golden/router/sapms_*.bin`.
 
-The attach frame is **110 bytes** of body behind the 4-byte NI length prefix.
-The header runs to `0x6c` and ends with the service number, so the header *is*
-the whole frame — nothing follows it.
+### The exchange
 
-| Offset | Size | Field | Evidence |
-|--------|------|-------|----------|
-| `0x00` | 12 | `**MESSAGE**\0` | magic |
-| `0x0c` | 1 | version = **4** | version 5 is answered with −12 *"invalid client version"*; 1–3 are dropped without a reply |
-| `0x0d` | 1 | errorno (signed) | 0 outbound; the server's return code inbound |
-| `0x0e` | 40 | toname, space-padded | |
-| `0x36` | 1 | msgtype | 0 draws no reply; 1–7 are each answered |
-| `0x43` | 1 | must be **3** | 0, 1, 2 and 4 each get the connection dropped |
-| `0x44` | 40 | fromname, space-padded | |
-| `0x6c` | 2 | service number, network order | |
+```
+C->S  110B   attach    operation 0x08
+S->C  110B   reply     errorno 0, fromname "MSG_SERVER"
+C->S  162B   request   operation 0x01, toname "MSG_SERVER"  (110 header + 52 body)
+S->C  275B   reply     server list as KEY=VALUE text
+C->S  110B   detach    operation 0x04
+```
 
-The server swaps the names in its reply: what you send as `fromname` comes back
-in `toname`.
+### Header — 110 bytes
+
+| Offset | Size | Field |
+|--------|------|-------|
+| `0x00` | 12 | `**MESSAGE**\0` |
+| `0x0c` | 1 | version = 4 |
+| `0x0d` | 1 | errorno, **signed** |
+| `0x0e` | 40 | toname, space-padded |
+| `0x36` | 1 | msgtype (0 in every captured frame) |
+| `0x42` | 1 | speaker: `0x02` client, `0x03` server |
+| `0x43` | 1 | **operation**: `0x08` attach, `0x01` request, `0x04` detach |
+| `0x44` | 40 | fromname, space-padded |
+| `0x6c` | 2 | service number, network order |
+
+### Request body — 52 bytes
+
+```
+1e 00 01 01   opcode block (byte 3 is 01 outbound, 03 on the reply)
+02 00 00 00 00 00 00 <sel>   ... then zeros to 52
+```
+
+`<sel>` at body offset 11 selects what is asked for:
+
+| Selector | Returns |
+|----------|---------|
+| `0x1d` | application servers |
+| `0x1f` | logon groups |
+
+### Reply payload is text, not a binary table
+
+```
+ASNAME=host_A4H_00|HOSTNAME=host|PORT=3200|SAPSRV=DIA UPD BTC SPO UP2 ICM |SNC=p:CN=...
+```
+
+Newline-separated records, pipe-separated `KEY=VALUE`. The group list is the same
+shape with `GROUP=` instead of `ASNAME=`.
+
+**`PORT` is the dispatcher port (`32<NN>`), not the gateway.** The captured record
+reads `PORT=3200` for a server whose gateway is 3300, so the system number comes
+from the dispatcher formula and the caller adds 3300 — or 4800 for SNC.
 
 ### Return codes
 
-`0x0d` is a **signed** byte. Reading it unsigned turns an error into a plausible
-number — `0xec` is −20, not 236.
+`0x0d` is a **signed** byte; read unsigned, `0xec` is 236 rather than −20.
 
 | Code | Meaning |
 |------|---------|
 | 0 | success |
 | −12 | invalid client version |
-| −18 | message server shutdown |
 | −20 | access denied |
-| −25 | message server soft shutdown |
 
-−20 and −12 were both reproduced live. Golden fixture:
-`tests/golden/router/sapms_attach_access_denied.bin`.
+### Corrections this capture forced
 
-### What the previous implementation sent
+Three things recorded earlier in this file were wrong, and each was wrong in a way
+that looked convincing:
 
-A 114-byte body, with `0x0e` read as a one-byte "sender type" and a 10-byte
-"opcode name" placed at `0x44` — which is where the 40-byte `fromname` belongs.
-**The message server closes the connection on that frame without replying.** The
-mistake survived because both fields are space-padded, so the bytes looked
-plausible beside a partial capture.
+- **"`0x43` must be 3."** It is the *operation* byte, and 3 is not one of its
+  values. That conclusion came from a sweep that tried 0, 1, 2 and 4 — but not 8,
+  which is what a real client sends. Every value in that sweep was tested against
+  a `msgtype` the server would not accept anyway, so the whole sweep measured
+  nothing.
+- **"−20 means the server's ACL refused us."** There is no ACL configured on the
+  test system. −20 was the server rejecting an invalid operation byte. Attributing
+  it to `ms/acl_info` was a guess that happened to sound like a diagnosis.
+- **The original `msg_type=0x02` / `direction=0x08` at `0x42`/`0x43` were right
+  all along.** They were replaced with a wrong constant taken from a legacy code
+  path. What was actually broken was the frame *length* (114 vs 110) and the name
+  field layout — and the length alone is enough for the server to close the
+  connection without a word.
 
-`MessageServerClient.resolve` was worse than wrong: it sent a 2-byte
-length-prefixed group name — a shape invented to satisfy `MockTransport`, which
-no message server can interpret. Its test passed because the stub and the test
-agreed on a protocol that does not exist.
-
-Both builders also carried their own NI length prefix while handing the result
-to a transport seam that adds one, and looked for the magic at offset 4 of a
-payload whose prefix had already been stripped. The two errors cancelled under
-`MockTransport` and could never have worked on a socket.
-
----
-
-!!! warning "What is still open: the server-list request"
-
-    The attach frame is confirmed, but **which `msgtype` asks for a server list
-    is not**. Every attach against a live server so far is refused with
-    *access denied* before the request is reached, so no request has ever been
-    answered with a list to compare against. `_build_sapms_server_list_request`
-    uses `msgtype=4` as a **placeholder, not a finding**.
-
-    Access is governed by the server's `ms/acl_info`. External binary attach is
-    restricted by default on current kernels — which is why the HTTP interface
-    remains the default path.
-
-    **To close this:** either permit an external attach on a test system, or
-    capture a real client performing a group logon (SAP GUI with a logon group,
-    or `sapcontrol`) against the message-server port, both directions.
-
+`parse_sapms_server_list`'s binary entry table was also wrong; the payload was
+never binary.
 

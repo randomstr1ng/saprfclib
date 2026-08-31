@@ -26,6 +26,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The SAPMS binary protocol works.** Captured from SAP GUI performing a group logon,
+  then reproduced against the live message server by this library, which answered
+  `errorno 0` and returned the real server list. `MessageServerClient.resolve_full`
+  now runs the actual exchange — attach (operation `0x08`), request (operation `0x01`,
+  selector `0x1d`), detach (`0x04`) — and parses the reply. Golden fixtures for all
+  five frames are in `tests/golden/router/`.
+- The reply payload is **text, not a binary entry table**: newline-separated records of
+  pipe-separated `KEY=VALUE`, as in
+  `ASNAME=…|HOSTNAME=…|PORT=3200|SAPSRV=…|SNC=…`. `parse_sapms_server_list`'s binary
+  layout was wrong about the shape of the data entirely.
+- `PORT` in that reply is the **dispatcher** port (`32<NN>`), not the gateway — the
+  captured record reads `PORT=3200` for a server whose gateway is 3300 — so the system
+  number derives from the dispatcher formula and the caller adds 3300 (or 4800 for SNC).
+
+### Corrected
+
+Three claims committed earlier today were wrong, each in a way that read as a finding:
+
+- **"The byte at `0x43` must be 3."** It is the *operation* byte and 3 is not one of
+  its values. That came from a sweep of 0, 1, 2 and 4 that never tried 8 — the value a
+  real client sends — and every candidate in it was paired with a `msgtype` the server
+  would not accept regardless, so the sweep measured nothing at all.
+- **"Return code −20 means the server's ACL refused the attach."** No ACL is configured
+  on the test system. −20 was the server rejecting an invalid operation byte.
+  Attributing it to `ms/acl_info` was a guess phrased as a diagnosis.
+- **The original `msg_type=0x02` / `direction=0x08` at `0x42`/`0x43` were correct** and
+  were replaced with a wrong constant taken from a legacy code path. The real defects
+  were the frame length (114 against the correct 110 — enough on its own for the server
+  to close the connection without replying) and the name-field layout.
+
 - Message-server and gateway ports are now sourced from SAP's *TCP/IP Ports of All SAP
   Products*, not from observation alone. The documentation corrected an incomplete
   conclusion: the `36<NN>` message-server formula applies **only** to systems installed

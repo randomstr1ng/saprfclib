@@ -340,89 +340,73 @@ class MessageServerClient:
         """
         return self.resolve_full(group=group)
 
-    def resolve_full(self, group: str, sysid: str = "") -> tuple[str, int]:
-        """Resolve a logon ``group`` to (ashost, sysnr) using the full SAPMS MESSAGE
-        exchange and parse_sapms_server_list (TRANS-03, Plan 04-03).
+    def resolve_full(self, group: str = "", sysid: str = "") -> tuple[str, int]:
+        """Resolve a logon group to (ashost, sysnr) over the binary protocol.
 
-        Exchange sequence (wire-captured 2026-06-27, TRANS-03):
-          1. Send SAPMS login frame (14-byte simple opcode frame)
-          2. Receive login ack (validated for **MESSAGE** magic)
-          3. Send SAPMS server-list request frame (opcode MSG_SERVER / 0x0500)
-          4. Receive server-list response → parse_sapms_server_list → select server
+        The exchange, captured from SAP GUI performing a group logon and then
+        reproduced against the live server by this library:
 
-        The first entry with a non-zero port is selected as the active server.
-        Round-robin / load-weighted selection across multiple active servers is
-        deferred to Phase 5 (connection pool). sysnr = (port - 3200) // 100.
+            attach   (operation 0x08)           -> reply, errorno 0
+            request  (operation 0x01, sel 0x1d) -> server list as KEY=VALUE text
+            detach   (operation 0x04)
 
-        Raises ValueError on protocol errors, malformed frames, or invalid redirect
-        targets (T-04-REDIR: host/sysnr bounds validated before return).
+        The transport seam owns the NI length prefix, so everything sent here is
+        the bare SAPMS body.
         """
-        # Step 1: send login frame. Wire-captured opcode: msg_type=0x02, direction=0x08.
-        # [ASSUMED] minimal login frame is sufficient for MockTransport tests; the real
-        # live exchange uses the full multi-frame AD-EYECATCH handshake (capture lines
-        # 40-88 in phase03_msgserver_capture_output.txt). For the Phase 4 MVP the
-        # full live path is exercised by the integration test; the unit test uses
-        # MockTransport scripted with [login_ack, server_list_response].
-        # The transport seam is NI-framed: send_message adds the 4-byte length
-        # prefix and recv_message strips it, so everything here is the bare SAPMS
-        # body. This used to send frames that already carried a prefix — the
-        # transport then added a second one — and to look for the magic at offset
-        # 4 of a payload whose prefix had already been removed. Both mistakes
-        # cancelled out under MockTransport, whose scripted frames included the
-        # prefix, and neither could have worked on a socket.
-        self._transport.send_message(  # type: ignore[attr-defined]
-            _build_sapms_login_frame(group=group, sysid=sysid)
-        )
-
-        # Step 2: receive the attach reply and report the server's own return code.
-        login_ack = bytes(self._transport.recv_message())  # type: ignore[attr-defined]
-        errorno, _toname, _fromname, _msgtype = parse_sapms_reply(login_ack)
+        self._transport.send_message(_build_sapms_login_frame())  # type: ignore[attr-defined]
+        attach_reply = bytes(self._transport.recv_message())  # type: ignore[attr-defined]
+        errorno, _to, _from, _mt = parse_sapms_reply(attach_reply)
         if errorno != 0:
             raise SapRfcError(
                 f"message server refused the attach: {describe_ms_errorno(errorno)} "
-                f"(return code {errorno}). An external attach has to be permitted by "
-                f"the server; that is governed by ms/acl_info. The HTTP interface "
-                f"needs no attach — see docs/protocol/message_server.md."
+                f"(return code {errorno})"
             )
 
-        # Step 3: send the server-list request.
-        #
-        # [ASSUMED] which msgtype asks for a server list. Every attach against a
-        # live server so far has been refused before this point, so no request has
-        # ever been answered with a list to compare against.
-        self._transport.send_message(  # type: ignore[attr-defined]
-            _build_sapms_server_list_request()
-        )
+        self._transport.send_message(_build_sapms_server_list_request())  # type: ignore[attr-defined]
+        list_reply = bytes(self._transport.recv_message())  # type: ignore[attr-defined]
+        stripped = list_reply[4:] if list_reply[4:16] == _SAPMS_MAGIC_FULL else list_reply
+        errorno = decode_ms_errorno(stripped)
+        if errorno != 0:
+            raise SapRfcError(
+                f"message server refused the server-list request: "
+                f"{describe_ms_errorno(errorno)} (return code {errorno})"
+            )
+        records = parse_ms_list_reply(list_reply)
 
-        # Step 4: receive server-list response and parse.
-        server_list_frame = self._transport.recv_message()  # type: ignore[attr-defined]
-        entries = parse_sapms_server_list(server_list_frame)
+        try:
+            self._transport.send_message(_build_sapms_detach_frame())  # type: ignore[attr-defined]
+        except OSError:
+            # Detach is a courtesy; the answer is already in hand.
+            pass
 
-        # Select the first entry with a non-zero port (active server).
-        selected: tuple[str, int] | None = None
-        for host, port in entries:
-            if port > 0:
-                selected = (host, port)
-                break
-        if selected is None:
+        if not records:
             raise ValueError(
-                f"SAPMS server-list: no active server found (all entries have port 0). "
-                f"Entries: {entries!r}"
+                f"message server returned no application server for group {group or 'PUBLIC'!r}"
             )
 
-        ashost, port = selected
-        sysnr = (port - 3200) // 100
-
-        # T-04-REDIR: validate the resolved target before returning.
+        # Records carry HOSTNAME and PORT. PORT is the DISPATCHER port (32<NN>),
+        # not the gateway: the captured reply reads PORT=3200 for an application
+        # server whose gateway is 3300. sysnr therefore comes from the dispatcher
+        # formula and the caller adds 3300 (or 4800 for SNC) for RFC.
+        chosen = records[0]
+        ashost = chosen.get("HOSTNAME", "")
+        port_text = chosen.get("PORT", "")
         if not ashost or ashost == "0.0.0.0":
             raise ValueError(
-                f"SAPMS redirect: invalid application-server address {ashost!r} — "
-                f"refusing to connect to empty or unroutable host"
+                f"message server returned an unusable application-server address "
+                f"{ashost!r} — refusing to connect to an empty or unroutable host"
             )
+        try:
+            port = int(port_text)
+        except ValueError:
+            raise ValueError(
+                f"message server returned a non-numeric PORT {port_text!r} for {ashost!r}"
+            ) from None
+        sysnr = port - 3200
         if not 0 <= sysnr <= 99:
             raise ValueError(
-                f"SAPMS redirect: sysnr {sysnr} out of range 0-99 "
-                f"(derived from port {port}: (port - 3200) // 100 = {sysnr})"
+                f"message server returned dispatcher port {port} for {ashost!r}, which "
+                f"is not 3200 + a system number (32<NN>). Connect with ashost/sysnr."
             )
         return ashost, sysnr
 
@@ -469,18 +453,41 @@ class MessageServerClient:
 # capture.
 
 _SAPMS_MAGIC_FULL = b"**MESSAGE**\x00"
-_SAPMS_FRAME_LEN = 0x6E  # 110 — confirmed: the SDK writes exactly this many
+_SAPMS_HEADER_LEN = 0x6E  # 110
 _SAPMS_VERSION = 4
-_SAPMS_FLAG_43 = 3  # confirmed mandatory; any other value drops the connection
 
 _OFF_VERSION = 0x0C
 _OFF_ERRORNO = 0x0D
 _OFF_TONAME = 0x0E
 _OFF_MSGTYPE = 0x36
-_OFF_FLAG43 = 0x43
+_OFF_FLAG = 0x42
+_OFF_OPERATION = 0x43
 _OFF_FROMNAME = 0x44
 _OFF_SERVNO = 0x6C
 _NAME_LEN = 40
+
+# 0x42 marks which side is speaking, 0x43 selects the operation. Captured from
+# SAP GUI performing a group logon (tests/golden/router/sapms_*.bin) and then
+# reproduced against the live server with this library, which answered errorno 0.
+_FLAG_CLIENT = 0x02
+_FLAG_SERVER = 0x03
+
+_OP_ATTACH = 0x08
+_OP_REQUEST = 0x01
+_OP_DETACH = 0x04
+
+# The request body is a 4-byte opcode block followed by 48 bytes of parameters.
+# Byte 3 of the block is 0x01 outbound and 0x03 on the reply.
+_MS_OPCODE = 0x1E
+_OPCODE_REQUEST = bytes((_MS_OPCODE, 0x00, 0x01, 0x01))
+_OPCODE_REPLY = bytes((_MS_OPCODE, 0x00, 0x01, 0x03))
+
+# One byte at offset 11 of the request body selects what is being asked for.
+# Both values come from the same capture: SAP GUI sends 0x1d and gets the
+# application-server record, then sends 0x1f and gets the logon-group list.
+_SEL_SERVER_LIST = 0x1D
+_SEL_GROUP_LIST = 0x1F
+_REQUEST_BODY_LEN = 52
 
 # Message-server return codes, as the server reports them in the errorno byte.
 # Confirmed live: -20 for an attach this server's ACL refuses, and -12 by sending
@@ -511,27 +518,85 @@ def describe_ms_errorno(code: int) -> str:
 
 def build_sapms_frame(
     *,
-    msgtype: int,
+    operation: int,
     toname: str = "-",
     fromname: str = "-",
+    flag: int = _FLAG_CLIENT,
+    msgtype: int = 0,
     servno: int = 0,
     version: int = _SAPMS_VERSION,
+    body: bytes = b"",
 ) -> bytes:
-    """Build a SAPMS frame with its NI length prefix (114 bytes total).
+    """Build a SAPMS frame body (no NI prefix — the transport adds that).
 
-    Defaults match what the SDK's attach path sends: ``"-"`` for a name the
-    caller has not set, and service number 0 when none applies.
+    ``operation`` is the byte at 0x43: :data:`_OP_ATTACH`, :data:`_OP_REQUEST`
+    or :data:`_OP_DETACH`.
     """
-    body = bytearray(_SAPMS_FRAME_LEN)
-    body[0 : len(_SAPMS_MAGIC_FULL)] = _SAPMS_MAGIC_FULL
-    body[_OFF_VERSION] = version
-    body[_OFF_ERRORNO] = 0
-    body[_OFF_TONAME : _OFF_TONAME + _NAME_LEN] = _ms_name(toname)
-    body[_OFF_MSGTYPE] = msgtype & 0xFF
-    body[_OFF_FLAG43] = _SAPMS_FLAG_43
-    body[_OFF_FROMNAME : _OFF_FROMNAME + _NAME_LEN] = _ms_name(fromname)
-    struct.pack_into(">H", body, _OFF_SERVNO, servno)
-    return struct.pack(">I", len(body)) + bytes(body)
+    buf = bytearray(_SAPMS_HEADER_LEN)
+    buf[0 : len(_SAPMS_MAGIC_FULL)] = _SAPMS_MAGIC_FULL
+    buf[_OFF_VERSION] = version
+    buf[_OFF_ERRORNO] = 0
+    buf[_OFF_TONAME : _OFF_TONAME + _NAME_LEN] = _ms_name(toname)
+    buf[_OFF_MSGTYPE] = msgtype & 0xFF
+    buf[_OFF_FLAG] = flag
+    buf[_OFF_OPERATION] = operation
+    buf[_OFF_FROMNAME : _OFF_FROMNAME + _NAME_LEN] = _ms_name(fromname)
+    struct.pack_into(">H", buf, _OFF_SERVNO, servno)
+    return bytes(buf) + body
+
+
+def build_ms_list_request(selector: int) -> bytes:
+    """Build the body of a list request: opcode block plus 48 parameter bytes."""
+    body = bytearray(_REQUEST_BODY_LEN)
+    body[0:4] = _OPCODE_REQUEST
+    body[4] = _FLAG_CLIENT
+    body[11] = selector
+    return build_sapms_frame(
+        operation=_OP_REQUEST,
+        toname="MSG_SERVER",
+        fromname="-",
+        body=bytes(body),
+    )
+
+
+def parse_ms_list_reply(frame: bytes) -> list[dict[str, str]]:
+    """Parse a message-server list reply into one dict per record.
+
+    The payload is plain text, not a binary entry table: newline-separated
+    records of pipe-separated ``KEY=VALUE`` pairs. A server-list reply looks
+    like::
+
+        ASNAME=host_SID_00|HOSTNAME=host|PORT=3200|SAPSRV=DIA UPD BTC ...|SNC=p:CN=...
+
+    and a group-list reply like::
+
+        GROUP=PUBLIC|HOSTNAME=host|PORT=3200|SNC=p:CN=...
+
+    Source: tests/golden/router/sapms_serverlist_reply.bin and
+    sapms_grouplist_reply.bin, both captured from a live exchange.
+    """
+    body = frame[4:] if frame[4 : 4 + 12] == _SAPMS_MAGIC_FULL else frame
+    if len(body) < _SAPMS_HEADER_LEN + 4:
+        raise ValueError(f"SAPMS list reply too short: {len(body)} bytes")
+    payload = body[_SAPMS_HEADER_LEN:]
+    if payload[:4] != _OPCODE_REPLY:
+        raise ValueError(
+            f"unexpected message-server opcode block {payload[:4].hex(' ')}, "
+            f"expected {_OPCODE_REPLY.hex(' ')}"
+        )
+    text = payload[4:].decode("latin-1").rstrip("\x00").strip()
+    records: list[dict[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields: dict[str, str] = {}
+        for pair in line.split("|"):
+            key, sep, value = pair.partition("=")
+            if sep:
+                fields[key.strip()] = value.strip()
+        if fields:
+            records.append(fields)
+    return records
 
 
 def _ms_name(name: str) -> bytes:
@@ -546,8 +611,8 @@ def parse_sapms_reply(frame: bytes) -> tuple[int, str, str, int]:
     ``toname``. Confirmed against the live reply in the golden fixture.
     """
     body = frame[4:] if len(frame) > 4 and frame[4 : 4 + 12] == _SAPMS_MAGIC_FULL else frame
-    if len(body) < _SAPMS_FRAME_LEN:
-        raise ValueError(f"SAPMS reply is {len(body)} bytes, expected at least {_SAPMS_FRAME_LEN}")
+    if len(body) < _SAPMS_HEADER_LEN:
+        raise ValueError(f"SAPMS reply is {len(body)} bytes, expected at least {_SAPMS_HEADER_LEN}")
     if body[: len(_SAPMS_MAGIC_FULL)] != _SAPMS_MAGIC_FULL:
         raise ValueError(f"not a SAPMS frame: magic is {body[:12]!r}")
     return (
@@ -559,33 +624,27 @@ def parse_sapms_reply(frame: bytes) -> tuple[int, str, str, int]:
 
 
 def _build_sapms_login_frame(group: str = "", sysid: str = "") -> bytes:
-    """Build a SAPMS attach frame (110-byte body + 4-byte NI prefix).
+    """Build the SAPMS attach frame body.
 
-    ``msgtype=1`` is used: 0 draws no reply at all, while 1 through 7 are each
-    answered. Which of them the server treats as a logon-group query is not yet
-    established — this server refuses the attach with "access denied" before
-    getting that far, so the distinction has not been observable here.
+    Operation 0x08 with flag 0x02, exactly as captured from SAP GUI. The server
+    replies with the same frame carrying errorno 0 and fromname "MSG_SERVER".
     """
-    return build_sapms_frame(
-        msgtype=1,
-        toname="-",
-        fromname=sysid or "-",
-    )[4:]  # body only: the transport adds the NI length prefix
+    return build_sapms_frame(operation=_OP_ATTACH, toname="-", fromname="-")
 
 
 def _build_sapms_server_list_request() -> bytes:
-    """Build a SAPMS server-list request frame.
+    """Build the server-list request body (selector 0x1d)."""
+    return build_ms_list_request(_SEL_SERVER_LIST)
 
-    The frame is structurally valid — same 110-byte layout as the attach, which a
-    live message server parses and answers. What is NOT established is which
-    ``msgtype`` asks for a server list: this server refuses the attach that
-    precedes it with "access denied", so no request has ever been answered with
-    a list to compare against.
 
-    ``msgtype=4`` is a placeholder, not a finding. Do not read it as one.
-    """
-    # body only: the transport adds the NI length prefix
-    return build_sapms_frame(msgtype=4, toname="-", fromname="-")[4:]
+def _build_sapms_group_list_request() -> bytes:
+    """Build the logon-group list request body (selector 0x1f)."""
+    return build_ms_list_request(_SEL_GROUP_LIST)
+
+
+def _build_sapms_detach_frame() -> bytes:
+    """Build the detach frame body (operation 0x04)."""
+    return build_sapms_frame(operation=_OP_DETACH, toname="-", fromname="-")
 
 
 # --------------------------------------------------------------------------- #
