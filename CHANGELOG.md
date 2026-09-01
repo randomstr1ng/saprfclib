@@ -73,6 +73,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A program ID longer than 8 characters registered under a truncated name.** The NI
+  init frame's program-ID field is 16 bytes, but the value was cut to 8 before padding —
+  `SAPRFC_TEST` went out as `SAPRFC_T`. A gateway that cannot match the registered name
+  to its SM59 destination simply never sends the server a call, and nothing anywhere
+  reports a problem. Invisible in the capture it was written from, which used the
+  seven-character ID `python3`: slicing at 8 changed nothing there, so a byte-exact
+  golden test passed throughout.
+- **A system number above 99 built a malformed connect frame.** `sapdp<NN>` is an
+  eight-byte field, so `sysnr=100` produced `sapdp100` with no trailing space and grew
+  the frame by a byte; it also computed gateway port 3400, which is not a gateway. The
+  value is now validated where it is used and at `connect()`, before a socket is opened.
+
+### Added
+
+- `tests/test_fixed_width_fields.py`, covering the whole defect class rather than the
+  individual instances. Four bugs of this exact shape were found in one session, from
+  two mechanisms: assigning to a fixed `bytearray` slice, where a wrong length silently
+  **resizes** the buffer instead of raising; and `.ljust(n)`, which sets a **minimum**
+  width, not a fixed one. Both are invisible whenever the captured value happened to be
+  the right length — which is why each survived a byte-exact golden test. The tests pin
+  the language behaviour itself alongside the specific fields, and an AST scan of every
+  fixed-width slice assignment in `src/` now backs the review.
+
 - **A malformed `local_ip` changed the length of the first frame of every connection.**
   The NI version request carries the client address in a fixed 4-byte field. The
   existing guard could not fire for a value with the wrong number of octets —

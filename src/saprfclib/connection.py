@@ -1920,6 +1920,32 @@ class _LoopThread:
                 pass
 
 
+def _validate_sysnr(sysnr: str | int) -> int:
+    """Return the system number as an int, or explain why it is not one.
+
+    A system number is two digits: SAP's port table derives sapdp<NN>, sapgw<NN>
+    and the rest from it, all with two-digit fields. Anything outside 0-99 breaks
+    in two places at once — the gateway port becomes something that is not a
+    gateway, and the eight-byte service field in the GW connect frame overflows,
+    resizing the frame. Neither reports itself: the frame simply stops being
+    parseable by the peer.
+    """
+    try:
+        value = int(sysnr)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"system number {sysnr!r} is not a number; it is the two-digit instance "
+            f"number, e.g. 0 or '00'"
+        ) from None
+    if not 0 <= value <= 99:
+        raise ValueError(
+            f"system number {value} is outside 0-99. SAP derives sapdp<NN>/sapgw<NN> "
+            f"from it with two-digit fields, so a larger value produces both a "
+            f"non-gateway port and a malformed connect frame."
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class CallStats:
     """What one RFC call cost, measured by this client.
@@ -2358,7 +2384,9 @@ class Connection:
         payload[40:48] = b"        "  # no handle in outbound request
         payload[48:56] = b"NWRFC   "  # remote LU name = RFC gateway partner
         payload[56:64] = ashost[:8].ljust(8).encode("ascii")  # IP prefix
-        payload[64:72] = f"sapdp{sysnr:02d} ".encode("ascii")  # service (8B)
+        # Two-digit field: "sapdp" + NN + one space is exactly 8 bytes. A value
+        # above 99 used to make it 9 and grow the whole frame by a byte.
+        payload[64:72] = f"sapdp{_validate_sysnr(sysnr):02d} ".encode("ascii")
         payload[72:80] = (
             b"\x49\x01\x00\x00\x00\x00\xff\xff"  # [73]=1, [76:78]=0, [78:80]=0xffff (confirmed)
         )
@@ -4115,7 +4143,8 @@ def connect(
     # <NN> is the application server's own instance number here, unlike the
     # message server. Also confirmed live: the A4H message server reports
     # RFC=3300 and RFCS=4800 for a sysnr-00 application server.
-    port = (4800 if snc_lib is not None else 3300) + int(sysnr)
+    sysnr = _validate_sysnr(sysnr)
+    port = (4800 if snc_lib is not None else 3300) + sysnr
 
     # ------------------------------------------------------------------ #
     # Transport routing (Phase 7): wRFC first, then SNC, then plain TCP.  #

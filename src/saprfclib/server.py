@@ -1535,7 +1535,16 @@ class RfcServer:
             _pid9 = prog_id_enc[:9]
             proc_name_10 = _pid9 + b"\x00" + b"\x20" * (9 - len(_pid9))
             local_host_8 = local_host[:8].encode("ascii", "replace").ljust(8, b"\x20")
-            prog_id_16 = prog_id_enc[:8].ljust(16, b"\x20")
+            # 16-byte field, so truncate at 16 — not 8.
+            #
+            # This read prog_id_enc[:8] and was invisible for the capture it was
+            # written from: that used the program ID "python3", seven characters,
+            # so slicing at 8 changed nothing and ljust(16) produced the right
+            # bytes. Any longer ID was silently cut in half — "SAPRFC_TEST"
+            # registered as "SAPRFC_T" — and the gateway then never matches the
+            # SM59 destination, so the server waits for calls that never arrive
+            # with nothing anywhere reporting a problem.
+            prog_id_16 = prog_id_enc[:16].ljust(16, b"\x20")
             ni_init = (
                 b"\x02\x0b"
                 + local_ip_bytes
