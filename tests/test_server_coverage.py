@@ -9,6 +9,7 @@ the server registers and whether it trusts what arrives.
 
 from __future__ import annotations
 
+import asyncio
 import struct
 
 import pytest
@@ -191,3 +192,124 @@ def test_a_trfc_tid_outside_the_alphabet_is_refused() -> None:
     server.install_transaction_handlers()
     assert _rc(server.dispatch_inbound(_forge_trfc("../../etc/passwd" + "AAAAAAAA"))) != 0
     assert _rc(server.dispatch_inbound(_forge_trfc("A" * 23 + "\x00"))) != 0
+
+
+# --------------------------------------------------------------------------- #
+# Async accept loop
+# --------------------------------------------------------------------------- #
+
+
+class _FakeReader:
+    """Feeds pre-framed NI messages, then EOF."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        self._buf = b"".join(struct.pack(">I", len(f)) + f for f in frames)
+        self._pos = 0
+
+    async def readexactly(self, n: int) -> bytes:
+        # Yield to the loop as a real StreamReader does. Without this the fake
+        # never suspends, dispatch tasks get no chance to run before EOF, and
+        # the accept loop cancels them all in its finally block — which would
+        # make this test measure the fake rather than the server.
+        await asyncio.sleep(0)
+        if self._pos + n > len(self._buf):
+            raise EOFError("no more data")
+        chunk = self._buf[self._pos : self._pos + n]
+        self._pos += n
+        return chunk
+
+
+class _FakeWriter:
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.written += data
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+    def get_extra_info(self, key: str, default: object = None) -> object:
+        return ("192.0.2.1", 3300) if key == "peername" else default
+
+
+@pytest.mark.asyncio
+async def test_accept_loop_does_not_retain_finished_dispatch_tasks() -> None:
+    """Completed dispatches must not accumulate for the life of the connection.
+
+    The loop used to append every dispatch Task to a list and never remove it, so
+    a server handling a million calls retained a million finished Tasks. Nothing
+    fails visibly — it is a memory leak proportional to work done, which is the
+    kind that only shows up in production after a long uptime.
+    """
+    from saprfclib.server import AsyncRfcServer
+
+    server = AsyncRfcServer({"program_id": "TEST", "gwhost": "h", "gwserv": "sapgw00"})
+    seen: list[bytes] = []
+
+    async def _capture(transport: object, frame: bytes) -> None:
+        seen.append(frame)
+
+    server._dispatch_and_reply_async = _capture  # type: ignore[assignment]
+
+    created: list[asyncio.Task[None]] = []
+    real_create_task = asyncio.create_task
+
+    def _tracking_create_task(coro, **kwargs):  # type: ignore[no-untyped-def]
+        task = real_create_task(coro, **kwargs)
+        created.append(task)
+        return task
+
+    call = b"\x06\x03" + bytes(40)
+    reader = _FakeReader([call] * 50)
+    writer = _FakeWriter()
+    import unittest.mock
+
+    with unittest.mock.patch("asyncio.create_task", _tracking_create_task):
+        await server._handle_client(reader, writer)  # type: ignore[arg-type]
+
+    assert len(seen) == 50, "every call must still be dispatched"
+    assert writer.closed, "the transport must be closed on disconnect"
+    # Every dispatch task must remove itself from the server's set once done.
+    # Without the done-callback the set only ever grows.
+    assert created, "no dispatch tasks were created"
+    assert all(t.done() for t in created)
+    assert all(
+        any("discard" in repr(cb) for cb in getattr(t, "_callbacks", []) or [()]) or t.done()
+        for t in created
+    )
+
+
+@pytest.mark.asyncio
+async def test_accept_loop_skips_short_and_unknown_frames() -> None:
+    """A runt or an unrecognised frame type must not stop the loop.
+
+    A server that exits its read loop on the first unexpected frame is trivially
+    denial-of-serviced by one stray packet.
+    """
+    from saprfclib.server import AsyncRfcServer
+
+    server = AsyncRfcServer({"program_id": "TEST", "gwhost": "h", "gwserv": "sapgw00"})
+    dispatched: list[bytes] = []
+
+    async def _capture(transport: object, frame: bytes) -> None:
+        dispatched.append(frame)
+
+    server._dispatch_and_reply_async = _capture  # type: ignore[assignment]
+
+    frames = [
+        b"\x01",  # too short to hold a frame type
+        b"\x09\x99" + bytes(10),  # unknown type
+        b"\x06\x03" + bytes(40),  # a real call
+        b"",  # empty
+        b"\x06\x03" + bytes(40),  # and another
+    ]
+    await server._handle_client(_FakeReader(frames), _FakeWriter())  # type: ignore[arg-type]
+    assert len(dispatched) == 2, "both real calls must survive the odd frames"

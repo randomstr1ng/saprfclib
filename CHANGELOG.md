@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the pool's error and shutdown paths, which were entirely uncovered and are
+  where a fault stays silent: a failed `open()` must return its reserved slot (otherwise
+  the pool shrinks permanently and eventually deadlocks at `max_size`, reporting only a
+  timeout long after the cause) and must wake any waiter; a connection released into a
+  closed pool must be closed rather than returned to a dead idle set. `pool.py` 73% → 86%.
+- Tests for the async server's accept loop: short and unknown frames must not stop it (a
+  loop that exits on the first unexpected frame is trivially denial-of-serviced by one
+  stray packet), and finished dispatch tasks must not accumulate.
+
 - Tests for the server paths that had none: gateway service/port resolution, the
   dispatcher-name derivation, bounds safety in the inbound `0x5001` scanner, and the
   TID validation guards on inbound transactional frames. `server.py` coverage rose from
@@ -53,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
 ### Fixed
+
+- **The async RFC server leaked one `asyncio.Task` per call served.** `_handle_client`
+  appended every dispatch task to a list and never removed it, so a connection handling
+  a million calls retained a million finished tasks. Nothing failed visibly — it is a
+  leak proportional to work done, the kind that only appears after long uptime. Now a
+  set with a done-callback, which also keeps the strong reference asyncio requires:
+  the loop holds only a weak reference to a running task, so without one a dispatch can
+  be garbage-collected mid-flight.
 
 - **The gateway service name could resolve to the wrong port, silently.** `_gwserv_port`
   answered `sapgwfoo`, a bare `sapgw`, and anything else it could not parse with **3300**,

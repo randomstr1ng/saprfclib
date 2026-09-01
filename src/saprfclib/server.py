@@ -1815,7 +1815,15 @@ class AsyncRfcServer(RfcServer):
         peer = writer.get_extra_info("peername", default=("?", 0))
         _logger.debug("[saprfclib-async-server] client connected from %s:%s", *peer)
 
-        tasks: list[asyncio.Task[None]] = []
+        # A set with a done-callback, not a list that only grows.
+        #
+        # Two reasons. Appending to a list and never removing leaks one Task per
+        # call for the lifetime of the connection -- a server handling a million
+        # calls retains a million finished Tasks. And asyncio only holds a weak
+        # reference to a running task, so something must keep a strong one or the
+        # task can be garbage-collected mid-flight; discarding on completion does
+        # both jobs at once.
+        tasks: set[asyncio.Task[None]] = set()
         try:
             while True:
                 try:
@@ -1842,14 +1850,16 @@ class AsyncRfcServer(RfcServer):
                         self._dispatch_and_reply_async(transport, frame),
                         name=f"saprfclib-dispatch-{ft:#06x}",
                     )
-                    tasks.append(task)
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
                 else:
                     _logger.debug("[saprfclib-async-server] unhandled frame 0x%04x, skip", ft)
         except asyncio.CancelledError:
             raise
         finally:
-            # Cancel any outstanding dispatch tasks on disconnect.
-            for t in tasks:
+            # Cancel any dispatch still in flight when the client goes away.
+            # Iterate a copy: the done-callback mutates the set as tasks finish.
+            for t in list(tasks):
                 if not t.done():
                     t.cancel()
             # Close the async transport (best-effort; swallow OSError).
