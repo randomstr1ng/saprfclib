@@ -221,6 +221,9 @@ class ServerSession:
         self._state = ServerSessionState.IN_CALL
         return payload
 
+    # The host field in the 0x060f frame runs [80:208]; 128 bytes.
+    _POST_REG_A_HOST_MAX = 208 - 80
+
     def build_post_reg_a(self, gw_ip: str) -> bytes:
         """Build the 0x060f post-registration handshake frame (GW payload, not NI-framed).
 
@@ -241,8 +244,27 @@ class ServerSession:
           [80:80+ip_len] = full GW IP string; [80+ip_len:208] spaces; [208:224] zeros
         """
         handle = self._handle or b"        "
-        ip_enc = gw_ip.encode("ascii")
+        try:
+            ip_enc = gw_ip.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                f"gateway host {gw_ip!r} is not ASCII; the 0x060f frame field is a "
+                f"fixed-width ASCII region"
+            ) from exc
         ip_len = len(ip_enc)
+        # The host occupies [80:208]; anything longer does not fit.
+        #
+        # Without this check the two writes below fail in different ways and
+        # neither says so. Between 129 and 144 characters the padding slice
+        # becomes empty and the host silently overruns the [208:224] zero region,
+        # leaving a 224-byte frame with the wrong content. Past that, assigning to
+        # a bytearray slice GROWS it rather than raising, so a 200-character host
+        # produced a 280-byte frame -- a length the gateway cannot parse at all.
+        if ip_len > self._POST_REG_A_HOST_MAX:
+            raise ValueError(
+                f"gateway host {gw_ip!r} is {ip_len} bytes; the 0x060f frame reserves "
+                f"{self._POST_REG_A_HOST_MAX} for it"
+            )
         ip_first8 = (ip_enc[:8]).ljust(8, b" ")
 
         payload = bytearray(224)

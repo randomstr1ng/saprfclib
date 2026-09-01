@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the server-session state machine, which was the lowest-covered module at
+  60%: the post-registration frame builders, the NI framing guards on inbound gateway
+  data (a frame whose declared length disagrees with what arrived must be rejected, not
+  handed to the TLV walkers as if complete), and the registration-ACK handle extraction.
+  `server_session.py` 60% → 90%.
+
 - Tests for the pool's error and shutdown paths, which were entirely uncovered and are
   where a fault stays silent: a failed `open()` must return its reserved slot (otherwise
   the pool shrinks permanently and eventually deadlocks at `max_size`, reporting only a
@@ -62,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
 ### Fixed
+
+- **An over-long gateway host corrupted the post-registration frame, silently.**
+  `ServerSession.build_post_reg_a` writes a caller-supplied host into a fixed 224-byte
+  frame with no bound. Between 129 and 144 characters the padding slice went empty and
+  the host overran the trailing zero region, leaving a 224-byte frame with wrong
+  content; past that, assigning to a `bytearray` slice **grows** it rather than raising,
+  so a 200-character host produced a 280-byte frame — a length the gateway cannot parse.
+  The field is now bounded at its actual width (128 bytes) and a non-ASCII host is
+  refused with a message that says why, rather than a bare `UnicodeEncodeError`.
 
 - **The async RFC server leaked one `asyncio.Task` per call served.** `_handle_client`
   appended every dispatch task to a list and never removed it, so a connection handling
