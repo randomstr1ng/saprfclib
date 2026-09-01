@@ -144,6 +144,7 @@ class Session:
 
     def __init__(self) -> None:
         self._state = SessionState.DISCONNECTED
+        self._broken_reason: str = ""
         self._attributes: ConnectionAttributes | None = None
         self._codepage: str | None = None
         self._handle: bytes | None = None  # 8-byte ASCII GW connection handle
@@ -357,6 +358,13 @@ class Session:
         The single-in-flight guard the Connection facade (plan 03-03) uses to
         reject a call/feed in the wrong state (TRANS-04, threat T-03-STATE).
         """
+        if self._state is SessionState.BROKEN and SessionState.BROKEN not in allowed:
+            raise ValueError(
+                f"connection is unusable: {self._broken_reason}. A request was sent "
+                f"whose reply could not be read to its end, so the position in the "
+                f"byte stream is unknown and any further call on this connection "
+                f"would read the previous reply's leftovers. Open a new connection."
+            )
         if self._state not in allowed:
             raise ValueError(
                 f"operation not allowed in state {self._state.value!r}; "
@@ -372,6 +380,28 @@ class Session:
         """Flip IN_CALL → READY when a call completes (TRANS-04)."""
         self._require_state(SessionState.IN_CALL)
         self._state = SessionState.READY
+
+    def mark_broken(self, reason: str) -> None:
+        """Retire the session permanently: the byte stream is no longer trustworthy.
+
+        This is for the case where a request went out and the reply could not be
+        consumed to its end -- a malformed frame, a short read, a response that
+        spans more frames than were read. What makes that dangerous is not the
+        failed call, which raised and is therefore visible. It is the *next* call:
+        the unread remainder is still queued on the socket, so the following
+        request reads the previous reply's leftovers and gets an answer belonging
+        to different arguments. That failure is silent and attributes one call's
+        data to another's parameters.
+
+        There is no resynchronisation to attempt. Nothing in the frame format
+        marks a record boundary that a reader could scan forward to, so once the
+        position in the stream is unknown it stays unknown. The connection is
+        finished; the caller has to open a new one.
+
+        BROKEN is terminal on purpose -- there is no path back to READY.
+        """
+        self._state = SessionState.BROKEN
+        self._broken_reason = reason
 
     def begin_ws_session(self) -> None:
         """Advance to WS_PENDING after the WebSocket HTTP upgrade completes.

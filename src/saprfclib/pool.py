@@ -46,10 +46,26 @@ from typing import Any
 import saprfclib.connection as _connection
 from saprfclib.exceptions import PoolTimeoutError
 from saprfclib.metadata import MetadataCache
+from saprfclib.session import SessionState
 
 _logger = logging.getLogger(__name__)
 
 __all__ = ["ConnectionPool", "AsyncConnectionPool"]
+
+
+def _is_retired(conn: Any) -> bool:
+    """True if the connection has already retired itself as unusable.
+
+    A connection whose reply could not be read to its end marks its session
+    BROKEN, and every operation on it then refuses. The health check would find
+    that out anyway -- ping() raises and _ping_ok treats any exception as dead --
+    but only after building and sending a frame onto a stream already known to be
+    unreadable. Asking first makes the discard deliberate rather than incidental,
+    and keeps a real protocol fault out of the "failed its health check" log line,
+    where it would read as a network blip.
+    """
+    session = getattr(conn, "_session", None)
+    return bool(session is not None and session.state is SessionState.BROKEN)
 
 
 class ConnectionPool:
@@ -117,6 +133,9 @@ class ConnectionPool:
         Called OUTSIDE the Condition lock (Pitfall 2). Treats both a falsy ping
         result and any raised exception as a dead connection.
         """
+        if _is_retired(conn):
+            _logger.debug("pool: discarding a connection whose session is BROKEN")
+            return False
         try:
             return bool(conn.ping())
         except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it"
@@ -369,6 +388,9 @@ class AsyncConnectionPool:
         dead.  ``asyncio.CancelledError`` is ``BaseException`` and propagates
         without being caught (Pitfall 7 — never swallow cancellation).
         """
+        if _is_retired(conn):
+            _logger.debug("pool: discarding a connection whose session is BROKEN")
+            return False
         try:
             return bool(await conn.ping())
         except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it"

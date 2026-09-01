@@ -953,6 +953,72 @@ parsed out of the response TLV, and the tags carrying it on a system failure hav
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
 
+### Large responses are truncated — the continuation rule is unknown
+
+**Status: open gap. Reproducible, diagnosed, not fixed, and deliberately not guessed.**
+
+On A4H (kernel 793), `RFC_READ_TABLE` on `DD03L` fails once the result grows past
+roughly one frame:
+
+```
+ROWCOUNT=200      ok
+ROWCOUNT=2000     malformed TLV: tag 0x0305 length 250
+                  exceeds remaining payload (197 bytes)
+ROWCOUNT=20000    malformed TLV: tag 0x5f5a length 43660
+                  exceeds remaining payload (25509 bytes)
+```
+
+The first of those is the informative one. `0x0305` is a valid record —
+SAPCOMPRESS table content — and 250 bytes is the size those chunks actually use
+(`BAPI_USER_GET_DETAIL` joins eight 250-byte `0x0305` records into 2000 bytes).
+So the walker was still **in sync** when the buffer ended. This is a short
+response, not a scrambled one. The second case is what the first turns into
+further along: `0x5f5a` is `"_Z"`, ordinary row text being read as a tag.
+
+`Connection.call` issues exactly one `recv_message()` per invoke. Two things
+could produce the above and they need different fixes:
+
+1. the server answers in more than one NI frame and we read the first;
+2. the response is one frame and our TLV walker mis-measures it.
+
+These are distinguished by asking the socket for another frame — if one arrives
+it is (1), if the socket is empty it is (2). `large_response_probe.py` does that
+and saves every frame.
+
+**What must not happen in the meantime** is a guessed continuation rule. If it is
+(1), the question of how the server marks "more follows" is unanswered: no field
+in the 76-byte GW header is confirmed to carry it, several header bytes in the
+10–75 range are still `[UNKNOWN]`, and whether the bodies simply concatenate or
+each continuation frame repeats framing of its own is exactly the kind of detail
+that a plausible guess gets right for small cases and wrong for large ones. A
+reassembly loop built on a guess would turn a loud parse error into silently
+mis-joined table rows.
+
+Until a capture settles it, the failure raises. What has changed is the blast
+radius — see below.
+
+#### The consequence that was worse than the failure
+
+The truncated read is loud. What followed it was not.
+
+The unread remainder stayed queued on the socket while the session went back to
+`READY`. The next call on that connection would send its own request, read the
+*previous* reply's leftovers, and return a result belonging to different
+arguments — with nothing in the data to indicate the swap.
+
+`Session.mark_broken` closes that off. Any failure between "request sent" and
+"reply parsed" retires the session permanently: `BROKEN` is terminal, every later
+operation refuses and names the original fault, and the pool discards such a
+connection instead of lending it on. ABAP-level failures are excluded on purpose
+— an application error or system failure means the frame parsed correctly and the
+stream is intact, and retiring on those would have a pooled application
+reconnecting on every short dump.
+
+There is no resynchronisation to attempt, which is why the state is terminal
+rather than recoverable: nothing in the frame format marks a record boundary that
+a reader could scan forward to, so once the position in the stream is unknown it
+stays unknown.
+
 ### Tag 0x0667 — the bytes are confirmed, the meaning is not
 
 The field is 8 bytes and decodes cleanly as a little-endian IEEE-754 double.
@@ -980,10 +1046,43 @@ deliberately measure latency with a local clock instead. Timing a call by a fiel
 whose unit might be off by a thousand is worse than not timing it: the number
 looks authoritative and is quietly wrong by three orders of magnitude.
 
-**To settle it:** make calls whose server-side cost differs by orders of
-magnitude and watch the value. If it tracks the work it is a duration, and the
-ratio against wall-clock gives the unit; if it stays put while the work grows, it
-is a setting and the field needs renaming.
+#### What a live probe settled, and what it did not
+
+Probed on A4H, kernel 793, with calls of deliberately different cost:
+
+| call | wall | 0x0667 |
+|------|------|--------|
+| `RFC_PING` | 32.61 ms | 124.0 |
+| `RFC_READ_TABLE T000`, 10 rows | 324.19 ms | 21758.0 |
+| `RFC_READ_TABLE DD03L`, 200 rows | 101.65 ms | 55132.0 |
+
+**Settled: it is not a fixed setting.** The value moved by a factor of 400 across
+three calls on one connection. A timeout does not do that, so the "timeout in
+seconds" reading in `stfc_connection_response.json` is dead. The field is
+per-call and it grows with the work.
+
+**Not settled: whether it counts time or bytes.** Every call above varied the
+same single knob — rows read — and that moves the server's processing time and
+the size of the response *together*. A byte counter fits all three numbers as
+well as a clock does; 55132 is an entirely ordinary size for 200 DD03L rows. The
+first version of this note recorded the probe's own verdict, "it tracks the work,
+so it is a duration", which does not follow and is exactly the inference this
+document exists to prevent.
+
+**One thing the numbers do rule out, conditionally.** *If* it is a duration, it
+cannot be milliseconds: the 200-row read returned 55132, and 55132 ms is 55
+seconds of server time inside a call whose entire wall-clock was 101.65 ms.
+Server time cannot exceed the wall clock of the call containing it. Under the
+duration hypothesis the unit is therefore microseconds — 55.1 ms of server work
+inside 101.65 ms of wall, which is sensible. This says nothing about the
+byte-counter hypothesis, where the unit question does not arise.
+
+**To settle what remains:** vary time and size *independently*. `RFC_PING_AND_WAIT`
+does it in one call — it sleeps for `SECONDS` and returns an `RFC_PING`-sized
+reply, so the clock moves while the response does not. A 3-second sleep reads
+directly as the unit with no ratio estimate: ~3,000,000 means microseconds,
+~3,000 means milliseconds, and a value that stays near 124 means the field counts
+bytes and needs renaming, not re-scaling. `large_response_probe.py` runs this.
 
 ### Exception TLV semantics — the tag set varies by release
 

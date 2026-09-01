@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A connection whose reply could not be read to its end is now retired instead of
+  returned to the pool. Previously the session went back to `READY` with the unread
+  remainder still queued on the socket, so the *next* call read the previous reply's
+  leftovers and returned a result belonging to different arguments — a silent
+  mismatch set up by a failure that had already been reported. `BROKEN` is terminal
+  (there is no record boundary to resynchronise to), every later operation refuses
+  and names the original fault, and the pool discards such a connection without
+  probing a stream it already knows is unreadable. ABAP application errors and
+  system failures are excluded: those frames parsed correctly, so the connection
+  stays usable rather than forcing a reconnect on every short dump.
+
+### Known issues
+
+- Responses larger than roughly one NI frame fail to parse (`RFC_READ_TABLE` on
+  `DD03L` past ~2000 rows). The parser is still in sync when the data ends, so the
+  response is short rather than corrupt; `Connection.call` reads one frame per
+  invoke. Whether the server continues in a further frame, and how it marks that, is
+  not established — a guessed continuation rule would replace a loud parse error
+  with silently mis-joined rows, so the failure is left raising until a capture
+  settles it. `large_response_probe.py` collects that capture. See
+  `docs/protocol/framing.md`.
+
 ### Added
 
 - Tests for the codec's refusal branches — the module where a defect corrupts *data*

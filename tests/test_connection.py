@@ -18,6 +18,7 @@ from saprfclib.connection import (
     _ab_scramble,
     _scramble_password,
 )
+from saprfclib.exceptions import AbapSystemFailure
 from saprfclib.session import ConnectionAttributes, SessionState
 from tests._mocks import MockTransport
 from tests.conftest import GOLDEN_ROOT, load_fixture
@@ -227,6 +228,26 @@ def test_logon_request_emits_0x0117_and_hides_plaintext() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _system_failure_response() -> bytes:
+    """An invoke response that parses cleanly and reports rc != 0.
+
+    The point is that this frame is *well-formed*: the TLV walk reaches the
+    terminator and every record is inside the buffer. What it carries is an ABAP
+    runtime failure, which is an outcome, not a framing error -- so a connection
+    must survive it.
+    """
+    import struct as _struct
+
+    from saprfclib.invoke import tlv_record as _tr
+
+    return (
+        _tr(0x0500, b"")
+        + _tr(0x0420, _struct.pack(">I", 3))  # rc=3, no exception key
+        + _struct.pack(">HH", 0xFFFF, 0)
+        + b"\xff\xff"
+    )
+
+
 def _invoke_response_for_stfc(echo: str = "hi", resp: str = "SAP test") -> bytes:
     """Build a synthetic STFC_CONNECTION invoke response TLV stream."""
     import struct as _struct
@@ -419,8 +440,25 @@ def test_call_state_guard_not_ready_raises() -> None:
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
 
 
-def test_call_restores_ready_after_exception() -> None:
-    """Session returns to READY after an exception in call() (finally guard, Task 3 Test 5)."""
+def test_call_retires_connection_when_the_reply_was_not_read() -> None:
+    """A call that dies mid-reply leaves the connection BROKEN, not READY.
+
+    This assertion used to be the opposite: it required READY again after the
+    exception, on the reasoning that the failed call had raised and so the
+    connection was free for the next one. That is wrong, and the direction it is
+    wrong in is the dangerous one.
+
+    The request is already on the wire when the read fails. Whatever the server
+    sent is still queued on the socket, unread and of unknown length. Returning
+    to READY invites the next call to send its own request and then read the
+    *previous* reply's remainder -- so it gets a result belonging to different
+    arguments, with nothing anywhere to say the two were swapped. The first
+    failure is loud; the corruption it sets up is silent.
+
+    There is nothing to resynchronise to, either: no record boundary in the frame
+    format that a reader could scan forward to find. Once the position in the
+    stream is lost it stays lost, so the only safe state is terminal.
+    """
     from saprfclib.exceptions import CommunicationError
     from saprfclib.session import SessionState
 
@@ -428,8 +466,31 @@ def test_call_restores_ready_after_exception() -> None:
     conn, _ = _ready_connection_with_invoke([])
     with pytest.raises(CommunicationError):
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
-    # Must be READY again after the exception
+    assert conn._session.state is SessionState.BROKEN
+
+    # And the next call is refused, naming the original cause rather than
+    # reporting some downstream confusion about the bytes it read.
+    with pytest.raises(ValueError, match="unusable"):
+        conn.call("STFC_CONNECTION", REQUTEXT="hi")
+
+
+def test_abap_failure_leaves_the_connection_usable() -> None:
+    """An ABAP-level failure parsed cleanly, so the connection must survive it.
+
+    The counterpart to the test above, and the reason _fail_closed cannot simply
+    retire on every exception. A system failure means the response frame was read
+    to its end and understood; the server is reporting a runtime outcome, not a
+    framing problem. The stream is intact, so retiring the connection here would
+    throw away a perfectly good one on every ABAP short dump -- and in a pooled
+    application that is a reconnect storm triggered by ordinary business errors.
+    """
+    from saprfclib.session import SessionState
+
+    conn, _ = _ready_connection_with_invoke([_system_failure_response()])
+    with pytest.raises(AbapSystemFailure):
+        conn.call("STFC_CONNECTION", REQUTEXT="hi")
     assert conn._session.state is SessionState.READY
+    assert conn._session.state is not SessionState.BROKEN
 
 
 def test_get_connection_attributes_returns_attributes() -> None:

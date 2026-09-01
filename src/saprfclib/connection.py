@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import logging
 import os
@@ -42,11 +43,13 @@ import struct
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from saprfclib.compress import DecompressError, sap_lz4_frame_decompress
 from saprfclib.exceptions import (
+    AbapApplicationError,
     AbapSystemFailure,
     CommunicationError,
     RetryExhausted,
@@ -2050,6 +2053,40 @@ class ConnectionMetrics:
         )
 
 
+@contextlib.contextmanager
+def _fail_closed(session: Session, func_name: str) -> Iterator[None]:
+    """Retire the session if a reply could not be read to its end.
+
+    Wraps the send-and-read-reply half of a call, not the whole of it. Inside this
+    block the request is already on the wire, so any failure other than a clean
+    parse leaves the socket holding an unknown number of unread bytes.
+
+    The failed call is not the problem -- it raises, so the caller sees it. The
+    next call on the same connection is: it would read whatever remains of the
+    previous reply and hand back an answer belonging to different arguments, with
+    nothing to indicate the swap. Marking the session BROKEN turns that silent
+    mismatch into a refusal that names the original cause.
+
+    ABAP-level failures are deliberately let through untouched. An application
+    error or a system failure means the response frame parsed correctly and the
+    server is reporting a business or runtime outcome; the stream is intact and
+    the connection stays usable. Retiring on those would mean a pooled application
+    reconnecting on every ABAP short dump.
+    """
+    try:
+        yield
+    except (AbapApplicationError, AbapSystemFailure):
+        raise
+    except (OSError, EOFError) as exc:
+        # asyncio.IncompleteReadError subclasses EOFError and TimeoutError
+        # subclasses OSError, so the async paths are covered by these two.
+        session.mark_broken(f"{func_name}: {exc}")
+        raise CommunicationError(str(exc), original_exception=exc) from exc
+    except Exception as exc:
+        session.mark_broken(f"{func_name}: {type(exc).__name__}: {exc}")
+        raise
+
+
 class Connection:
     """Sync RFC Connection facade binding a Transport to a Session (TRANS-04/05/06).
 
@@ -3084,10 +3121,15 @@ class Connection:
                 else:
                     handle = self._session.handle or b"        "
                     self._send_invoke_frame(self._build_invoke_frame(handle, request_tlv))
-                resp = self._transport.recv_message()
-                return self._rfcping_ok(resp)
+                with _fail_closed(self._session, "RFCPING"):
+                    resp = self._transport.recv_message()
+                    return self._rfcping_ok(resp)
             finally:
-                self._session.mark_ready()
+                # Guarded: a failed ping leaves the session BROKEN, and mark_ready
+                # refuses any state but IN_CALL. Without the guard the finally
+                # would raise over the top of the real error and hide it.
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     @staticmethod
     def _rfcping_ok(resp: bytes) -> bool:
@@ -3332,12 +3374,10 @@ class Connection:
                         dict(params),
                         session_key=self._next_ws_invoke_key(),
                     )
-                    try:
+                    with _fail_closed(self._session, func_name):
                         self._transport.send_message(frame)
                         response = self._transport.recv_message()
-                    except (OSError, EOFError) as exc:
-                        raise CommunicationError(str(exc), original_exception=exc) from exc
-                    result = _ws_parse_invoke_response(response, desc)
+                        result = _ws_parse_invoke_response(response, desc)
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
                     call_params = _filter_call_params(
@@ -3351,13 +3391,11 @@ class Connection:
                     dm_names = dm_table_ids(desc, call_params)
                     handle = self._session.handle or b"        "
                     request = self._build_invoke_frame(handle, request_tlv)
-                    try:
+                    with _fail_closed(self._session, func_name):
                         self._send_invoke_frame(request)
                         response = self._transport.recv_message()
-                    except (OSError, EOFError) as exc:
-                        raise CommunicationError(str(exc), original_exception=exc) from exc
-                    tlv_response = _strip_gw_header(response)
-                    result = parse_invoke_response(tlv_response, desc, dm_names)
+                        tlv_response = _strip_gw_header(response)
+                        result = parse_invoke_response(tlv_response, desc, dm_names)
 
                 result = _convert_date_time_fields(result, desc)
                 return result
@@ -4888,14 +4926,11 @@ class AsyncConnection:
                 dm_names = dm_table_ids(desc, call_params)
                 handle = self._session.handle or b"        "
                 request = Connection._build_invoke_frame(handle, request_tlv)
-                try:
+                with _fail_closed(self._session, func_name):
                     await self._transport.send_message(request)
                     response = await self._transport.recv_message()
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-
-                tlv_response = _strip_gw_header(response)
-                result = parse_invoke_response(tlv_response, desc, dm_names)
+                    tlv_response = _strip_gw_header(response)
+                    result = parse_invoke_response(tlv_response, desc, dm_names)
                 result = _convert_date_time_fields(result, desc)
                 return result
             finally:
@@ -4914,14 +4949,16 @@ class AsyncConnection:
             try:
                 handle = self._session.handle or b"        "
                 frame = Connection._build_invoke_frame(handle, Connection._rfcping_request_tlv())
-                try:
+                with _fail_closed(self._session, "RFCPING"):
                     await self._transport.send_message(frame)
                     resp = await self._transport.recv_message()
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
                 return Connection._rfcping_ok(resp)
             finally:
-                self._session.mark_ready()
+                # Guarded: a failed ping leaves the session BROKEN, and mark_ready
+                # refuses any state but IN_CALL. Without the guard the finally
+                # would raise over the top of the real error and hide it.
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     async def close(self) -> None:
         """Close the async transport (TRANS-06 parity)."""
