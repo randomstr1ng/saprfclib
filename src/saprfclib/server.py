@@ -261,7 +261,20 @@ def _extract_5001_params(data: bytes) -> dict[str, str]:
 
     # pos now past all declarations; scan for each pending param's value:
     # pattern: 0x43 [val_len_1B] 0x80 [val_bytes] 0x45
+    #
+    # Values are consumed in order, so pos only moves forward and the whole loop
+    # is linear in the frame -- as long as a failed search stops it. It did not:
+    # when no value was found for a name, pos stayed put and the next name
+    # rescanned the same bytes to the end, making the cost quadratic in
+    # attacker-controlled input. A 269 KB frame carrying 800 declarations and no
+    # values took six seconds of CPU, and this runs on every inbound frame a
+    # registered server receives.
+    #
+    # Stopping is also the correct answer, not just the fast one: a search that
+    # failed over a region will fail identically for every later name, because it
+    # covers exactly the same bytes.
     for name in pending:
+        found = False
         i = pos
         while i + 3 < n:
             if data[i] == 0x43 and data[i + 2] == 0x80:
@@ -270,8 +283,11 @@ def _extract_5001_params(data: bytes) -> dict[str, str]:
                 if val_end < n and data[val_end] == 0x45:
                     params[name] = data[i + 3 : val_end].decode("ascii", "replace")
                     pos = val_end + 1
+                    found = True
                     break
             i += 1
+        if not found:
+            break
 
     return params
 

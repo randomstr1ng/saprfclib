@@ -73,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A crafted inbound frame could burn CPU quadratically on the RFC server.**
+  `_extract_5001_params` advanced its scan position only when a parameter value was
+  *found*, so a block of declarations with no matching values made every later name
+  rescan the frame to the end. 800 declarations in a 269 KB frame cost **six seconds**
+  of CPU, and this runs on every inbound frame a registered server receives — one small
+  frame could saturate it. Now stops on the first failed search, which is also the
+  correct answer rather than merely the fast one: a search that failed over a region
+  fails identically for every later name, since it covers the same bytes. Same input:
+  6.07s → 0.008s.
+
 - **A program ID longer than 8 characters registered under a truncated name.** The NI
   init frame's program-ID field is 16 bytes, but the value was cut to 8 before padding —
   `SAPRFC_TEST` went out as `SAPRFC_T`. A gateway that cannot match the registered name

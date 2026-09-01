@@ -313,3 +313,70 @@ async def test_accept_loop_skips_short_and_unknown_frames() -> None:
     ]
     await server._handle_client(_FakeReader(frames), _FakeWriter())  # type: ignore[arg-type]
     assert len(dispatched) == 2, "both real calls must survive the odd frames"
+
+
+# --------------------------------------------------------------------------- #
+# 0x5001 parameter extraction — runs on every inbound frame
+# --------------------------------------------------------------------------- #
+
+
+def _build_5001(pairs: list[tuple[str, str]], *, values: bool = True) -> bytes:
+    """A 0x5001 block: 14-byte header, name declarations, then values."""
+    buf = bytearray(b"\x00" * 14)
+    for name, _ in pairs:
+        buf += bytes([0x51, len(name)]) + name.encode()
+    if values:
+        for _, val in pairs:
+            buf += bytes([0x43, len(val), 0x80]) + val.encode() + bytes([0x45])
+    return bytes(buf)
+
+
+def test_5001_params_round_trip() -> None:
+    from saprfclib.server import _extract_5001_params
+
+    block = _build_5001([("ARFCTID", "ABC123"), ("ARFCFNAM", "Z_MY_FUNC")])
+    assert _extract_5001_params(block) == {"ARFCTID": "ABC123", "ARFCFNAM": "Z_MY_FUNC"}
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        b"",
+        b"\x00" * 5,  # shorter than the 14-byte header
+        b"\x00" * 14,  # header only, no declarations
+        bytes([0x51, 200]).rjust(16, b"\x00"),  # name length overruns the buffer
+    ],
+)
+def test_5001_extraction_survives_malformed_input(block: bytes) -> None:
+    """Inbound data from the network; a truncated block must yield nothing, not raise."""
+    from saprfclib.server import _extract_5001_params
+
+    assert _extract_5001_params(block) == {}
+
+
+def test_5001_extraction_is_linear_not_quadratic() -> None:
+    """A missing value used to make every later name rescan the whole frame.
+
+    `pos` only advances when a value is found, so a block of declarations with no
+    values had each name scanning to the end: 800 declarations in a 269 KB frame
+    cost six seconds of CPU. This runs on every inbound frame a registered server
+    receives, so one small crafted frame could saturate it.
+
+    Stopping on the first failed search is also the correct answer, not merely
+    the fast one — a search that failed over a region will fail identically for
+    every later name, because it covers exactly the same bytes.
+    """
+    import time
+
+    from saprfclib.server import _extract_5001_params
+
+    pairs = [(f"P{i:06d}", "") for i in range(800)]
+    block = _build_5001(pairs, values=False) + b"\x00" * (256 * 1024)
+
+    started = time.perf_counter()
+    assert _extract_5001_params(block) == {}
+    elapsed = time.perf_counter() - started
+    # The quadratic version took ~6s for this input; linear is milliseconds. The
+    # bound is loose so the test is not flaky on a slow machine, and still fails
+    # by three orders of magnitude if the quadratic behaviour returns.
+    assert elapsed < 1.0, f"extraction took {elapsed:.2f}s — quadratic scan is back"
