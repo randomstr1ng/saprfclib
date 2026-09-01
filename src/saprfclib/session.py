@@ -144,6 +144,7 @@ class Session:
 
     def __init__(self) -> None:
         self._state = SessionState.DISCONNECTED
+        self._broken_reason: str = ""
         self._attributes: ConnectionAttributes | None = None
         self._codepage: str | None = None
         self._handle: bytes | None = None  # 8-byte ASCII GW connection handle
@@ -206,13 +207,14 @@ class Session:
         # Payload offsets = handshake.md raw offsets − 4 (NI header stripped).
         body = bytearray(_NI_VERSION_LEN)
         struct.pack_into(">H", body, 0, _NI_MSG_TYPE)  # [0-1]   msg_type 0x0203
-        if local_ip:
-            try:
-                body[2:6] = bytes(int(o) for o in local_ip.split("."))
-            except (ValueError, struct.error):
-                body[2:6] = bytes((127, 0, 0, 1))
-        else:
-            body[2:6] = bytes((127, 0, 0, 1))  # [2-5]   client_ip (real socket src)
+        # [2-5] client_ip, a fixed 4-byte field. Falling back to 127.0.0.1 for an
+        # unusable value is fine — the server treats this as informational — but the
+        # fallback has to be reached. It was not, for a value with the wrong number
+        # of octets: bytes(...) succeeds on "1.2.3", the except never fires, and
+        # assigning three bytes to a four-byte slice SHRINKS the bytearray. That
+        # produced a 63-byte NI version request instead of 64, and 65 for a
+        # five-octet value — a wrong-length first frame on every connection.
+        body[2:6] = _ipv4_octets(local_ip)
         body[10:18] = b"python3\x00"  # [10-17] program_name (NUL-term)
         body[_NI_CODEPAGE_OFFSET : _NI_CODEPAGE_OFFSET + 4] = (
             b"1100"  # [20-23] propose codepage 1100
@@ -299,6 +301,27 @@ class Session:
 
         codepage = self._codepage or ""
         unicode_mode = codepage == _CODEPAGE_UTF16LE
+        if is_live and codepage and not unicode_mode:
+            # Non-Unicode systems are out of scope: SAP ended support for them
+            # with NetWeaver 7.5, and nothing in this library's non-Unicode paths
+            # has ever been exercised against one.
+            #
+            # Refusing is not merely tidier than proceeding, it is the only safe
+            # option. ``unicode_mode`` is derived here as "the wire codepage is
+            # 4103", but the codec spends it as a BYTE ORDER selector --
+            # ``_uc_encoding`` returns utf-16-be whenever it is false. On a
+            # genuinely non-Unicode connection that decodes single-byte text as
+            # UTF-16BE and yields mojibake, silently, in every character field.
+            # A connection that cannot be decoded correctly must not be handed
+            # back as if it could.
+            raise ValueError(
+                f"server negotiated codepage {codepage!r}, which is not the "
+                f"Unicode wire mode {_CODEPAGE_UTF16LE!r}. Non-Unicode systems "
+                f"are not supported: SAP ended support for them with NetWeaver "
+                f"7.5, and this library's character handling has never been "
+                f"validated against one. Continuing would decode every character "
+                f"field incorrectly rather than fail."
+            )
         dec = _decode_utf16le if (is_live and unicode_mode) else _decode_ascii
         self._attributes = ConnectionAttributes(
             sys_id=dec(tags.get(_TAG_SYS_ID)),
@@ -356,6 +379,13 @@ class Session:
         The single-in-flight guard the Connection facade (plan 03-03) uses to
         reject a call/feed in the wrong state (TRANS-04, threat T-03-STATE).
         """
+        if self._state is SessionState.BROKEN and SessionState.BROKEN not in allowed:
+            raise ValueError(
+                f"connection is unusable: {self._broken_reason}. A request was sent "
+                f"whose reply could not be read to its end, so the position in the "
+                f"byte stream is unknown and any further call on this connection "
+                f"would read the previous reply's leftovers. Open a new connection."
+            )
         if self._state not in allowed:
             raise ValueError(
                 f"operation not allowed in state {self._state.value!r}; "
@@ -371,6 +401,28 @@ class Session:
         """Flip IN_CALL → READY when a call completes (TRANS-04)."""
         self._require_state(SessionState.IN_CALL)
         self._state = SessionState.READY
+
+    def mark_broken(self, reason: str) -> None:
+        """Retire the session permanently: the byte stream is no longer trustworthy.
+
+        This is for the case where a request went out and the reply could not be
+        consumed to its end -- a malformed frame, a short read, a response that
+        spans more frames than were read. What makes that dangerous is not the
+        failed call, which raised and is therefore visible. It is the *next* call:
+        the unread remainder is still queued on the socket, so the following
+        request reads the previous reply's leftovers and gets an answer belonging
+        to different arguments. That failure is silent and attributes one call's
+        data to another's parameters.
+
+        There is no resynchronisation to attempt. Nothing in the frame format
+        marks a record boundary that a reader could scan forward to, so once the
+        position in the stream is unknown it stays unknown. The connection is
+        finished; the caller has to open a new one.
+
+        BROKEN is terminal on purpose -- there is no path back to READY.
+        """
+        self._state = SessionState.BROKEN
+        self._broken_reason = reason
 
     def begin_ws_session(self) -> None:
         """Advance to WS_PENDING after the WebSocket HTTP upgrade completes.
@@ -402,6 +454,26 @@ class Session:
         self._codepage = codepage
         self._attributes = attributes
         self._state = SessionState.READY
+
+
+def _ipv4_octets(local_ip: str | None) -> bytes:
+    """Exactly four bytes for the NI client_ip field, or the loopback default.
+
+    Anything that is not four decimal octets in 0-255 falls back rather than
+    raising: the field is informational and a caller should not fail to connect
+    over it. The contract that matters is the width — the caller assigns this
+    into a fixed slice.
+    """
+    if local_ip:
+        parts = local_ip.split(".")
+        if len(parts) == 4:
+            try:
+                octets = [int(p) for p in parts]
+            except ValueError:
+                octets = []
+            if len(octets) == 4 and all(0 <= o <= 255 for o in octets):
+                return bytes(octets)
+    return bytes((127, 0, 0, 1))
 
 
 def _decode_ascii(value: bytes | None) -> str:

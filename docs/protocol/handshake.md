@@ -238,6 +238,24 @@ first will hide the bug, because the walk returns before it can drift.
 | 0x0016 | 8 | "1100" | Client codepage as reported |
 | 0x0420 | 4 | 0x00000000 | RFC return code (0 = success) |
 | 0x0514 | 16 | binary | Session token |
+
+**`0x0450` is not guaranteed.** The table above is a kernel 793 capture. A 7.52 system
+answers with none of `0x0450`/`0x0451`/`0x0452`/`0x0453` — it identifies itself through
+`0x0008` (`host_SID_instance`), `0x0006`, `0x0007` and `0x0018` instead. See
+`tests/golden/framing/signon_incomplete_752_response.bin`.
+
+Consequence for callers: `ConnectionAttributes.sys_id` can legitimately be empty. Nothing
+may key on it unconditionally — the in-process descriptor cache in particular, since two
+connections to two different unidentified systems would otherwise share one bucket and a
+`FunctionDesc` carries no record of the system it came from. `Connection` substitutes a
+token unique to the connection in that case (`Connection._metadata_cache_key`): repeat
+calls on one connection still skip the round-trip, and nothing is shared between systems
+that never identified themselves.
+
+Deriving a SID from `0x0008` by splitting on `_` is **not** done: the three-part shape of
+`vhcala4hci_A4H_00` is a naming convention, not a protocol guarantee, and inventing a
+system identity from it would be an unsourced inference of exactly the kind this project
+does not ship.
 | 0xFFFF | 0 | — | TLV stream terminator |
 
 ### Fixture
@@ -310,7 +328,8 @@ by a live logon. Behaviour for non-ASCII passwords is untested — treat it as a
 | Logon TLV uses 0x0114 / 0x0111 / 0x0117 for client / user / password | Frame 14 TLV parse | HIGH — live capture |
 | Password field is tag 0x0117, 17 bytes for a 13-character password | Frame 14 TLV parse | HIGH — live capture |
 | 0x0117 = `seed(4B) + scramble(pw, seed)` — a reversible cipher, not a hash | Derived, then confirmed by a live logon reaching READY | HIGH |
-| Server response carries SID (0x0450), release (0x0012), user (0x0150) | Frame 15 TLV parse | HIGH — live capture |
+| Server response carries SID (0x0450), release (0x0012), user (0x0150) — on kernel 793 | Frame 15 TLV parse | HIGH — live capture |
+| A 7.52 server sends no 0x0450/0x0452/0x0453 at all; sys_id is legitimately empty | `signon_incomplete_752_response.bin` | HIGH — live capture |
 | Logon always calls RFCPING as its probe (tag 0x0102 in the logon TLV) | Frame 14 | HIGH — live capture |
 
 ---

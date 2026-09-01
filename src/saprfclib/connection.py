@@ -33,24 +33,31 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import logging
 import os
 import random
+import re
 import socket as _socket_module
 import struct
 import threading
+import time
 import uuid
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from saprfclib.compress import DecompressError, sap_lz4_frame_decompress
 from saprfclib.exceptions import (
+    AbapApplicationError,
     AbapSystemFailure,
     CommunicationError,
     RetryExhausted,
     WebSocketError,
 )
 from saprfclib.invoke import (
+    _decode_error_text,
     _extract_name_value_pairs,
     build_bgrfc_confirm_request,
     build_bgrfc_request,
@@ -61,8 +68,10 @@ from saprfclib.invoke import (
     decompress_table_stream,
     dm_table_ids,
     drop_unknown_parameters,
+    extract_server_duration,
     parse_invoke_response,
     raise_for_rfc_error,
+    tlv_stream_status,
     unknown_parameters,
 )
 from saprfclib.language import normalize_logon_language
@@ -79,7 +88,14 @@ from saprfclib.metadata import (
 )
 from saprfclib.session import ConnectionAttributes, Session, SessionState
 from saprfclib.stores import TidStore, UnitState, UnitStore
-from saprfclib.transport import AsyncTransport, Transport, connect_tcp, connect_tcp_async
+from saprfclib.transport import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_READ_TIMEOUT,
+    AsyncTransport,
+    Transport,
+    connect_tcp,
+    connect_tcp_async,
+)
 from saprfclib.types import (
     RFC_EXPORT,
     RFC_IMPORT,
@@ -398,9 +414,9 @@ def _build_ws_logon_message(
 
     fname = func_name.upper()
     # call-begin 0x0130: name + '='*(30-len) + 'FT' = 32 chars = 64 B UTF-16LE
-    func_begin_padded = (fname + "=" * (30 - len(fname)) + "FT").encode("utf-16-le")
+    func_begin_padded = _pad_call_name(fname, 30).encode("utf-16-le")
     # call-end 0x0130: name + '='*(38-len) + 'FT' = 40 chars = 80 B UTF-16LE (pcap-verified)
-    func_end_padded = (fname + "=" * (38 - len(fname)) + "FT").encode("utf-16-le")
+    func_end_padded = _pad_call_name(fname, 38).encode("utf-16-le")
     # first 0x0130: CLIENT PROGRAM NAME (verified: writeRfcSessionInfo writes
     # the CPIC layer::ownname here, not the function name).
     # NOTE: changing from func_begin_padded causes RABAX on SAP 7.x — kept for compat.
@@ -518,6 +534,52 @@ def _build_ws_logon_message(
     return b"".join(parts), call_key
 
 
+def _ws_logon_failure(logon_resp: bytes) -> AbapSystemFailure | None:
+    """The exception a wRFC LOGON reply carries, or None if it carried none.
+
+    A wRFC LOGON reply is not success-or-error: it can be both at once. The auth
+    tags (0x0450-0x0453) are filled in whether or not the function call embedded
+    in the LOGON succeeded, so a reply that authenticates and then reports
+    CALL_FUNCTION_RECEIVE_ERROR looks, to a reader that only checks for a sys_id,
+    exactly like a clean logon. That is what happened here: the library read the
+    attributes, declared the session READY, sent an invoke into it, and the work
+    process took a short dump.
+
+    Observed on A4H kernel 793 -- the 1118-byte LOGON reply carries:
+
+        0x0450 'A4H'                            auth, filled in
+        0x0418 ';W=SAPLSYSU,E=163,H=3,N=3;S=RFCPING,...'
+        0x0415 '00'   0x0416 'X'   0x0417 '341'
+        0x0403 / 0x0411 'CALL_FUNCTION_RECEIVE_ERROR'
+        0x0402 'Error when receiving data for an RFC.'
+
+    0x0418 is the ABAP call-stack breadcrumb, and ``E=163`` inside it is where the
+    number in issue #14 actually comes from. It had been hardcoded in two places
+    rather than read, which is how a correct value can still be a defect: nothing
+    was consulting the field, so a different code would have been reported as 163.
+    """
+    tags = Session._parse_tlv(logon_resp)
+    key = _decode_error_text(tags.get(0x0403)) or _decode_error_text(tags.get(0x0411))
+    text = _decode_error_text(tags.get(0x0402))
+    if not key and not text:
+        return None
+
+    breadcrumb = _decode_error_text(tags.get(0x0418))
+    match = re.search(r"\bE=(\d+)", breadcrumb) if breadcrumb else None
+    code = match.group(1) if match else None
+
+    parts = [p for p in (code, key, text) if p]
+    return AbapSystemFailure(
+        msg_class=_decode_error_text(tags.get(0x0415)) or None,
+        msg_type=_decode_error_text(tags.get(0x0416)) or None,
+        msg_number=_decode_error_text(tags.get(0x0417)) or None,
+        message=(
+            f"the wRFC LOGON authenticated but the function call embedded in it "
+            f"failed: {': '.join(parts)}"
+        ),
+    )
+
+
 def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
     """Parse wRFC server response TLV stream; return ConnectionAttributes.
 
@@ -538,11 +600,6 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
         except Exception:
             return v.decode("ascii", errors="replace").rstrip("\x00 ")
 
-    def _das(v: bytes | None) -> str:
-        if not v:
-            return ""
-        return v.decode("ascii", errors="replace").rstrip("\x00 ")
-
     sys_id = _d16(tags.get(0x0450))
     if sys_id:
         # Auth succeeded — return attrs regardless of any function-call error in 0x0402.
@@ -555,8 +612,13 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
             client="",
             user="",
             language="",
-            partner_rel=_das(tags.get(0x0012)),
-            kernel_rel=_das(tags.get(0x0013)),
+            # UTF-16LE, like every other string on this wire. These two were
+            # decoded as ASCII, which does not fail on UTF-16 input -- it returns
+            # the NULs interleaved, so kernel_rel read '7\x009\x003' instead of
+            # '793'. A wrong charset that raises is a bug you find; one that
+            # returns a plausible-looking string is one you ship.
+            partner_rel=_d16(tags.get(0x0012)),
+            kernel_rel=_d16(tags.get(0x0013)),
             codepage="4103",
             unicode_mode=True,
         )
@@ -1464,6 +1526,40 @@ def _strip_gw_header(resp: bytes) -> bytes:
     return resp
 
 
+def _resolve_credentials(
+    user: str | None, passwd: str | None, *, snc_lib: str | None, ashost: str
+) -> tuple[str | None, str | None]:
+    """Decide whether this connection carries credentials, and sanity-check them.
+
+    Supplying neither a user nor a password, and no SNC library, is taken as a
+    deliberate anonymous attempt: the logon frame goes out without the user and
+    password records. Some systems answer a small set of function modules that way;
+    a hardened one refuses below the RFC layer, which now reports as a
+    CommunicationError naming the CPIC message rather than an unreadable response.
+
+    Supplying exactly one of the two is rejected. That is not a request to connect
+    anonymously, it is a missing environment variable or a typo, and turning it into
+    a silent anonymous attempt would replace a clear error with a confusing one.
+    """
+    if snc_lib is not None:
+        return user, passwd
+    if user is None and passwd is None:
+        _logger.warning(
+            "connecting to %s without credentials: no user, no password and no "
+            "snc_lib were given, so the logon frame will omit the user and password "
+            "records. Most systems refuse this.",
+            ashost,
+        )
+        return None, None
+    if user is None or passwd is None:
+        missing = "user" if user is None else "passwd"
+        raise ValueError(
+            f"{missing} is missing while the other credential was supplied. Pass both "
+            f"to authenticate, or neither to attempt an anonymous connection."
+        )
+    return user, passwd
+
+
 def _filter_call_params(
     func_name: str,
     desc: FunctionDesc,
@@ -1669,9 +1765,19 @@ def _parse_gfi_params_rows(
         # rejected (observed live on kernel 793: RFC_READ_TABLE raised
         # TABLE_NOT_AVAILABLE because QUERY_TABLE never arrived intact).
         if exid in _CHAR_LIKE_EXID and not unicode_mode:
-            # [ASSUMED] Non-Unicode connections are expected to report NUC counts,
-            # which need doubling to reach the uc_* representation the codec uses.
-            # No non-Unicode capture exists to confirm this branch.
+            # Doubling NUC counts to reach the uc_* representation the codec uses.
+            #
+            # This carried an uncertainty label because no non-Unicode capture
+            # exists to confirm it. It is now unreachable on a live connection
+            # instead: the handshake refuses any codepage that is not the 4103
+            # Unicode wire mode, because the codec would decode such a
+            # connection's character fields as UTF-16BE and silently produce
+            # mojibake. Non-Unicode systems are out of scope -- SAP ended support
+            # for them with NetWeaver 7.5.
+            #
+            # The branch stays for offline descriptors built without a negotiated
+            # codepage, where unicode_mode is false by construction rather than
+            # by observation.
             uc_length = intlen_nuc * 2
             uc_offset = offset_nuc * 2
         else:
@@ -1855,9 +1961,355 @@ class _LoopThread:
         return fut.result(timeout)
 
     def close(self) -> None:
-        """Stop the background loop and join the thread."""
+        """Stop the background loop, join the thread and release the loop.
+
+        Closing matters, not just stopping: a stopped-but-unclosed event loop keeps
+        its selector and the file descriptors behind it, so every sync classic
+        connection leaked one until the interpreter collected it. Python 3.14
+        surfaces that as a ResourceWarning from BaseEventLoop.__del__; the cost is
+        real on any version, and accumulates in a long-running process that opens
+        connections through the pool.
+
+        Only closed once the thread has actually stopped — closing a running loop
+        raises. If the join times out the loop is left alone rather than risking
+        that, since a leaked descriptor beats an exception during cleanup.
+        """
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5.0)
+        if not self._thread.is_alive():
+            try:
+                self._loop.close()
+            except RuntimeError:  # pragma: no cover - loop already closed
+                pass
+
+
+# An ABAP function module name is at most 30 characters. The wRFC call-name
+# fields pad to a fixed width with '=' and then append "FT", so an over-long name
+# does not truncate — the pad count goes negative, `"=" * -1` yields the empty
+# string, and the field comes out too LONG. A 31-character name produced a
+# 33-character call-begin field where the format requires 32, with nothing
+# raising anywhere.
+_MAX_FUNC_NAME_LEN = 30
+
+
+def _pad_call_name(func_name: str, width: int) -> str:
+    """``NAME`` + ``=`` padding + ``FT``, at exactly ``width`` + 2 characters."""
+    if len(func_name) > width:
+        raise ValueError(
+            f"function module name {func_name!r} is {len(func_name)} characters; "
+            f"ABAP allows at most {_MAX_FUNC_NAME_LEN} and this field pads to {width}"
+        )
+    return func_name + "=" * (width - len(func_name)) + "FT"
+
+
+def _validate_sysnr(sysnr: str | int) -> int:
+    """Return the system number as an int, or explain why it is not one.
+
+    A system number is two digits: SAP's port table derives sapdp<NN>, sapgw<NN>
+    and the rest from it, all with two-digit fields. Anything outside 0-99 breaks
+    in two places at once — the gateway port becomes something that is not a
+    gateway, and the eight-byte service field in the GW connect frame overflows,
+    resizing the frame. Neither reports itself: the frame simply stops being
+    parseable by the peer.
+    """
+    try:
+        value = int(sysnr)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"system number {sysnr!r} is not a number; it is the two-digit instance "
+            f"number, e.g. 0 or '00'"
+        ) from None
+    if not 0 <= value <= 99:
+        raise ValueError(
+            f"system number {value} is outside 0-99. SAP derives sapdp<NN>/sapgw<NN> "
+            f"from it with two-digit fields, so a larger value produces both a "
+            f"non-gateway port and a malformed connect frame."
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class CallStats:
+    """What one RFC call cost, measured by this client.
+
+    ``duration_s`` and the byte counts are measured locally: our clock, our socket.
+    ``server_duration_s`` is the server's own figure, read from tag 0x0667 of the
+    response, and it is the one number that separates server time from network
+    time. A call taking 3 s of wall clock is a different problem depending on
+    whether the server spent 2.99 s of that (the ABAP is slow) or 40 ms (the
+    network, the gateway, or a queue is).
+
+    ``server_duration_s`` is ``None`` whenever the field was not in the response,
+    and that is deliberately distinct from ``0.0``. No release rule requiring the
+    tag has been established, so absence means unknown; recording it as zero would
+    put a fabricated number into a metrics series where it would read as an
+    impossibly fast call rather than as missing data. It is also ``None`` on a
+    failed call that never got a parseable response.
+
+    Source for the 0x0667 reading: behavioural probe against A4H kernel 793 --
+    see :func:`saprfclib.invoke.extract_server_duration` and
+    docs/protocol/framing.md.
+    """
+
+    func_name: str
+    duration_s: float
+    request_bytes: int
+    response_bytes: int
+    failed: bool = False
+    server_duration_s: float | None = None
+
+
+class ConnectionMetrics:
+    """Running totals for one connection, for exporting to a metrics system.
+
+    Deliberately not a global registry: a connection is owned by one thread or
+    task at a time (the pool is the concurrency boundary), so these need no
+    locking, and a caller aggregating across a pool can sum them itself.
+
+    Latency is kept as a total plus a count rather than a list of samples: an
+    unbounded sample list on a long-running connection is a slow memory leak, and
+    a mean plus a max is what a dashboard actually plots.
+    """
+
+    __slots__ = (
+        "calls",
+        "failures",
+        "total_duration_s",
+        "max_duration_s",
+        "request_bytes",
+        "response_bytes",
+        "total_server_duration_s",
+        "server_timed_calls",
+        "last",
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.failures = 0
+        self.total_duration_s = 0.0
+        self.max_duration_s = 0.0
+        self.request_bytes = 0
+        self.response_bytes = 0
+        # Server-reported time, and the count of calls that actually reported it.
+        # Kept separate because the mean must divide by the calls that carried a
+        # measurement, not by every call -- averaging over calls whose field was
+        # absent would silently understate server time by whatever share of the
+        # traffic omits the tag.
+        self.total_server_duration_s = 0.0
+        self.server_timed_calls = 0
+        self.last: CallStats | None = None
+
+    def record(self, stats: CallStats) -> None:
+        self.calls += 1
+        if stats.failed:
+            self.failures += 1
+        self.total_duration_s += stats.duration_s
+        self.max_duration_s = max(self.max_duration_s, stats.duration_s)
+        self.request_bytes += stats.request_bytes
+        self.response_bytes += stats.response_bytes
+        if stats.server_duration_s is not None:
+            self.total_server_duration_s += stats.server_duration_s
+            self.server_timed_calls += 1
+        self.last = stats
+
+    @property
+    def mean_duration_s(self) -> float:
+        """Mean call latency, or 0.0 before any call has been made."""
+        return self.total_duration_s / self.calls if self.calls else 0.0
+
+    @property
+    def mean_server_duration_s(self) -> float:
+        """Mean server-side time over the calls that reported one, else 0.0.
+
+        Divides by ``server_timed_calls``, not by ``calls``. A response without
+        tag 0x0667 carries no measurement, and folding it in as zero would
+        understate server time by whatever share of the traffic omits the field.
+        """
+        return (
+            self.total_server_duration_s / self.server_timed_calls
+            if self.server_timed_calls
+            else 0.0
+        )
+
+    @property
+    def server_time_fraction(self) -> float:
+        """Share of wall-clock time the server accounts for, over timed calls.
+
+        The number this whole field exists for. Near 1.0 means latency is the
+        ABAP; near 0.0 means it is the network, the gateway, or a queue. 0.0 when
+        nothing reported a server time, which is why ``server_timed_calls``
+        is exposed alongside it -- an unqualified 0.0 would otherwise read as
+        "the server is instant" rather than "nothing was measured".
+        """
+        if not self.server_timed_calls or self.total_duration_s <= 0.0:
+            return 0.0
+        return self.total_server_duration_s / self.total_duration_s
+
+    def as_dict(self) -> dict[str, float | int]:
+        """A flat mapping, shaped for a metrics exporter."""
+        return {
+            "calls": self.calls,
+            "failures": self.failures,
+            "total_duration_s": self.total_duration_s,
+            "mean_duration_s": self.mean_duration_s,
+            "max_duration_s": self.max_duration_s,
+            "request_bytes": self.request_bytes,
+            "response_bytes": self.response_bytes,
+            "total_server_duration_s": self.total_server_duration_s,
+            "mean_server_duration_s": self.mean_server_duration_s,
+            "server_timed_calls": self.server_timed_calls,
+            "server_time_fraction": self.server_time_fraction,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"ConnectionMetrics(calls={self.calls}, failures={self.failures}, "
+            f"mean={self.mean_duration_s * 1000:.1f}ms, "
+            f"max={self.max_duration_s * 1000:.1f}ms)"
+        )
+
+
+# A response too large for one gateway frame arrives as several. The cap is a
+# guard, not a protocol fact: the observed case used two frames, and no rule
+# limiting the count has been established. It exists so a peer that never sends
+# a terminator cannot hold a caller forever.
+_MAX_RESPONSE_FRAMES = 256
+
+
+def _frame_reports_itself_final(raw: bytes) -> bool | None:
+    """Does this frame's GW header say it completes the response?
+
+    Bytes 60-63, BE uint32: 1 on the frame that ends a response, 0 on one that
+    continues. Confirmed across a 22-frame reply on A4H kernel 793 -- twenty-one
+    continuing frames all read 0, the last read 1 -- and again on a separate
+    two-frame capture.
+
+    Returns None when the frame carries no GW header to ask, which is the case
+    for raw-TLV transports and offline doubles. A caller must treat None as "no
+    opinion" rather than as either answer.
+
+    This is deliberately NOT what drives reassembly. The same field reads 0 on
+    signon_incomplete_752_response.bin and cpic_logon_error_response.bin, which
+    are complete terminal replies with nothing following, so a loop keyed on it
+    would wait forever on a refused logon. It is useful in the other direction:
+    a frame that claims to be final while the stream is still short is a genuine
+    inconsistency, and reading on would consume the next call's reply.
+    """
+    if len(raw) >= 64 and raw[:1] == b"\x06":
+        return bool(struct.unpack_from(">I", raw, 60)[0] == 1)
+    return None
+
+
+def _join_response_frames(read_frame: Callable[[], bytes], func_name: str) -> bytes:
+    """Read frames until the TLV stream terminates, and return the joined body.
+
+    Reassembly is driven by the stream's own 0xFFFF terminator rather than by a
+    header flag. Two header fields looked like "more follows" markers -- bytes
+    17-20 and bytes 60-63 -- and both are wrong: they are the same signal, and
+    both also fire on complete terminal replies (a refused logon, an incomplete
+    signon), so a loop trusting either would wait forever on a failed logon for a
+    frame that is never coming. See invoke.tlv_stream_status.
+
+    Only a buffer that parsed at least one record and then ran off the end reads
+    more. A body that is not a TLV stream at all -- a CPIC-layer refusal is
+    EBCDIC, so its first record claims 50629 bytes inside a 97-byte frame --
+    is handed straight to the parser, which reports it properly instead of
+    blocking on a continuation that does not exist.
+    """
+    raw = read_frame()
+    tlv = _strip_gw_header(raw)
+    frames = 1
+    while tlv_stream_status(tlv) == "truncated":
+        if _frame_reports_itself_final(raw) is True:
+            # The server says this frame ends the response and the stream says
+            # it does not. Reading on would consume the next call's reply, so
+            # the mismatch is reported here instead of becoming a swap later.
+            raise ValueError(
+                f"{func_name}: frame {frames} reports itself as the last of the "
+                f"response, but the TLV stream is still short at {len(tlv)} bytes"
+            )
+        if frames >= _MAX_RESPONSE_FRAMES:
+            raise ValueError(
+                f"{func_name}: response still incomplete after {frames} frames "
+                f"({len(tlv)} bytes); refusing to read further"
+            )
+        raw = read_frame()
+        part = _strip_gw_header(raw)
+        if not part:
+            # An 80-byte frame is a bare GW header with no TLV payload. It adds
+            # nothing, so continuing would spin to the cap rather than make
+            # progress; stop and let the parser report what is actually missing.
+            raise ValueError(
+                f"{func_name}: response truncated after {frames} frame(s) and the "
+                f"next frame carried no payload"
+            )
+        tlv += part
+        frames += 1
+    return tlv
+
+
+async def _join_response_frames_async(
+    read_frame: Callable[[], Awaitable[bytes]], func_name: str
+) -> bytes:
+    """Async twin of :func:`_join_response_frames`; same rule, same reasoning."""
+    raw = await read_frame()
+    tlv = _strip_gw_header(raw)
+    frames = 1
+    while tlv_stream_status(tlv) == "truncated":
+        if _frame_reports_itself_final(raw) is True:
+            raise ValueError(
+                f"{func_name}: frame {frames} reports itself as the last of the "
+                f"response, but the TLV stream is still short at {len(tlv)} bytes"
+            )
+        if frames >= _MAX_RESPONSE_FRAMES:
+            raise ValueError(
+                f"{func_name}: response still incomplete after {frames} frames "
+                f"({len(tlv)} bytes); refusing to read further"
+            )
+        raw = await read_frame()
+        part = _strip_gw_header(raw)
+        if not part:
+            raise ValueError(
+                f"{func_name}: response truncated after {frames} frame(s) and the "
+                f"next frame carried no payload"
+            )
+        tlv += part
+        frames += 1
+    return tlv
+
+
+@contextlib.contextmanager
+def _fail_closed(session: Session, func_name: str) -> Iterator[None]:
+    """Retire the session if a reply could not be read to its end.
+
+    Wraps the send-and-read-reply half of a call, not the whole of it. Inside this
+    block the request is already on the wire, so any failure other than a clean
+    parse leaves the socket holding an unknown number of unread bytes.
+
+    The failed call is not the problem -- it raises, so the caller sees it. The
+    next call on the same connection is: it would read whatever remains of the
+    previous reply and hand back an answer belonging to different arguments, with
+    nothing to indicate the swap. Marking the session BROKEN turns that silent
+    mismatch into a refusal that names the original cause.
+
+    ABAP-level failures are deliberately let through untouched. An application
+    error or a system failure means the response frame parsed correctly and the
+    server is reporting a business or runtime outcome; the stream is intact and
+    the connection stays usable. Retiring on those would mean a pooled application
+    reconnecting on every ABAP short dump.
+    """
+    try:
+        yield
+    except (AbapApplicationError, AbapSystemFailure):
+        raise
+    except (OSError, EOFError) as exc:
+        # asyncio.IncompleteReadError subclasses EOFError and TimeoutError
+        # subclasses OSError, so the async paths are covered by these two.
+        session.mark_broken(f"{func_name}: {exc}")
+        raise CommunicationError(str(exc), original_exception=exc) from exc
+    except Exception as exc:
+        session.mark_broken(f"{func_name}: {type(exc).__name__}: {exc}")
+        raise
 
 
 class Connection:
@@ -1868,7 +2320,14 @@ class Connection:
     ``get_connection_attributes`` are available; ``close`` is safe in any state.
     """
 
-    def __init__(self, transport: Transport, *, strict_params: bool = False) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        *,
+        strict_params: bool = False,
+        metadata_cache: MetadataCache | None = None,
+        metadata_cache_key: str | None = None,
+    ) -> None:
         self._transport = transport
         # Unknown-parameter policy (issue #24). Default False mirrors what callers
         # porting from pyrfc expect; set True to have call() reject an argument the
@@ -1877,7 +2336,15 @@ class Connection:
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self._session = Session()
         self._lock = threading.Lock()
-        self._cache = MetadataCache()  # in-process FunctionDesc cache (META-03)
+        # A descriptor describes the system, not this socket, so the cache can be
+        # shared: a pool passes one in and its connections stop each paying for
+        # the same interfaces. Falls back to a private cache when none is given.
+        self._cache = metadata_cache if metadata_cache is not None else MetadataCache()
+        # Used in place of sys_id when the system sends none. A pool supplies one
+        # shared value, since its connections were opened from identical
+        # parameters and therefore reach the same system by construction.
+        self._anon_cache_key: str | None = metadata_cache_key
+        self._metrics = ConnectionMetrics()
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
         self._ws_call_key: bytes = b"\x01" + b"\x00" * 36  # set by _ws_begin / _ws_handshake
@@ -2026,8 +2493,8 @@ class Connection:
         self,
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
         lang: str = _DEFAULT_LANG,
@@ -2044,6 +2511,15 @@ class Connection:
             from saprfclib.ws import WsTransport
 
             if isinstance(self._transport, WsTransport):
+                if user is None or passwd is None:
+                    # wRFC authenticates over HTTP on the WebSocket upgrade, so an
+                    # anonymous attempt has nowhere to go — the credentials are not
+                    # carried in the RFC logon frame at all.
+                    raise ValueError(
+                        "WebSocket RFC requires a user and password: the credentials "
+                        "are sent on the HTTP upgrade, so there is no anonymous form "
+                        "of this connection"
+                    )
                 self._ws_handshake(
                     client=client,
                     user=user,
@@ -2117,8 +2593,8 @@ class Connection:
         prev_state: SessionState,
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         ashost: str,
         sysnr: int,
         local_ip: str,
@@ -2189,7 +2665,9 @@ class Connection:
         payload[40:48] = b"        "  # no handle in outbound request
         payload[48:56] = b"NWRFC   "  # remote LU name = RFC gateway partner
         payload[56:64] = ashost[:8].ljust(8).encode("ascii")  # IP prefix
-        payload[64:72] = f"sapdp{sysnr:02d} ".encode("ascii")  # service (8B)
+        # Two-digit field: "sapdp" + NN + one space is exactly 8 bytes. A value
+        # above 99 used to make it 9 and grow the whole frame by a byte.
+        payload[64:72] = f"sapdp{_validate_sysnr(sysnr):02d} ".encode("ascii")
         payload[72:80] = (
             b"\x49\x01\x00\x00\x00\x00\xff\xff"  # [73]=1, [76:78]=0, [78:80]=0xffff (confirmed)
         )
@@ -2371,8 +2849,8 @@ class Connection:
     def _build_logon_request(
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         seed: int | None = None,
         local_ip: str = "127.0.0.1",
         program_name: bytes = b"python3",
@@ -2399,8 +2877,16 @@ class Connection:
             _tlv_ext(0x0106, _TLV_CP),
             _tlv_ext(0x0514, session_token),
             _tlv_ext(_TAG_CLIENT, client.encode("ascii", "replace")),
-            _tlv_ext(_TAG_USER, user.encode("ascii", "replace")),
-            _tlv_ext(_TAG_PASSWORD, _scramble_password(passwd, seed=seed)),
+        ]
+        # No credentials: omit the user and password records rather than sending
+        # empty ones. An empty password is still a password attempt as far as the
+        # server is concerned, and repeated attempts against a real account name
+        # count towards lockout; omitting the fields cannot.
+        if user is not None:
+            parts.append(_tlv_ext(_TAG_USER, user.encode("ascii", "replace")))
+        if passwd is not None:
+            parts.append(_tlv_ext(_TAG_PASSWORD, _scramble_password(passwd, seed=seed)))
+        parts += [
             # 0x0115 and 0x0011 both carry the logon language in the capture
             # (golden logon_request.bin: b"E" on each).
             _tlv_ext(0x0115, _encode_logon_language(lang)),
@@ -2425,6 +2911,43 @@ class Connection:
     # ------------------------------------------------------------------ #
     # Public surface
     # ------------------------------------------------------------------ #
+    @property
+    def metrics(self) -> ConnectionMetrics:
+        """Per-connection call counters and latency.
+
+        Delegates to the async core for classic TCP connections (D-07), so the
+        numbers are the same object whichever facade the caller holds.
+        """
+        if self._async_conn is not None:
+            return self._async_conn.metrics
+        return self._metrics
+
+    @property
+    def _metadata_cache_key(self) -> str | None:
+        """Key this connection's cached descriptors live under; None to not cache.
+
+        Normally the system ID, so every connection to the same system shares one
+        set of descriptors. But the logon response does not always carry one: a
+        7.52 system answers with no 0x0450/0x0452/0x0453 at all, leaving sys_id
+        empty. Caching under "" would file every such system in one bucket, and a
+        process holding connections to two of them would be served the wrong
+        system's descriptor for a same-named function module — silently, since a
+        FunctionDesc carries no system of origin.
+
+        So an unidentified system falls back to a token unique to this connection.
+        Repeat calls on the connection still skip the round-trip; nothing is
+        shared between systems that never identified themselves.
+        """
+        sys_id = self.sys_id
+        if sys_id is None:
+            return None  # not READY — nothing to key on yet
+        if sys_id:
+            return sys_id
+        if self._anon_cache_key is None:
+            # NUL prefix: a real SID is 3 alphanumerics, so this cannot collide.
+            self._anon_cache_key = f"\x00anon-{uuid.uuid4().hex}"
+        return self._anon_cache_key
+
     @property
     def sys_id(self) -> str | None:
         """System ID from the negotiated ConnectionAttributes; None if not READY.
@@ -2531,9 +3054,19 @@ class Connection:
             if self._session.state is SessionState.WS_PENDING:
                 # 2-step lazy LOGON (Track 2):
                 # Step 1: LOGON+RFCPING (empty ngrfc body).
-                # protocol analysis: SDK writes 0x45 EXECUTE for all INVOKE frames; but LOGON frame
-                # ngrfc body behaves differently — server hangs when b"\x45" sent in LOGON
-                # frame (vs b"" which yields expected E=163 close, handled below).
+                # An empty ngrfc body is the one that works. Probed against A4H
+                # kernel 793: with b"" the server answers the LOGON with a
+                # 1118-byte reply in under 100 ms. With b"\x45" -- which makes the
+                # 0x5001 record byte-identical to a working INVOKE -- it sends
+                # nothing at all, indefinitely, and a frame sent afterwards draws
+                # close code 1001.
+                #
+                # An earlier comment here said b"" "yields expected E=163 close".
+                # Half right. There is no close -- the server answers -- but the
+                # reply it sends IS the error: CALL_FUNCTION_RECEIVE_ERROR, message
+                # 00/341 type X, with E=163 in the 0x0418 breadcrumb. An empty body
+                # means the embedded RFCPING receives no data, which is precisely
+                # what "error when receiving data for an RFC" describes.
                 # _ws_direct_logon_call (same LOGON path, proven path) uses b"" too.
                 _ws_pending_path = True
                 auth = self._ws_auth or {}
@@ -2548,16 +3081,36 @@ class Connection:
                 logon_resp = self._transport.recv_message()
                 # Auth: extract ConnectionAttributes from 0x0450/0x0452/0x0453.
                 attrs_ws = _ws_parse_logon_response(logon_resp)
+                # ... and then check whether the call embedded in that LOGON
+                # actually ran. The auth tags are filled in either way, so a reply
+                # that authenticated and then failed reads as a clean logon to
+                # anything that only looks for a sys_id. Sending an invoke into
+                # that session is what makes the work process take a short dump.
+                if (logon_failure := _ws_logon_failure(logon_resp)) is not None:
+                    if attrs_ws and attrs_ws.sys_id:
+                        self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
+                    raise logon_failure
                 if close_exc := self._transport.drain_queued_close():  # type: ignore[attr-defined]
                     if attrs_ws and attrs_ws.sys_id:
-                        # Auth (0x0450/sys_id) succeeded; RFCPING failed E=163.
-                        # Server closes after E=163 — complete attrs so
-                        # get_connection_attributes() works, then surface as
-                        # AbapSystemFailure (not transport close).
+                        # Auth succeeded (0x0450/sys_id present) and the server then
+                        # closed the WebSocket. Complete the attributes so
+                        # get_connection_attributes() still works, and report what
+                        # the close actually said.
+                        #
+                        # This used to raise a hardcoded "163: Error when receiving
+                        # data for an RFC." The value was right and the sourcing was
+                        # not: the server does send E=163, inside the 0x0418
+                        # call-stack breadcrumb, and nothing was reading it. A
+                        # hardcoded constant that happens to match is still a defect
+                        # -- it reports 163 for every failure, including the ones
+                        # that are not 163. _ws_logon_failure now parses the field.
                         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                         raise AbapSystemFailure(
-                            message="163: Error when receiving data for an RFC."
-                        )
+                            message=(
+                                f"the server authenticated the wRFC LOGON and then closed "
+                                f"the WebSocket: {close_exc}"
+                            )
+                        ) from close_exc
                     raise close_exc
                 self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                 # Step 2: INVOKE+RFC_GET_FUNCTION_INTERFACE (now in READY state).
@@ -2571,13 +3124,18 @@ class Connection:
                 self._transport.send_message(frame)
                 try:
                     response = self._transport.recv_message()
-                except WebSocketError:
-                    # Server closed after RFCPING (E=163) without processing GFI.
-                    # Auth already completed — attrs in session. Surface as
-                    # AbapSystemFailure so callers see function-level error.
+                except WebSocketError as ws_exc:
+                    # The server closed the WebSocket instead of answering
+                    # RFC_GET_FUNCTION_INTERFACE. Auth already completed, so this is
+                    # a function-level failure rather than a transport one -- but
+                    # report the close the server actually sent rather than a
+                    # constant standing in for it.
                     raise AbapSystemFailure(
-                        message="163: Error when receiving data for an RFC."
-                    ) from None
+                        message=(
+                            f"the server closed the WebSocket without answering "
+                            f"RFC_GET_FUNCTION_INTERFACE: {ws_exc}"
+                        )
+                    ) from ws_exc
             else:
                 # Subsequent bootstrap: connection already established, use invoke format.
                 frame = _build_ws_invoke_message(
@@ -2644,8 +3202,26 @@ class Connection:
                     _err_msg = _err_raw.decode("utf-16-le", errors="replace").rstrip("\x00 ")
                 except Exception:
                     pass
-            _rc_str = str(_rc) if _rc else "163"
-            raise AbapSystemFailure(message=f"{_rc_str}: {_exc_name or _err_msg or 'GFI failed'}")
+            # When the server sends no return code, say so. This previously fell
+            # back to "163", which is the one case where a fabricated code is most
+            # misleading: _rc is 0 precisely when the server reported NO error, so
+            # the library was inventing a specific failure number to describe a
+            # reply that carried none.
+            _detail = _exc_name or _err_msg
+            if _rc:
+                _summary = f"{_rc}: {_detail or 'RFC_GET_FUNCTION_INTERFACE failed'}"
+            elif _detail:
+                _summary = (
+                    f"RFC_GET_FUNCTION_INTERFACE returned no parameter rows and no "
+                    f"return code; the server said: {_detail}"
+                )
+            else:
+                _summary = (
+                    "RFC_GET_FUNCTION_INTERFACE returned no parameter rows, no return "
+                    "code and no message. The wRFC LOGON was accepted, so the "
+                    "connection works and the interface fetch does not."
+                )
+            raise AbapSystemFailure(message=_summary)
 
         # Build FunctionDesc from the parsed rows. Track STRUCTURE params needing
         # a secondary RFC_GET_STRUCTURE_DEFINITION bootstrap (META-04).
@@ -2823,10 +3399,15 @@ class Connection:
                 else:
                     handle = self._session.handle or b"        "
                     self._send_invoke_frame(self._build_invoke_frame(handle, request_tlv))
-                resp = self._transport.recv_message()
-                return self._rfcping_ok(resp)
+                with _fail_closed(self._session, "RFCPING"):
+                    resp = self._transport.recv_message()
+                    return self._rfcping_ok(resp)
             finally:
-                self._session.mark_ready()
+                # Guarded: a failed ping leaves the session BROKEN, and mark_ready
+                # refuses any state but IN_CALL. Without the guard the finally
+                # would raise over the top of the real error and hide it.
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     @staticmethod
     def _rfcping_ok(resp: bytes) -> bool:
@@ -2876,18 +3457,26 @@ class Connection:
                 pos += 2
         raise ValueError("RFCPING response missing return-code TLV 0x0420")
 
-    def _ws_e163_classic_fallback(
+    def _ws_classic_fallback(
         self,
         func_name: str,
         desc: FunctionDesc,
         params: dict[str, Any],
         attrs_ws: ConnectionAttributes,
     ) -> dict[str, Any]:
-        """Classic RFC fallback after wRFC LOGON E=163 (on-premise ICM constraint).
+        """Classic RFC fallback when the wRFC session cannot be completed.
 
-        On-premise ABAP kernels (A4H and similar) reject any non-empty ngrfc body in
-        the wRFC LOGON frame, so LOGON+RFCPING always ends with E=163 and WebSocket
-        close.  This method transparently re-runs the call over a classic TCP RFC
+        On-premise ABAP kernels (A4H and similar) reject a non-empty ngrfc body in
+        the wRFC LOGON frame -- with b"\x45" the server never answers at all -- so
+        the LOGON carries an empty body. That much works: A4H answers it with a
+        1118-byte reply. What does not complete is the interface fetch that
+        follows, and why is still open (issue #14).
+
+        An earlier version of this docstring said LOGON+RFCPING "always ends with
+        E=163 and WebSocket close". A probe corrected the second half only: there
+        is no close, the server answers -- but the answer carries the error, with
+        E=163 in its 0x0418 breadcrumb, and the auth tags filled in alongside it.
+        This method transparently re-runs the call over a classic TCP RFC
         connection derived from the LOGON response:
 
           1. Extract partner_host (0x0453) and sys_number (0x0452) from attrs_ws.
@@ -2923,9 +3512,9 @@ class Connection:
         )
 
         # Pre-populate cache with the builtin desc to skip GFI round-trip.
-        classic_sys_id = classic._session.attributes.sys_id if classic._session.attributes else ""
-        if classic_sys_id:
-            classic._cache.put(classic_sys_id, desc)
+        classic_key = classic._metadata_cache_key
+        if classic_key:
+            classic._cache.put(classic_key, desc)
 
         result = classic.call(func_name, **params)
 
@@ -2955,8 +3544,9 @@ class Connection:
         Transitions WS_PENDING → READY (via complete_ws_first_call) between step 1 and 2.
         Caller must hold self._lock.  Called only when state is WS_PENDING.
 
-        On-premise A4H ICM constraint: RFCPING LOGON always ends with E=163 and
-        WebSocket close.  In that case _ws_e163_classic_fallback is invoked to re-run
+        On-premise A4H: the LOGON itself succeeds, but the wRFC session cannot be
+        driven to a usable state (issue #14). In that case the classic fallback
+        is invoked to re-run
         the call via a classic TCP RFC connection (transparent to the caller).
         """
         auth = self._ws_auth or {}
@@ -2976,15 +3566,28 @@ class Connection:
             raise CommunicationError(str(exc), original_exception=exc) from exc
         # Extract auth (0x0450 → sys_id, etc.) — raises ValueError on auth failure.
         attrs_ws = _ws_parse_logon_response(logon_resp)
+        if _ws_logon_failure(logon_resp) is not None:
+            # The reply authenticated and reported that the call embedded in the
+            # LOGON failed. Going on to send the invoke anyway is what makes the
+            # work process take a short dump -- so this path used to provoke a
+            # RABAX on the server, catch the resulting WebSocket close, and only
+            # then fall back. Reading the failure here skips the doomed frame
+            # entirely: same outcome for the caller, one fewer entry in ST22 per
+            # connection attempt.
+            return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         if self._transport.drain_queued_close():  # type: ignore[attr-defined]
-            # E=163: auth passed but RFCPING closed the WebSocket (on-premise ICM
-            # constraint — any non-empty ngrfc LOGON body causes TCP drop, so empty
-            # body is required, which always yields E=163 from the WP).
+            # Auth passed and the server then closed the WebSocket. A non-empty
+            # ngrfc LOGON body leaves the server silent indefinitely; an empty one
+            # is answered, but the answer reports CALL_FUNCTION_RECEIVE_ERROR
+            # because the embedded call receives no data. Neither body is right,
+            # and what a correct one looks like is still open (issue #14).
             # Fall back to classic TCP RFC transparently.
-            return self._ws_e163_classic_fallback(func_name, desc, params, attrs_ws)
+            return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
-        # Cache the descriptor now that we know sys_id.
-        self._cache.put(attrs_ws.sys_id, desc)
+        # Cache the descriptor now that the attributes are on the session.
+        ws_key = self._metadata_cache_key
+        if ws_key:
+            self._cache.put(ws_key, desc)
 
         # Step 2: INVOKE + func_name with params (pcap-verified Q-marker format, frame 233).
         invoke_key = self._next_ws_invoke_key()  # counter=2 for first post-logon invoke
@@ -3002,8 +3605,8 @@ class Connection:
             raise CommunicationError(str(exc), original_exception=exc) from exc
         except WebSocketError:
             # WS close arrived after step 1 (different TCP segment than LOGON response).
-            # Same E=163 root cause; fall back to classic RFC.
-            return self._ws_e163_classic_fallback(func_name, desc, params, attrs_ws)
+            # Same root cause; fall back to classic RFC.
+            return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         result = _ws_parse_invoke_response(invoke_resp, desc)
         return _convert_date_time_fields(result, desc)
 
@@ -3069,12 +3672,10 @@ class Connection:
                         dict(params),
                         session_key=self._next_ws_invoke_key(),
                     )
-                    try:
+                    with _fail_closed(self._session, func_name):
                         self._transport.send_message(frame)
                         response = self._transport.recv_message()
-                    except (OSError, EOFError) as exc:
-                        raise CommunicationError(str(exc), original_exception=exc) from exc
-                    result = _ws_parse_invoke_response(response, desc)
+                        result = _ws_parse_invoke_response(response, desc)
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
                     call_params = _filter_call_params(
@@ -3088,13 +3689,12 @@ class Connection:
                     dm_names = dm_table_ids(desc, call_params)
                     handle = self._session.handle or b"        "
                     request = self._build_invoke_frame(handle, request_tlv)
-                    try:
+                    with _fail_closed(self._session, func_name):
                         self._send_invoke_frame(request)
-                        response = self._transport.recv_message()
-                    except (OSError, EOFError) as exc:
-                        raise CommunicationError(str(exc), original_exception=exc) from exc
-                    tlv_response = _strip_gw_header(response)
-                    result = parse_invoke_response(tlv_response, desc, dm_names)
+                        tlv_response = _join_response_frames(
+                            self._transport.recv_message, func_name
+                        )
+                        result = parse_invoke_response(tlv_response, desc, dm_names)
 
                 result = _convert_date_time_fields(result, desc)
                 return result
@@ -3788,14 +4388,21 @@ def connect(
     ashost: str,
     sysnr: str | int,
     client: str,
-    user: str,
-    passwd: str,
+    user: str | None = None,
+    passwd: str | None = None,
     *,
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
     timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
+    metadata_cache: MetadataCache | None = None,
+    metadata_cache_key: str | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
+    msserv: int | str | None = None,
+    ms_http_port: int | str | None = None,
+    ms_use_http: bool = True,
     sysid: str | None = None,
     group: str | None = None,
     wshost: str | None = None,
@@ -3841,6 +4448,14 @@ def connect(
     ISO code is converted before the logon frame is built, matching the SDK's LANG
     option.
 
+    ``user`` and ``passwd`` may both be omitted. That is read as a deliberate
+    anonymous attempt and the logon frame goes out without the user and password
+    records — some systems answer a small set of function modules that way, while a
+    hardened one refuses below the RFC layer and raises ``CommunicationError``.
+    Supplying exactly one of the two raises ``ValueError``, since that is a missing
+    setting rather than a request to connect anonymously. SNC connections are
+    unaffected: ``snc_lib`` carries its own credentials.
+
     ``strict_params`` controls what ``call()`` does with a keyword argument the
     function interface does not declare. The default (False) drops it and logs a
     warning, which is what callers porting from pyrfc expect when they pass a
@@ -3848,32 +4463,51 @@ def connect(
     instead — worth doing when a dropped argument would change the result, since the
     server has no way to tell you an argument never arrived.
 
-    The SAProuter and message-server wire bytes are [ASSUMED] (router.py) and
-    gated behind the plan 03-03 blocking human-verify checkpoint. ``passwd``,
+    The SAProuter and message-server wire formats were live-verified after this
+    docstring first called them unverified: the NI_ROUTE payload is byte-exact
+    against a capture (``tests/golden/router/ni_route_payload.bin``), a router
+    that accepts a route answers ``NI_PONG`` and one that refuses answers
+    ``NI_RTERR``, and the message server answers the binary attach and
+    server-list frames as ``MSG_SERVER``. What remains unconfirmed is narrower and
+    sits in ``router.py``: some field boundaries inside a server-list entry, and
+    whether the entry count is carried in the header or only implied by the
+    payload length. ``passwd``,
     ``ws_proxy_pass``, ``snc_lib``, ``snc_partnername`` and ``snc_myname`` are
     never logged or echoed into any log message or exception string (threats
     T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
-    # Imported lazily so the direct-TCP facade has no hard dependency on the
-    # [ASSUMED] alternate-transport layer (router.py, plan 03-03 Task 2).
+    # Imported lazily so the direct-TCP facade carries no hard dependency on the
+    # alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
-        MessageServerClient,
-        build_ni_route,
+        open_route,
+        open_route_async,
         parse_route_string,
     )
 
+    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
+
     if mshost is not None:
         # Message-server group logon: resolve to a concrete (ashost, sysnr).
-        ms_transport = connect_tcp(mshost, _ms_port(sysid), timeout=timeout)
-        try:
-            resolved_host, resolved_sysnr = MessageServerClient(ms_transport).resolve(
-                group or "PUBLIC"
-            )
-        finally:
-            ms_transport.close()
-        ashost, sysnr = resolved_host, resolved_sysnr
+        ashost, sysnr = _resolve_via_message_server(
+            mshost,
+            group=group,
+            sysid=sysid,
+            msserv=msserv,
+            ms_http_port=ms_http_port,
+            use_http=ms_use_http,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
 
-    port = (4800 if snc_lib is not None else 3300) + int(sysnr)
+    # Gateway port. Confirmed by SAP's "TCP/IP Ports of All SAP Products":
+    #   Gateway          sapgw<NN>    3300   range 3300-3399   33<NN>
+    #   Gateway secured  sapgw<NN>s   4800   range 4800-4899   48<NN>
+    # <NN> is the application server's own instance number here, unlike the
+    # message server. Also confirmed live: the A4H message server reports
+    # RFC=3300 and RFCS=4800 for a sysnr-00 application server.
+    sysnr = _validate_sysnr(sysnr)
+    port = (4800 if snc_lib is not None else 3300) + sysnr
 
     # ------------------------------------------------------------------ #
     # Transport routing (Phase 7): wRFC first, then SNC, then plain TCP.  #
@@ -3902,7 +4536,12 @@ def connect(
             verify=ws_tls_verify,
             timeout=timeout,
         )
-        conn = Connection(transport, strict_params=strict_params)  # type: ignore[arg-type]
+        conn = Connection(
+            transport,  # type: ignore[arg-type]
+            strict_params=strict_params,
+            metadata_cache=metadata_cache,
+            metadata_cache_key=metadata_cache_key,
+        )
     elif snc_lib is not None:
         # SNC (SEC-02/03/04/06, D-13): SAP protocol order requires the NI
         # version exchange to complete on the plain channel BEFORE the GSS
@@ -3913,7 +4552,13 @@ def connect(
         # straight through — never placed into a log or an exception string.
         from saprfclib.snc import SncTransport
 
-        _inner = connect_tcp(ashost, port, timeout=timeout)
+        _inner = connect_tcp(
+            ashost,
+            port,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
 
         # Step 1: NI version exchange on the plain inner transport.
         _snc_sess = Session()
@@ -3937,7 +4582,12 @@ def connect(
 
         # Step 3: Connection with the pre-versioned session so _handshake()
         # resumes from NI_VERSIONED (skips the NI leg, starts at GW connect).
-        conn = Connection(transport, strict_params=strict_params)  # type: ignore[arg-type]
+        conn = Connection(
+            transport,  # type: ignore[arg-type]
+            strict_params=strict_params,
+            metadata_cache=metadata_cache,
+            metadata_cache_key=metadata_cache_key,
+        )
         conn._session = _snc_sess
         conn._snc_mode = True
     else:
@@ -3954,6 +4604,10 @@ def connect(
         _ashost = ashost
         _port = port
         _timeout = timeout
+        _connect_timeout = connect_timeout
+        _read_timeout = read_timeout
+        _metadata_cache = metadata_cache
+        _metadata_cache_key = metadata_cache_key
         _saprouter = saprouter
         _client = client
         _user = user
@@ -3970,11 +4624,17 @@ def connect(
             # Use connect_tcp (sync, patchable in tests) wrapped in a thin async shim.
             # connect_async() uses real asyncio open_connection for non-blocking I/O.
             # This keeps the existing test suite (which patches connect_tcp) green (D-07).
-            sync_t = connect_tcp(_ashost, _port, timeout=_timeout)
+            sync_t = connect_tcp(
+                _ashost,
+                _port,
+                timeout=_timeout,
+                connect_timeout=_connect_timeout,
+                read_timeout=_read_timeout,
+            )
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
             if _saprouter is not None:
                 hops = parse_route_string(_saprouter)
-                await at.send_message(build_ni_route(hops, _ashost, str(_port)))
+                await open_route_async(at, hops, _ashost, str(_port))
             ac = AsyncConnection(
                 at,  # type: ignore[arg-type]
                 max_retries=_max_retries,
@@ -3982,6 +4642,8 @@ def connect(
                 tid_store=_tid_store,
                 unit_store=_unit_store,
                 strict_params=_strict,
+                metadata_cache=_metadata_cache,
+                metadata_cache_key=_metadata_cache_key,
             )
             await ac._handshake(
                 client=_client,
@@ -4005,7 +4667,7 @@ def connect(
         # Wire format confirmed from live capture 2026-06-27.
         # NOTE: only reached by SNC/wRFC branches (classic path returns above).
         hops = parse_route_string(saprouter)
-        transport.send_message(build_ni_route(hops, ashost, str(port)))
+        open_route(transport, hops, ashost, str(port))
 
     conn._handshake(
         client=client, user=user, passwd=passwd, ashost=ashost, sysnr=int(sysnr), lang=lang
@@ -4013,13 +4675,171 @@ def connect(
     return conn
 
 
-def _ms_port(sysid: str | None) -> int:
-    """Message-server port: 3600 + sysnr is the conventional sapms<SID> port.
+# Message-server ports. Source: SAP's "TCP/IP Ports of All SAP Products"
+# (help.sap.com, Security guide), cross-checked against a live scan of A4H.
+#
+# There is deliberately NO numeric default, and the documentation is why.
+#
+# The table gives the message server TWO different rows:
+#
+#   Application Server ABAP   Message server   sapmsSID    3600   36<NN>
+#       "Relevant only for systems that have been installed prior to
+#        SAP NetWeaver 7.0 with a central instance (CI)."
+#
+#   SAP Central Services (SCS)   Message server port   sapms<SID>   9310
+#       range 0-65535, formula: None
+#       "Configure the message server port with profile parameter rdisp/msserv."
+#
+# So the 36<NN> formula applies only to pre-NetWeaver-7.0 central-instance
+# systems. On anything modern — an ASCS/SCS layout, which is every current
+# install — the port is whatever rdisp/msserv says, over the whole port range,
+# with a documented default of 9310. There is no formula to apply.
+#
+# That makes any numeric default wrong in a different way for each layout: 3600
+# for a legacy CI, 9310 for a default SCS, and on the A4H test system 3601 (a
+# 36<NN> port with NN=01, since sapstartsrv answers on both 50013 and 50113 —
+# 5<NN>13 — so instances 00 and 01 both exist and the message server is on 01).
+# A wrong port is not a failure the caller can interpret, so nothing is guessed.
+#
+# The instance number is instead read from where the documentation says it lives:
+# the sapms<SID> entry in /etc/services. The same table notes "You can reassign
+# service names to an arbitrary value after installation in /etc/services", which
+# makes that file the client-side source of record rather than a convention. When
+# it is absent, the caller is asked for `msserv`.
+#
+# The HTTP interface is 81<NN> (range 8100-8199, profile ms/http_port_<n>) and is
+# documented as "Not active by default" — which is why the HTTP resolver reports
+# its absence as a configuration fact rather than an error.
+_MS_BINARY_BASE = 3600
+_MS_HTTP_BASE = 8100
 
-    [ASSUMED] message-server port derivation (RESEARCH A2) — gated behind the
-    plan 03-03 checkpoint. Defaults to 3600 when no system number is encoded.
+
+def _resolve_via_message_server(
+    mshost: str,
+    *,
+    group: str | None,
+    sysid: str | None,
+    msserv: int | str | None,
+    ms_http_port: int | str | None,
+    use_http: bool,
+    timeout: float | None,
+    connect_timeout: float | None,
+    read_timeout: float | None,
+) -> tuple[str, int]:
+    """Resolve a logon group to a concrete (ashost, sysnr).
+
+    Prefers the message server's HTTP interface, which is line-oriented and was
+    confirmed against a live server (tests/golden/router/ms_http_logon_v12.txt).
+    The binary protocol in router.py is still built from a partial capture: on a
+    live message server it accepts the connection and then answers nothing, so
+    every frame it sends is unverified. Letting it choose silently would mean an
+    unverified path deciding which application server the caller talks to.
+
+    Pass ``ms_use_http=False`` to force the binary path anyway.
     """
-    return 3600
+    from saprfclib.router import MessageServerClient, resolve_rfc_server_http
+
+    if use_http:
+        http_port = _ms_http_port(sysid, ms_http_port if ms_http_port is not None else msserv)
+        host, rfc_port = resolve_rfc_server_http(mshost, http_port, group=group)
+        # The list gives an RFC port; the rest of connect() wants a system number.
+        # 3300 + sysnr is the confirmed gateway convention. Anything else is a
+        # non-standard port that cannot be expressed as a system number, so say so
+        # rather than truncating it into a wrong one.
+        sysnr = rfc_port - 3300
+        if not 0 <= sysnr <= 99:
+            raise ValueError(
+                f"message server returned RFC port {rfc_port} for group "
+                f"{group or 'PUBLIC'}, which is not 3300 + a system number. Connect to "
+                f"{host}:{rfc_port} directly with ashost/sysnr instead."
+            )
+        _logger.debug(
+            "message server %s resolved group %s to %s (sysnr %02d)",
+            mshost,
+            group or "PUBLIC",
+            host,
+            sysnr,
+        )
+        return host, sysnr
+
+    ms_transport = connect_tcp(
+        mshost,
+        _ms_port(sysid, msserv),
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
+    try:
+        return MessageServerClient(ms_transport).resolve(group or "PUBLIC")
+    finally:
+        ms_transport.close()
+
+
+def _ms_instance_from_services(sysid: str | None) -> int | None:
+    """Recover the message server's instance number from ``sapms<SID>``.
+
+    This is the mechanism SAP tooling uses to find the message server, and it is
+    the only client-side source that states the instance number rather than
+    assuming it. Returns None when the entry is absent, which is common on hosts
+    that were never configured as SAP clients.
+    """
+    if not sysid:
+        return None
+    try:
+        port = _socket_module.getservbyname(f"sapms{sysid.upper()}")
+    except OSError:
+        return None
+    instance = port - _MS_BINARY_BASE
+    return instance if 0 <= instance <= 99 else None
+
+
+def _resolve_ms_service(msserv: int | str | None) -> int | None:
+    """Turn an explicit port or service name into a port number; None if unset."""
+    if msserv is None:
+        return None
+    if isinstance(msserv, int):
+        return msserv
+    text = msserv.strip()
+    if text.isdigit():
+        return int(text)
+    try:
+        return _socket_module.getservbyname(text)
+    except OSError:
+        # A name /etc/services does not know is a configuration mistake, not
+        # something to paper over by connecting somewhere else.
+        raise ValueError(
+            f"message-server service {msserv!r} is not in /etc/services; give the "
+            f"port number instead (for example msserv=3601)"
+        ) from None
+
+
+def _ms_port_or_raise(sysid: str | None, msserv: int | str | None, base: int, what: str) -> int:
+    """Resolve a message-server port, or explain why it cannot be resolved."""
+    explicit = _resolve_ms_service(msserv)
+    if explicit is not None:
+        return explicit
+    instance = _ms_instance_from_services(sysid)
+    if instance is not None:
+        return base + instance
+    raise ValueError(
+        f"cannot determine the {what} message-server port: no msserv was given and "
+        f"there is no sapms{(sysid or '<SID>').upper()} entry in /etc/services. The "
+        f"port is {base} + the message server's instance number, which is NOT the "
+        f"application server's system number and cannot be derived from it — on a "
+        f"system with a separate ASCS they differ. Pass msserv explicitly (a port "
+        f"such as msserv={base + 1}, or the service name msserv='sapms"
+        f"{(sysid or 'SID').upper()}')."
+    )
+
+
+def _ms_port(sysid: str | None, msserv: int | str | None = None) -> int:
+    """Binary message-server port (36<nn>, nn = message-server instance number)."""
+    return _ms_port_or_raise(sysid, msserv, _MS_BINARY_BASE, "binary")
+
+
+def _ms_http_port(sysid: str | None = None, msserv: int | str | None = None) -> int:
+    """HTTP message-server port (81<nn>, nn = message-server instance number)."""
+    return _ms_port_or_raise(sysid, msserv, _MS_HTTP_BASE, "HTTP")
 
 
 # ---------------------------------------------------------------------------
@@ -4053,14 +4873,22 @@ class AsyncConnection:
         tid_store: TidStore | None = None,
         unit_store: UnitStore | None = None,
         strict_params: bool = False,
+        metadata_cache: MetadataCache | None = None,
+        metadata_cache_key: str | None = None,
     ) -> None:
         self._transport = transport
         self._session = Session()
         self._lock = asyncio.Lock()
+        # Server-reported duration of the most recent call (tag 0x0667, seconds),
+        # handed to CallStats by call(). None until a response carries one.
+        self._last_server_duration_s: float | None = None
         # Unknown-parameter policy (issue #24) - see Connection.__init__.
         self._strict_params = strict_params
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
-        self._cache = MetadataCache()
+        self.metrics = ConnectionMetrics()
+        # Shareable across connections to one system — see Connection.__init__.
+        self._cache = metadata_cache if metadata_cache is not None else MetadataCache()
+        self._anon_cache_key: str | None = metadata_cache_key
         self._struct_desc_cache: dict[str, TypeDesc] = {}
         # Retry + durable-store attributes (D-01/D-02/D-03/D-03b)
         self._max_retries = max_retries  # max auto-retry attempts (D-02)
@@ -4076,8 +4904,8 @@ class AsyncConnection:
         self,
         *,
         client: str,
-        user: str,
-        passwd: str,
+        user: str | None,
+        passwd: str | None,
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
         lang: str = _DEFAULT_LANG,
@@ -4310,6 +5138,32 @@ class AsyncConnection:
     # ------------------------------------------------------------------ #
 
     @property
+    def _metadata_cache_key(self) -> str | None:
+        """Key this connection's cached descriptors live under; None to not cache.
+
+        Normally the system ID, so every connection to the same system shares one
+        set of descriptors. But the logon response does not always carry one: a
+        7.52 system answers with no 0x0450/0x0452/0x0453 at all, leaving sys_id
+        empty. Caching under "" would file every such system in one bucket, and a
+        process holding connections to two of them would be served the wrong
+        system's descriptor for a same-named function module — silently, since a
+        FunctionDesc carries no system of origin.
+
+        So an unidentified system falls back to a token unique to this connection.
+        Repeat calls on the connection still skip the round-trip; nothing is
+        shared between systems that never identified themselves.
+        """
+        sys_id = self.sys_id
+        if sys_id is None:
+            return None  # not READY — nothing to key on yet
+        if sys_id:
+            return sys_id
+        if self._anon_cache_key is None:
+            # NUL prefix: a real SID is 3 alphanumerics, so this cannot collide.
+            self._anon_cache_key = f"\x00anon-{uuid.uuid4().hex}"
+        return self._anon_cache_key
+
+    @property
     def sys_id(self) -> str | None:
         """System ID from negotiated ConnectionAttributes; None if not READY."""
         attrs = self._session.attributes
@@ -4329,20 +5183,51 @@ class AsyncConnection:
         remain on the sync Connection path). CancelledError propagates (Pitfall 7).
         Credentials are never logged (T-09-03-CRED).
         """
+        started = time.perf_counter()
+        sent_before = getattr(self._transport, "bytes_sent", 0)
+        received_before = getattr(self._transport, "bytes_received", 0)
+        failed = True
+        try:
+            result = await self._call_instrumented(func_name, params)
+            failed = False
+            return result
+        finally:
+            # Recorded on the failure path too: a metrics view that counts only
+            # successes hides exactly the trend worth alerting on.
+            self.metrics.record(
+                CallStats(
+                    func_name=func_name,
+                    duration_s=time.perf_counter() - started,
+                    request_bytes=getattr(self._transport, "bytes_sent", 0) - sent_before,
+                    response_bytes=(
+                        getattr(self._transport, "bytes_received", 0) - received_before
+                    ),
+                    failed=failed,
+                    server_duration_s=self._last_server_duration_s,
+                )
+            )
+
+    async def _call_instrumented(self, func_name: str, params: dict[str, object]) -> dict[str, Any]:
+        """The call itself; :meth:`call` wraps it to time and count."""
+        # Cleared up front, not merely overwritten on success. A call that fails
+        # before reading a response must not inherit the previous call's timing
+        # and report it as its own -- that is a wrong number wearing the shape of
+        # a right one, which is worse in a metrics series than a gap.
+        self._last_server_duration_s = None
         async with self._lock:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
                 # Metadata: cache hit or async bootstrap (META-03/D-21).
-                sys_id = self.sys_id
-                desc = self._cache.get(sys_id, func_name) if sys_id is not None else None
+                cache_key = self._metadata_cache_key
+                desc = self._cache.get(cache_key, func_name) if cache_key is not None else None
                 if desc is None:
                     try:
                         desc = await self._call_bootstrap(func_name)
                     except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                         raise CommunicationError(str(exc), original_exception=exc) from exc
-                    if sys_id is not None:
-                        self._cache.put(sys_id, desc)
+                    if cache_key is not None:
+                        self._cache.put(cache_key, desc)
 
                 # Classic GW-framed invoke.
                 call_params = _filter_call_params(
@@ -4356,14 +5241,16 @@ class AsyncConnection:
                 dm_names = dm_table_ids(desc, call_params)
                 handle = self._session.handle or b"        "
                 request = Connection._build_invoke_frame(handle, request_tlv)
-                try:
+                with _fail_closed(self._session, func_name):
                     await self._transport.send_message(request)
-                    response = await self._transport.recv_message()
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-
-                tlv_response = _strip_gw_header(response)
-                result = parse_invoke_response(tlv_response, desc, dm_names)
+                    tlv_response = await _join_response_frames_async(
+                        self._transport.recv_message, func_name
+                    )
+                    # Read the server's timing before parsing, so a call that
+                    # raises an ABAP error still reports how long the server spent
+                    # on it -- that is often the interesting case.
+                    self._last_server_duration_s = extract_server_duration(tlv_response)
+                    result = parse_invoke_response(tlv_response, desc, dm_names)
                 result = _convert_date_time_fields(result, desc)
                 return result
             finally:
@@ -4382,14 +5269,16 @@ class AsyncConnection:
             try:
                 handle = self._session.handle or b"        "
                 frame = Connection._build_invoke_frame(handle, Connection._rfcping_request_tlv())
-                try:
+                with _fail_closed(self._session, "RFCPING"):
                     await self._transport.send_message(frame)
                     resp = await self._transport.recv_message()
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
                 return Connection._rfcping_ok(resp)
             finally:
-                self._session.mark_ready()
+                # Guarded: a failed ping leaves the session BROKEN, and mark_ready
+                # refuses any state but IN_CALL. Without the guard the finally
+                # would raise over the top of the real error and hide it.
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     async def close(self) -> None:
         """Close the async transport (TRANS-06 parity)."""
@@ -4852,12 +5741,15 @@ async def connect_async(
     ashost: str,
     sysnr: str | int,
     client: str,
-    user: str,
-    passwd: str,
+    user: str | None = None,
+    passwd: str | None = None,
     *,
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
     timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    metadata_cache: MetadataCache | None = None,
+    metadata_cache_key: str | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
     sysid: str | None = None,
@@ -4892,6 +5784,8 @@ async def connect_async(
     saprfclib.connect(): False (default) drops undeclared keyword arguments with a
     warning, True raises.
     """
+    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
+
     if snc_lib is not None or wshost is not None:
         raise NotImplementedError(
             "snc_lib/wshost async connections are not supported in Phase 9 — "
@@ -4900,14 +5794,19 @@ async def connect_async(
 
     from saprfclib.router import (
         MessageServerClient,
-        build_ni_route,
+        open_route_async,
         parse_route_string,
     )
 
     if mshost is not None:
         # Message-server resolve: sync I/O; run off the event loop via to_thread.
         def _ms_resolve() -> tuple[str, int]:
-            ms_transport = connect_tcp(mshost, _ms_port(sysid), timeout=timeout)
+            ms_transport = connect_tcp(
+                mshost,
+                _ms_port(sysid),
+                timeout=timeout,
+                connect_timeout=connect_timeout,
+            )
             try:
                 return MessageServerClient(ms_transport).resolve(group or "PUBLIC")
             finally:
@@ -4916,11 +5815,13 @@ async def connect_async(
         ashost, sysnr = await asyncio.to_thread(_ms_resolve)
 
     port = 3300 + int(sysnr)
-    transport = await connect_tcp_async(ashost, port, timeout=timeout)
+    transport = await connect_tcp_async(
+        ashost, port, timeout=timeout, connect_timeout=connect_timeout
+    )
 
     if saprouter is not None:
         hops = parse_route_string(saprouter)
-        await transport.send_message(build_ni_route(hops, ashost, str(port)))
+        await open_route_async(transport, hops, ashost, str(port))
 
     conn = AsyncConnection(
         transport,
@@ -4929,6 +5830,8 @@ async def connect_async(
         tid_store=tid_store,
         unit_store=unit_store,
         strict_params=strict_params,
+        metadata_cache=metadata_cache,
+        metadata_cache_key=metadata_cache_key,
     )
     await conn._handshake(
         client=client,

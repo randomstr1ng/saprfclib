@@ -661,7 +661,7 @@ def test_response_without_a_return_code_raises() -> None:
     """
     from saprfclib.exceptions import CommunicationError
 
-    with pytest.raises(CommunicationError, match="no return-code TLV"):
+    with pytest.raises(CommunicationError, match="empty frame"):
         parse_invoke_response(b"", _read_table_desc())
 
 
@@ -1313,3 +1313,341 @@ def test_decode_side_also_raises_the_typed_error() -> None:
     field = FieldDesc("ROWS", RFCTYPE_TABLE, 0, 0, 0, 0, 0, direction=RFC_TABLES)
     with pytest.raises(IncompleteDescriptorError, match="ROWS"):
         decode(RFCTYPE_TABLE, b"\x00" * 8, field)
+
+
+def test_multirow_xml_table_decodes_every_item() -> None:
+    """Ten rows in one XML document — the case the single-row capture could not show.
+
+    Source: tests/golden/framing/basxml_et_data_multirow_response.bin, a T100 read
+    cross-checked against the binary path.
+    """
+    body = (GOLDEN / "basxml_et_data_multirow_response.bin").read_bytes()[80:]
+    result = parse_invoke_response(body, _basxml_desc(), None)
+    rows = result["ET_DATA"]
+    assert len(rows) == 10
+    assert all(list(r) == ["LINE"] for r in rows)
+    assert rows[0]["LINE"].startswith("E|FL|001|")
+
+
+def test_xml_fragments_do_not_split_on_item_boundaries() -> None:
+    """Fragment boundaries are the server's choice, so joining first is required.
+
+    Here the document arrives as 9 + 773 bytes: the first fragment holds only the
+    opening tag, the second holds all ten items.
+    """
+    from saprfclib.invoke import _extract_name_value_pairs
+
+    body = (GOLDEN / "basxml_et_data_multirow_response.bin").read_bytes()[80:]
+    fragments = [val for tag, val in _walk_tlv(body) if tag == 0x3C05]
+    assert len(fragments) == 2
+    assert fragments[0] == b"<ET_DATA>"  # opening tag alone
+    assert fragments[1].count(b"<item>") == 10
+
+    out: dict[str, bytes] = {}
+    _extract_name_value_pairs(body, None, out)
+    assert out["ET_DATA"].count(b"<item>") == 10
+
+
+def test_xml_rows_are_not_blank_padded() -> None:
+    """The XML form omits the DDIC-width padding the binary form applies.
+
+    Verified live: the identical query returns ARBGB as 'FL' here and as 'FL' plus
+    eighteen spaces through DATA. Callers splitting the delimited row get trimmed
+    values on this path and padded values on the other.
+    """
+    body = (GOLDEN / "basxml_et_data_multirow_response.bin").read_bytes()[80:]
+    rows = parse_invoke_response(body, _basxml_desc(), None)["ET_DATA"]
+    columns = rows[0]["LINE"].split("|")
+    assert columns[1] == "FL"  # not 'FL' + 18 spaces
+    assert all(c == c.rstrip() for c in columns[:3])
+
+
+# --------------------------------------------------------------------------- #
+# CPIC-layer refusal and anonymous connections
+# --------------------------------------------------------------------------- #
+
+
+def test_cpic_error_frame_is_decoded_not_reported_as_garbage() -> None:
+    """A refusal below the RFC layer arrives in EBCDIC, not TLV.
+
+    Source: tests/golden/framing/cpic_logon_error_response.bin — the reply to an
+    RFC_PING sent with no logon frame at all on kernel 793.
+    """
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    body = (GOLDEN / "cpic_logon_error_response.bin").read_bytes()[80:]
+    with pytest.raises(CommunicationError, match="below the RFC layer") as excinfo:
+        raise_for_rfc_error(body)
+    assert "error during logon" in str(excinfo.value)
+
+
+def test_cpic_detector_rejects_genuine_tlv_frames() -> None:
+    """No false positives: a real response must never read as an EBCDIC error."""
+    from saprfclib.invoke import parse_cpic_error
+
+    for name in (
+        "rfcping_response",
+        "rfc_read_table_response",
+        "gfi_fu_not_found_response",
+        "server_response",
+        "basxml_et_data_multirow_response",
+    ):
+        raw = (GOLDEN / f"{name}.bin").read_bytes()
+        if len(raw) > 4 and struct.unpack_from(">I", raw, 0)[0] == len(raw) - 4:
+            raw = raw[4:]
+        assert parse_cpic_error(raw[80:]) is None, name
+
+
+def test_cpic_padding_is_ascii_not_ebcdic() -> None:
+    """The trailing padding is 0x20, so it must be stripped before decoding.
+
+    Left in place it drags the printable ratio below the threshold and the frame is
+    rejected as non-text — the detector would miss the very case it exists for.
+    """
+    body = (GOLDEN / "cpic_logon_error_response.bin").read_bytes()[80:]
+    assert body.endswith(b"\x20")
+    assert b"\x40" in body[:16]  # EBCDIC spaces inside the message itself
+
+
+def test_logon_omits_credential_records_when_none_given() -> None:
+    """Anonymous means the records are absent, not empty.
+
+    An empty password is still a password attempt to the server, and repeated
+    attempts against a real account name count towards lockout. Omitting the fields
+    cannot.
+    """
+    from saprfclib.connection import Connection
+
+    tlv = Connection._build_logon_request(client="001", user=None, passwd=None, seed=1)
+    tags = {tag for tag, _ in _walk_tlv(tlv)}
+    assert 0x0111 not in tags  # user
+    assert 0x0117 not in tags  # password
+    assert 0x0114 in tags  # client is still sent
+
+
+def test_logon_still_carries_credentials_when_given() -> None:
+    from saprfclib.connection import Connection
+
+    tlv = Connection._build_logon_request(client="001", user="DEVELOPER", passwd="secret", seed=1)
+    tags = {tag for tag, _ in _walk_tlv(tlv)}
+    assert 0x0111 in tags and 0x0117 in tags
+
+
+def test_partial_credentials_are_rejected() -> None:
+    """One of the two missing is a mistake, not a request to go anonymous."""
+    from saprfclib.connection import _resolve_credentials
+
+    with pytest.raises(ValueError, match="passwd is missing"):
+        _resolve_credentials("DEVELOPER", None, snc_lib=None, ashost="h")
+    with pytest.raises(ValueError, match="user is missing"):
+        _resolve_credentials(None, "secret", snc_lib=None, ashost="h")
+
+
+def test_no_credentials_is_anonymous_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """Both absent is allowed, and said out loud so it is never a silent surprise."""
+    from saprfclib.connection import _resolve_credentials
+
+    with caplog.at_level(logging.WARNING, logger="saprfclib.connection"):
+        assert _resolve_credentials(None, None, snc_lib=None, ashost="h") == (None, None)
+    assert any("without credentials" in r.getMessage() for r in caplog.records)
+
+
+def test_snc_connections_are_left_alone() -> None:
+    """SNC carries its own credentials, so the policy must not touch them."""
+    from saprfclib.connection import _resolve_credentials
+
+    assert _resolve_credentials(None, None, snc_lib="/x/libsnc.so", ashost="h") == (None, None)
+    assert _resolve_credentials("U", None, snc_lib="/x/libsnc.so", ashost="h") == ("U", None)
+
+
+def test_credentials_are_optional_on_both_connect_functions() -> None:
+    import inspect
+
+    from saprfclib.connection import connect, connect_async
+
+    for fn in (connect, connect_async):
+        params = inspect.signature(fn).parameters
+        assert params["user"].default is None
+        assert params["passwd"].default is None
+
+
+# --------------------------------------------------------------------------- #
+# Release-independent error decoding (kernel 7.52 vs 793)
+# --------------------------------------------------------------------------- #
+
+
+def test_752_signon_refusal_yields_key_and_message() -> None:
+    """The 7.52 exception tags carry the same information under different numbers.
+
+    Source: tests/golden/framing/signon_incomplete_752_response.bin. The key sits in
+    0x0403 and the text in 0x0402; a reader that knows only the kernel 793 tags
+    (0x0401, no free text) reports key=None and message=None while "Logon data
+    incomplete." sits unread in the frame.
+    """
+    from saprfclib.exceptions import AbapApplicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    body = (GOLDEN / "signon_incomplete_752_response.bin").read_bytes()[80:]
+    with pytest.raises(AbapApplicationError) as excinfo:
+        raise_for_rfc_error(body)
+    exc = excinfo.value
+    assert exc.key == "CALL_FUNCTION_SIGNON_INCOMPL"
+    assert exc.message == "Logon data incomplete."
+    assert (exc.msg_class, exc.msg_type, exc.msg_number) == ("00", "X", "341")
+    assert exc.msg_v1 == "CALL_FUNCTION_SIGNON_INCOMPL"
+
+
+def test_793_exception_tags_still_decode_after_752_support() -> None:
+    """The 7.52 fallbacks must not displace the tags kernel 793 actually sends."""
+    from saprfclib.exceptions import AbapApplicationError
+    from saprfclib.invoke import raise_for_rfc_error
+
+    body = (GOLDEN / "gfi_fu_not_found_response.bin").read_bytes()[80:]
+    with pytest.raises(AbapApplicationError) as excinfo:
+        raise_for_rfc_error(body)
+    exc = excinfo.value
+    assert exc.key == "FU_NOT_FOUND"
+    assert (exc.msg_class, exc.msg_number) == ("FL", "046")
+    assert exc.msg_v1 == "RFC_ABAP_INSTALL_AND_RUN"
+
+
+def test_error_text_width_is_detected_per_value_not_assumed() -> None:
+    """Error text is single-byte on 7.52 and UTF-16LE on 793 — both must decode.
+
+    The two encodings are indistinguishable by "are all bytes < 0x80": ASCII text in
+    UTF-16LE passes that test too, and decoding it as latin-1 yields "L o g o n".
+    The interleaved NULs are what separates them.
+    """
+    from saprfclib.invoke import _decode_error_text
+
+    assert _decode_error_text(b"Logon data incomplete.") == "Logon data incomplete."
+    assert _decode_error_text("Logon data incomplete.".encode("utf-16-le")) == (
+        "Logon data incomplete."
+    )
+    assert _decode_error_text(b"") == ""
+    assert _decode_error_text(None) == ""
+    # Odd length cannot be UTF-16LE, so it decodes single-byte and the trailing
+    # NUL padding is stripped. The point is that it must not raise.
+    assert _decode_error_text(b"\x41\x42\x00") == "AB"
+
+
+def test_752_logon_response_carries_no_system_id_tags() -> None:
+    """Guards the premise of the per-connection cache key.
+
+    This release identifies itself through 0x0008/0x0006 rather than the
+    0x0450/0x0452/0x0453 the 793 logon response carries. If a future capture shows
+    0x0450 here after all, the cache-key fallback below is no longer needed.
+    """
+    body = (GOLDEN / "signon_incomplete_752_response.bin").read_bytes()[80:]
+    tags = {tag for tag, _ in _walk_tlv(body)}
+    assert 0x0450 not in tags
+    assert 0x0452 not in tags
+    assert 0x0453 not in tags
+    assert 0x0008 in tags
+
+
+# --------------------------------------------------------------------------- #
+# Metadata cache key
+# --------------------------------------------------------------------------- #
+
+
+class _FakeConn:
+    """Minimal connection-like for get_function_desc (D-21/META-01)."""
+
+    def __init__(self, cache_key: str | None, desc: FunctionDesc) -> None:
+        self._metadata_cache_key = cache_key
+        self._desc = desc
+        self.bootstrap_calls = 0
+
+    def _call_bootstrap(self, name: str) -> FunctionDesc:
+        self.bootstrap_calls += 1
+        return self._desc
+
+
+def _desc_named(name: str) -> FunctionDesc:
+    return FunctionDesc(name=name, parameters=[])
+
+
+def test_metadata_cache_reuses_descriptors_within_one_system() -> None:
+    from saprfclib.metadata import MetadataCache, get_function_desc
+
+    cache = MetadataCache()
+    conn = _FakeConn("A4H", _desc_named("Z_F"))
+    assert get_function_desc(conn, "Z_F", cache=cache).name == "Z_F"
+    assert get_function_desc(conn, "Z_F", cache=cache).name == "Z_F"
+    assert conn.bootstrap_calls == 1  # second call served from cache
+
+
+def test_unidentified_systems_do_not_share_a_cache_bucket() -> None:
+    """Two systems that send no system ID must not collide under "".
+
+    A FunctionDesc carries no record of the system it came from, so a collision here
+    hands one system's parameter list to the other silently — the caller sees a
+    plausible descriptor and a corrupt call, not an error.
+    """
+    from saprfclib.metadata import MetadataCache, get_function_desc
+
+    cache = MetadataCache()
+    a = _FakeConn("\x00anon-aaaa", _desc_named("Z_SAME"))
+    b = _FakeConn("\x00anon-bbbb", _desc_named("Z_SAME"))
+    got_a = get_function_desc(a, "Z_SAME", cache=cache)
+    got_b = get_function_desc(b, "Z_SAME", cache=cache)
+    assert b.bootstrap_calls == 1  # b did NOT read a's descriptor
+    assert got_a is a._desc
+    assert got_b is b._desc
+
+
+def test_empty_cache_key_disables_caching_rather_than_colliding() -> None:
+    """A connection-like with no usable key round-trips instead of sharing ""."""
+    from saprfclib.metadata import MetadataCache, get_function_desc
+
+    cache = MetadataCache()
+    conn = _FakeConn("", _desc_named("Z_F"))
+    get_function_desc(conn, "Z_F", cache=cache)
+    get_function_desc(conn, "Z_F", cache=cache)
+    assert conn.bootstrap_calls == 2
+
+
+def test_connection_cache_key_falls_back_when_the_system_sends_no_sys_id() -> None:
+    """Connection substitutes a per-connection token for an empty system ID."""
+    from saprfclib.connection import Connection
+
+    conn = Connection.__new__(Connection)
+    conn._anon_cache_key = None
+
+    # Not READY: nothing to key on, so nothing is cached.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Connection, "sys_id", property(lambda self: None))
+        assert conn._metadata_cache_key is None
+
+        mp.setattr(Connection, "sys_id", property(lambda self: "A4H"))
+        assert conn._metadata_cache_key == "A4H"
+
+    conn2 = Connection.__new__(Connection)
+    conn2._anon_cache_key = None
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Connection, "sys_id", property(lambda self: ""))
+        key1 = conn._metadata_cache_key
+        assert key1 and key1.startswith("\x00anon-")
+        assert conn._metadata_cache_key == key1  # stable across reads
+        assert conn2._metadata_cache_key != key1  # distinct per connection
+
+
+def test_empty_response_frame_is_not_reported_as_malformed() -> None:
+    """A header-only refusal has no body to be malformed.
+
+    Observed on 7.52: an unauthenticated call is answered with the 80-byte frame
+    header and nothing after it. Calling that "malformed" points the reader at the
+    parser instead of at the server that sent nothing.
+    """
+    from saprfclib.exceptions import CommunicationError
+
+    with pytest.raises(CommunicationError, match="empty frame") as excinfo:
+        parse_invoke_response(b"", FunctionDesc(name="RFC_PING", parameters=[]))
+    assert "malformed" not in str(excinfo.value)
+
+    # A non-empty body that genuinely lacks a return code still reports as malformed.
+    with pytest.raises(CommunicationError, match="malformed"):
+        body = struct.pack(">HH", 0x0016, 4) + b"1101" + struct.pack(">H", 0x0016)
+        parse_invoke_response(body, FunctionDesc(name="RFC_PING", parameters=[]))

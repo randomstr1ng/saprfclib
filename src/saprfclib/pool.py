@@ -34,8 +34,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -43,8 +45,116 @@ from typing import Any
 
 import saprfclib.connection as _connection
 from saprfclib.exceptions import PoolTimeoutError
+from saprfclib.metadata import MetadataCache
+from saprfclib.session import SessionState
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["ConnectionPool", "AsyncConnectionPool"]
+
+
+def _is_retired(conn: Any) -> bool:
+    """True if the connection has already retired itself as unusable.
+
+    A connection whose reply could not be read to its end marks its session
+    BROKEN, and every operation on it then refuses. The health check would find
+    that out anyway -- ping() raises and _ping_ok treats any exception as dead --
+    but only after building and sending a frame onto a stream already known to be
+    unreadable. Asking first makes the discard deliberate rather than incidental,
+    and keeps a real protocol fault out of the "failed its health check" log line,
+    where it would read as a network blip.
+    """
+    session = getattr(conn, "_session", None)
+    return bool(session is not None and session.state is SessionState.BROKEN)
+
+
+class PoolMetrics:
+    """Running totals for one pool, shaped for a metrics exporter.
+
+    Answers the question a connection-level metric cannot: when a call was slow,
+    was it slow *before it even had a connection*? A high mean wait with few
+    timeouts says the pool is undersized; timeouts say it is badly undersized;
+    a high discard rate says connections are dying between uses and the cost is
+    being paid on every acquire.
+
+    ``hits`` and ``creates`` are counted so the two ways of satisfying an acquire
+    stay distinguishable. A connection taken from idle that then fails its health
+    check is neither: it is a ``discard`` followed by whatever satisfies the retry,
+    because counting it as a hit would credit the pool for a connection nobody
+    could use.
+
+    Every counter is updated while the pool's Condition is held, so the totals are
+    consistent with the state they describe. Instrumentation is unconditional: the
+    counters are integer increments under a lock the pool was already holding, and
+    one ``monotonic()`` per acquire against the cost of opening or health-checking
+    a socket. A flag to switch that off would add a branch and a configuration
+    surface to save nothing measurable.
+    """
+
+    __slots__ = (
+        "acquires",
+        "timeouts",
+        "hits",
+        "creates",
+        "discards",
+        "total_wait_s",
+        "max_wait_s",
+    )
+
+    def __init__(self) -> None:
+        self.acquires = 0
+        self.timeouts = 0
+        self.hits = 0
+        self.creates = 0
+        self.discards = 0
+        self.total_wait_s = 0.0
+        self.max_wait_s = 0.0
+
+    def _record_wait(self, waited: float) -> None:
+        self.total_wait_s += waited
+        self.max_wait_s = max(self.max_wait_s, waited)
+
+    @property
+    def mean_wait_s(self) -> float:
+        """Mean time an acquire spent waiting, over acquires that finished.
+
+        Divides by acquires plus timeouts: a caller that waited the full deadline
+        and got nothing waited longest of all, and dropping it would make an
+        exhausted pool look faster than a healthy one.
+        """
+        attempts = self.acquires + self.timeouts
+        return self.total_wait_s / attempts if attempts else 0.0
+
+    @property
+    def hit_rate(self) -> float:
+        """Share of acquires served from an idle connection rather than a new one.
+
+        0.0 when nothing has been acquired yet, which is why ``acquires`` is
+        exported alongside it -- an unqualified 0.0 would read as "the pool never
+        reuses anything" rather than "nothing has happened".
+        """
+        return self.hits / self.acquires if self.acquires else 0.0
+
+    def as_dict(self) -> dict[str, float | int]:
+        """A flat mapping, shaped for a metrics exporter."""
+        return {
+            "acquires": self.acquires,
+            "timeouts": self.timeouts,
+            "hits": self.hits,
+            "creates": self.creates,
+            "discards": self.discards,
+            "total_wait_s": self.total_wait_s,
+            "mean_wait_s": self.mean_wait_s,
+            "max_wait_s": self.max_wait_s,
+            "hit_rate": self.hit_rate,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"PoolMetrics(acquires={self.acquires}, timeouts={self.timeouts}, "
+            f"hit_rate={self.hit_rate:.2f}, "
+            f"mean_wait={self.mean_wait_s * 1000:.1f}ms, discards={self.discards})"
+        )
 
 
 class ConnectionPool:
@@ -71,11 +181,20 @@ class ConnectionPool:
 
         self._params: dict[str, Any] = dict(params)
         self._max_size = max_size
+        # One descriptor cache for the whole pool. A FunctionDesc describes the
+        # system, not the socket it arrived over, so a per-connection cache made
+        # a pool of N connections pay N round-trips to learn each interface. The
+        # key hint covers the case where the system reports no sys_id: these
+        # connections are opened from identical parameters, so they reach the
+        # same system by construction and may share a bucket.
+        self._metadata_cache = MetadataCache()
+        self._metadata_cache_key = f"\x00pool-{uuid.uuid4().hex}"
         self._cv = threading.Condition()
         self._idle: deque[Any] = deque()
         self._in_use: set[Any] = set()
         self._created = 0
         self._closed = False
+        self.metrics = PoolMetrics()
 
         # Warm-up (POOL-01): pre-open min_size connections before any acquire.
         for _ in range(min_size):
@@ -92,7 +211,11 @@ class ConnectionPool:
         Dispatches through the ``saprfclib.connection`` module attribute (not a
         bound name) so the factory seam stays patchable for offline tests.
         """
-        return _connection.connect(**self._params)
+        return _connection.connect(
+            **self._params,
+            metadata_cache=self._metadata_cache,
+            metadata_cache_key=self._metadata_cache_key,
+        )
 
     def _ping_ok(self, conn: Any) -> bool:
         """True iff ``conn.ping()`` reports liveness. Any False/exception is dead.
@@ -100,17 +223,28 @@ class ConnectionPool:
         Called OUTSIDE the Condition lock (Pitfall 2). Treats both a falsy ping
         result and any raised exception as a dead connection.
         """
+        if _is_retired(conn):
+            _logger.debug("pool: discarding a connection whose session is BROKEN")
+            return False
         try:
             return bool(conn.ping())
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it"
+            # Discarding the connection is right; doing it without a word is not.
+            # A pool that quietly bins every connection it checks looks to the caller
+            # like a slow pool rather than a broken one.
+            _logger.debug(
+                "pool: discarding a connection that failed its health check (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     def _safe_close(self, conn: Any) -> None:
         """Close a connection, swallowing any error (close is best-effort)."""
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — close is best-effort
+            _logger.debug("pool: error while closing a discarded connection: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Public acquire/release surface
@@ -140,7 +274,8 @@ class ConnectionPool:
           2. Otherwise lazily grow toward max_size (POOL-01).
           3. Otherwise wait on the condition until a release or the deadline.
         """
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         discarded = 0
         with self._cv:
             while True:
@@ -159,11 +294,15 @@ class ConnectionPool:
                     finally:
                         self._cv.acquire()
                     if healthy:
+                        self.metrics.hits += 1
+                        self.metrics.acquires += 1
+                        self.metrics._record_wait(time.monotonic() - started)
                         return candidate
                     # Dead connection: discard + replace (POOL-03).
                     self._in_use.discard(candidate)
                     self._created -= 1
                     discarded += 1
+                    self.metrics.discards += 1
                     self._cv.release()
                     try:
                         self._safe_close(candidate)
@@ -176,6 +315,7 @@ class ConnectionPool:
                 # 2) Lazily grow toward max_size.
                 if self._created < self._max_size:
                     self._created += 1
+                    self.metrics.creates += 1
                     self._cv.release()
                     try:
                         fresh = self._open()
@@ -183,16 +323,24 @@ class ConnectionPool:
                         # Open failed: undo the reservation and surface the error.
                         self._cv.acquire()
                         self._created -= 1
+                        # The reservation is undone, so the create never happened.
+                        # Leaving it counted would show a pool steadily opening
+                        # connections that do not exist.
+                        self.metrics.creates -= 1
                         self._cv.notify()
                         raise
                     else:
                         self._cv.acquire()
                     self._in_use.add(fresh)
+                    self.metrics.acquires += 1
+                    self.metrics._record_wait(time.monotonic() - started)
                     return fresh
 
                 # 3) Exhausted: wait for a release or the deadline.
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self.metrics.timeouts += 1
+                    self.metrics._record_wait(time.monotonic() - started)
                     raise PoolTimeoutError(
                         waited=timeout,
                         discarded=discarded,
@@ -219,6 +367,47 @@ class ConnectionPool:
                 return
             self._idle.append(conn)
             self._cv.notify()
+
+    # ------------------------------------------------------------------ #
+    # Live gauges                                                        #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def in_use(self) -> int:
+        """Connections currently lent out."""
+        return len(self._in_use)
+
+    @property
+    def idle(self) -> int:
+        """Connections sitting in the pool, ready to lend."""
+        return len(self._idle)
+
+    @property
+    def size(self) -> int:
+        """Connections the pool currently owns, lent or idle."""
+        return self._created
+
+    @property
+    def max_size(self) -> int:
+        """The ceiling the pool will not grow past."""
+        return self._max_size
+
+    def stats(self) -> dict[str, float | int]:
+        """Counters and live gauges together, flat, for an exporter.
+
+        The gauges are read without the lock. They are a snapshot either way --
+        by the time a caller acts on them another thread may have acquired or
+        released -- so taking the lock would buy a consistency that cannot
+        survive the return statement, at the cost of contending with the acquire
+        path this is meant to observe.
+        """
+        return {
+            **self.metrics.as_dict(),
+            "in_use": self.in_use,
+            "idle": self.idle,
+            "size": self.size,
+            "max_size": self.max_size,
+        }
 
     def close(self) -> None:
         """Close every pooled connection (idle + in-use) and mark the pool closed.
@@ -294,6 +483,13 @@ class AsyncConnectionPool:
         self._idle: deque[Any] = deque()
         self._in_use: set[Any] = set()
         self._created = 0
+        self._metadata_cache = MetadataCache()
+        self._metadata_cache_key = f"\x00pool-{uuid.uuid4().hex}"
+        # Cumulative, not per-checkout: _checkout runs inside a wait_for, so a
+        # timeout unwinds it and any counter local to it is lost with the frame.
+        # acquire() snapshots this before and after to get the per-wait figure.
+        self._discarded_total = 0
+        self.metrics = PoolMetrics()
         self._closed = False
 
     # ------------------------------------------------------------------ #
@@ -325,7 +521,11 @@ class AsyncConnectionPool:
         bound name) so the factory seam stays patchable for offline tests —
         mirrors ConnectionPool._open().
         """
-        return await _connection.connect_async(**self._params)
+        return await _connection.connect_async(
+            **self._params,
+            metadata_cache=self._metadata_cache,
+            metadata_cache_key=self._metadata_cache_key,
+        )
 
     async def _ping_ok(self, conn: Any) -> bool:
         """True iff ``await conn.ping()`` reports liveness.  Called OUTSIDE the lock.
@@ -334,9 +534,17 @@ class AsyncConnectionPool:
         dead.  ``asyncio.CancelledError`` is ``BaseException`` and propagates
         without being caught (Pitfall 7 — never swallow cancellation).
         """
+        if _is_retired(conn):
+            _logger.debug("pool: discarding a connection whose session is BROKEN")
+            return False
         try:
             return bool(await conn.ping())
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it"
+            _logger.debug(
+                "pool: discarding a connection that failed its health check (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     async def _safe_close(self, conn: Any) -> None:
@@ -347,8 +555,8 @@ class AsyncConnectionPool:
         """
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — close is best-effort
+            _logger.debug("pool: error while closing a discarded connection: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Public acquire / release surface
@@ -363,17 +571,26 @@ class AsyncConnectionPool:
         exception (D-11, POOL-02).  Raises :class:`PoolTimeoutError` if the deadline
         elapses while the pool is exhausted (counts only, no credentials — T-09-05-P03).
         """
+        discarded_before = self._discarded_total
+        started = time.monotonic()
         try:
             conn = await asyncio.wait_for(self._checkout(), timeout=timeout)
         except TimeoutError as exc:
             async with self._cond:
+                self.metrics.timeouts += 1
+                self.metrics._record_wait(time.monotonic() - started)
+                # Was 0 unconditionally, which turned the one field that distinguishes
+                # "the pool is busy" from "the pool is churning dead connections" into
+                # a constant. A caller reading it was told the pool was simply full.
                 raise PoolTimeoutError(
                     waited=timeout,
-                    discarded=0,
+                    discarded=self._discarded_total - discarded_before,
                     active=len(self._in_use),
                     idle=len(self._idle),
                     max_size=self._max_size,
                 ) from exc
+        self.metrics.acquires += 1
+        self.metrics._record_wait(time.monotonic() - started)
         try:
             yield conn
         finally:
@@ -405,6 +622,7 @@ class AsyncConnectionPool:
                 elif self._created < self._max_size:
                     # 2) Reserve a slot and open outside the lock.
                     self._created += 1
+                    self.metrics.creates += 1
                 else:
                     # 3) Exhausted — suspend until release() calls notify().
                     await self._cond.wait()
@@ -415,11 +633,14 @@ class AsyncConnectionPool:
                 # Ping OUTSIDE the lock (Pitfall 2).
                 healthy = await self._ping_ok(candidate)
                 if healthy:
+                    self.metrics.hits += 1
                     return candidate
                 # Dead connection: discard + replace (POOL-03).
                 async with self._cond:
                     self._in_use.discard(candidate)
                     self._created -= 1
+                    self._discarded_total += 1
+                    self.metrics.discards += 1
                     self._cond.notify()
                 await self._safe_close(candidate)
                 # Loop to try again (either idle remains or we open a new one).
@@ -431,6 +652,8 @@ class AsyncConnectionPool:
                     # Open failed: undo the reservation and surface the error.
                     async with self._cond:
                         self._created -= 1
+                        # The reservation is undone, so the create never happened.
+                        self.metrics.creates -= 1
                         self._cond.notify()
                     raise
                 async with self._cond:
@@ -456,6 +679,47 @@ class AsyncConnectionPool:
                 self._cond.notify()
         if close_it:
             await self._safe_close(conn)
+
+    # ------------------------------------------------------------------ #
+    # Live gauges                                                        #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def in_use(self) -> int:
+        """Connections currently lent out."""
+        return len(self._in_use)
+
+    @property
+    def idle(self) -> int:
+        """Connections sitting in the pool, ready to lend."""
+        return len(self._idle)
+
+    @property
+    def size(self) -> int:
+        """Connections the pool currently owns, lent or idle."""
+        return self._created
+
+    @property
+    def max_size(self) -> int:
+        """The ceiling the pool will not grow past."""
+        return self._max_size
+
+    def stats(self) -> dict[str, float | int]:
+        """Counters and live gauges together, flat, for an exporter.
+
+        The gauges are read without the lock. They are a snapshot either way --
+        by the time a caller acts on them another thread may have acquired or
+        released -- so taking the lock would buy a consistency that cannot
+        survive the return statement, at the cost of contending with the acquire
+        path this is meant to observe.
+        """
+        return {
+            **self.metrics.as_dict(),
+            "in_use": self.in_use,
+            "idle": self.idle,
+            "size": self.size,
+            "max_size": self.max_size,
+        }
 
     async def close(self) -> None:
         """Close every pooled connection (idle + in-use) and mark the pool closed.

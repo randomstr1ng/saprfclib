@@ -158,10 +158,112 @@ Python.
    "Unreleased".
 5. Ensure `hatch run lint:check`, `hatch run lint:type`, and
    `hatch run test -m "not integration"` all pass.
+6. Coverage must not fall. CI runs with `--cov` and a floor set in
+   `pyproject.toml`. **Raise the floor when real coverage rises; never lower it to
+   make a build green** — that turns the guard into a rubber stamp, which is worse
+   than not having one.
+
+   Branch coverage is on, which is stricter than counting statements: the same
+   suite reads 74% by statements and 72% by branches. The difference is almost all
+   error handling, reached only when something goes wrong — and those are exactly
+   the paths where bugs in this project keep being found, because they are the
+   ones nobody exercises by accident.
+
+   Some code cannot be covered offline at all: `snc.py` needs a GSS library and an
+   SNC-configured system, `ws.py` needs a live WebSocket RFC endpoint. That is
+   roughly 220 statements, so the offline ceiling sits well under 100% — read the
+   figure as a trend and a floor, not as a quality score.
+   Adding more of that kind of code is the one legitimate reason to lower the
+   floor — say so in the commit message, with which path and why it cannot be
+   reached offline. An adjustment with no reason attached is the rubber stamp the
+   floor exists to prevent.
 
 ## Security Issues
 
 Do not open a public issue for a security problem. See [SECURITY.md](SECURITY.md).
+
+## Branch Model (Maintainers Only)
+
+Day-to-day work lands on `development`; `main` is what gets tagged and released.
+
+**Never squash-merge `development` into `main`.** A squash-merge writes a brand-new
+commit on `main` with no ancestry link to any of the commits it flattened, so git no
+longer knows those changes are already there. The next `development` → `main` PR then
+re-proposes all of them and reports conflicts against changes that are, in substance,
+identical to what `main` already has. That is the phantom-conflict loop: it recurs
+every release and gets worse with each one, because each squash adds another
+disconnected commit.
+
+Use one of these instead, consistently:
+
+* **Merge commits for release PRs** (preferred). Merge `development` → `main` with a
+  real merge commit so `main` records `development` as a parent and the next PR shows
+  only what is genuinely new. On GitHub, use "Create a merge commit" — or disable
+  squash merging on the repository so the option cannot be picked by accident:
+
+  ```bash
+  gh api -X PATCH repos/{owner}/{repo} \
+      -F allow_squash_merge=false -F allow_merge_commit=true
+  ```
+
+  Squash-merging is still the right choice for *feature* branches into
+  `development`, where flattening a messy branch is what you want. The rule is about
+  the `development` → `main` hop specifically.
+
+* **Or reset `development` to `main` after every squash-merge**, which throws the
+  disconnected history away before it can accumulate:
+
+  ```bash
+  git checkout development
+  git fetch origin
+  git reset --hard origin/main   # discards anything on development not in main
+  git push --force-with-lease origin development
+  ```
+
+  Only safe immediately after a release, when `main` genuinely contains everything on
+  `development`. Confirm that first — `git diff origin/main development` must be
+  empty. Anyone else working from `development` has to re-base after this.
+
+### Repairing the link once the loop has started
+
+`git merge -s ours origin/main` records the merge without changing
+`development`'s tree, which restores the ancestry link so the next release PR
+shows only what is genuinely new.
+
+It is also a way to throw work away silently, so it needs a proof first — never
+reach for it just to make a conflict go away.
+
+**The proof is not "the trees are identical."** That is the obvious test and it is
+the wrong one: it can only hold in the moment between a release and the next
+commit, and by the time anyone notices the phantom conflicts `development` has
+always moved on. Requiring it would mean the check never passes when you actually
+need it.
+
+What has to be true is narrower: **everything on `main` is already present in
+`development`'s history.** Since a release is cut *from* `development`, `main`'s
+tree should be byte-identical to some commit `development` already contains and
+has built on. Find it:
+
+```bash
+MAIN_TREE=$(git rev-parse origin/main^{tree})
+for c in $(git rev-list development -n 200); do
+    if [ "$(git rev-parse $c^{tree})" = "$MAIN_TREE" ]; then
+        git log -1 --oneline "$c"; break
+    fi
+done
+```
+
+A hit means `main` contributes nothing `development` lacks, and `-s ours` is
+recording a fact rather than discarding a change. **No hit means stop** — `main`
+holds something that never came from this branch (a hotfix committed directly,
+say), and that has to be merged properly rather than declared absent.
+
+Afterwards, confirm both of these:
+
+```bash
+git merge-base --is-ancestor origin/main development   # link restored
+git rev-parse development^{tree}                       # unchanged from before
+```
 
 ## Release Process (Maintainers Only)
 
@@ -169,7 +271,8 @@ Releases are tag-driven. `hatch-vcs` derives the package version from the git ta
 publishing to PyPI uses [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
 — there is no API token stored in the repository.
 
-1. Ensure CI is green on `main`.
+1. Ensure CI is green on `main`, and that `development` reached `main` through a
+   merge commit rather than a squash (see **Branch Model** above).
 
 2. Update `CHANGELOG.md`: move "Unreleased" entries under the new version heading.
 

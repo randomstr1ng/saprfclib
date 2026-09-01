@@ -103,27 +103,17 @@ def test_build_ni_route_golden() -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Message-server resolve ([ASSUMED] redirect, MockTransport-driven)
-# --------------------------------------------------------------------------- #
-def _ms_redirect(ashost: str, sysnr: int) -> bytes:
-    """Synthetic [ASSUMED] message-server group-logon redirect response.
+def test_ms_return_codes_decode_as_signed_bytes() -> None:
+    """0xec is -20, not 236. Reading it unsigned turns an error into a number."""
+    from saprfclib.router import decode_ms_errorno, describe_ms_errorno
 
-    Shape (the contract resolve() parses): the app-server host as a
-    length-prefixed ASCII field followed by a 2-byte big-endian system number.
-    """
-    host_bytes = ashost.encode("ascii")
-    return len(host_bytes).to_bytes(2, "big") + host_bytes + struct.pack(">H", sysnr)
-
-
-def test_message_server_resolve_returns_host_port() -> None:
-    """resolve(group), driven by a scripted [ASSUMED] redirect response, returns
-    (ashost, sysnr)."""
-    transport = MockTransport([_ms_redirect("vhcala4hci", 0)])
-    client = MessageServerClient(transport)
-    ashost, sysnr = client.resolve("PUBLIC")
-    assert ashost == "vhcala4hci"
-    assert sysnr == 0
+    body = bytearray(0x6E)
+    body[0x0D] = 0xEC
+    assert decode_ms_errorno(bytes(body)) == -20
+    assert describe_ms_errorno(-20) == "access denied"
+    assert describe_ms_errorno(-12) == "invalid client version"
+    body[0x0D] = 0
+    assert decode_ms_errorno(bytes(body)) == 0
 
 
 def test_message_server_resolve_rejects_malformed() -> None:
@@ -156,8 +146,12 @@ def test_connect_saprouter_routes_through_router(monkeypatch) -> None:
     then completes the normal handshake — verified offline via MockTransport."""
     import saprfclib.connection as connection
 
-    transport = MockTransport(_handshake_script())
-    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, timeout=None: transport)
+    # A router that accepts the route answers NI_PONG before it starts
+    # forwarding, so the script must begin with it. Confirmed live against a real
+    # SAProuter; the previous script omitted it because the code never read it,
+    # which left the handshake reading NI_PONG as its NI version response.
+    transport = MockTransport([b"NI_PONG\x00", *_handshake_script()])
+    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
 
     conn = connection.connect(
         ashost="app",
@@ -172,32 +166,45 @@ def test_connect_saprouter_routes_through_router(monkeypatch) -> None:
     assert conn.get_connection_attributes().sys_id == "A4H"
 
 
-def test_connect_message_server_resolves_then_connects(monkeypatch) -> None:
-    """connect(..., mshost=..., group=...) resolves via MessageServerClient then
-    runs the direct-TCP handshake against the resolved (ashost, sysnr)."""
+def test_connect_stops_if_the_router_does_not_acknowledge(monkeypatch) -> None:
+    """An unexpected answer to NI_ROUTE must not be treated as handshake data.
+
+    Continuing would mean reading every later frame one position out of step,
+    which surfaces far from the cause.
+    """
     import saprfclib.connection as connection
+    from saprfclib.exceptions import SapRfcError
 
-    ms_transport = MockTransport([_ms_redirect("vhcala4hci", 0)])
-    app_transport = MockTransport(_handshake_script())
-    handed_out = [ms_transport, app_transport]
+    transport = MockTransport([b"SOMETHING ELSE", *_handshake_script()])
+    monkeypatch.setattr(connection, "connect_tcp", lambda host, port, **_kwargs: transport)
 
-    def fake_connect_tcp(host, port, timeout=None):
-        return handed_out.pop(0)
+    with pytest.raises(SapRfcError, match="rather than the expected NI_PONG"):
+        connection.connect(
+            ashost="app",
+            sysnr="00",
+            client="001",
+            user="DEVELOPER",
+            passwd="secret",
+            saprouter="/H/host/S/3299",
+        )
 
-    monkeypatch.setattr(connection, "connect_tcp", fake_connect_tcp)
 
-    conn = connection.connect(
-        ashost="ignored",
-        sysnr="00",
-        client="001",
-        user="DEVELOPER",
-        passwd="secret",
-        mshost="mshost",
-        group="PUBLIC",
-    )
-    # The message-server side connection was closed after resolve.
-    assert ms_transport.closed is True
-    assert conn.get_connection_attributes().sys_id == "A4H"
+def test_router_reply_fixtures_are_what_a_real_router_sends() -> None:
+    """Both captured against a live SAProuter on 2026-08-31."""
+    from saprfclib.transport import is_ni_pong
+
+    router_dir = Path(__file__).parent / "golden" / "router"
+    accepted = (router_dir / "ni_pong_route_accepted.bin").read_bytes()[4:]
+    assert is_ni_pong(accepted)
+    assert accepted == b"NI_PONG\x00"
+
+    denied = (router_dir / "ni_rterr_route_denied.bin").read_bytes()[4:]
+    assert denied.startswith(b"NI_RTERR")
+    assert not is_ni_pong(denied)
+    # The refusal carries a *ERR* record, the same NUL-separated shape the
+    # gateway uses for its own errors.
+    assert b"*ERR*" in denied
+    assert b"route permission denied" in denied
 
 
 # --------------------------------------------------------------------------- #
@@ -314,60 +321,388 @@ def test_parse_sapms_server_list_truncated_raises() -> None:
         parse_sapms_server_list(truncated)
 
 
-# Test 3: wrong magic raises ValueError naming the magic problem. A mis-routed TCP
-# stream or rogue message-server should be caught before any entry parsing.
-def test_parse_sapms_server_list_wrong_magic_raises() -> None:
-    """A frame with wrong magic (not '**MESSAGE**') raises ValueError with diagnostic
-    text. T-04-MSERR: error surfaced as ValueError for CommunicationError in 04-05."""
-    full = bytearray(_golden_frame())
-    # Corrupt the magic bytes (offset 4..14)
-    full[4:15] = b"**INVALID**"
-    with pytest.raises(ValueError, match=r"(?i)(magic|invalid|MESSAGE)"):
-        parse_sapms_server_list(bytes(full))
+# --------------------------------------------------------------------------- #
+# Message-server HTTP interface — live capture 2026-08-31
+# Golden fixtures: tests/golden/router/ms_http_*.txt
+# --------------------------------------------------------------------------- #
+
+MS_HTTP_DIR = Path(__file__).parent / "golden" / "router"
 
 
-# Test 4: resolve_full() uses parse_sapms_server_list and returns (ashost, sysnr)
-# for the active server in the golden frame. T-04-REDIR: bounds validated.
-# sysnr = (port - 3200) // 100 = 0 for port 3200.
-def test_parse_sapms_resolve_full_uses_full_parser() -> None:
-    """MessageServerClient.resolve_full uses parse_sapms_server_list and returns
-    (ashost=192.168.88.7, sysnr=0) from the golden SAPMS exchange.
+def test_parse_ms_http_logon_finds_the_rfc_row() -> None:
+    """The RFC row is what a load-balanced connect actually needs."""
+    from saprfclib.router import parse_ms_http_logon
 
-    MockTransport scripted with: [login_ack, server_list_response].
-    resolve_full sends the login frame, reads login_ack, sends server-list request,
-    reads server_list_response (golden 598-byte frame), parses it, and returns the
-    least-loaded/first-active server. T-04-REDIR: bounds check applied.
+    rows = parse_ms_http_logon((MS_HTTP_DIR / "ms_http_logon_v12.txt").read_text())
+    by_service = {service: (host, port) for service, host, port, _ in rows}
+    assert by_service["RFC"] == ("sapdemo1", 3300)
+    # RFCS is the SNC-protected endpoint on a different port; picking it by
+    # accident would hand back a port that needs SNC parameters the caller may
+    # not have supplied.
+    assert by_service["RFCS"] == ("sapdemo1", 4800)
+
+
+def test_parse_ms_http_logon_skips_rows_it_cannot_read() -> None:
+    """The service list is open-ended; one odd row must not lose the RFC row."""
+    from saprfclib.router import parse_ms_http_logon
+
+    body = "version 1.2\ninstance\nRFC\thost\t3300\t\nGARBAGE\nNEW\thost\tnotaport\t\n"
+    rows = parse_ms_http_logon(body)
+    assert [r[0] for r in rows] == ["RFC"]
+
+
+def test_parse_ms_http_lglist_reads_the_logon_groups() -> None:
+    from saprfclib.router import parse_ms_http_lglist
+
+    groups = parse_ms_http_lglist((MS_HTTP_DIR / "ms_http_lglist.txt").read_text())
+    assert ("PUBLIC", "192.0.2.1", 3200) in groups
+    assert {g[0] for g in groups} == {"PUBLIC", "SPACE"}
+
+
+def test_resolve_rfc_server_http_reports_a_missing_rfc_row(monkeypatch) -> None:
+    """Answering without an RFC service must raise, not fall back to a guess.
+
+    Connecting to the wrong application server is not a failure the caller can
+    see, so there is nothing safe to guess here.
     """
-    golden_response = _golden_frame()
-    transport = MockTransport([_MS_LOGIN_ACK, golden_response])
-    client = MessageServerClient(transport)
-    ashost, sysnr = client.resolve_full(group="PUBLIC", sysid="A4H")
-    assert ashost == "192.168.88.7", f"ashost: {ashost!r}"
-    assert sysnr == 0, f"sysnr: {sysnr}"
+    import io
+
+    from saprfclib import router
+    from saprfclib.router import MessageServerHttpError, resolve_rfc_server_http
+
+    body = b"version 1.2\ninstance\nHTTP\thost\t50000\t\n"
+    monkeypatch.setattr(router, "urlopen", lambda *a, **k: io.BytesIO(body))
+    with pytest.raises(MessageServerHttpError, match="no RFC service"):
+        resolve_rfc_server_http("ms", 8101)
 
 
-# Test 5 (T-04-REDIR): resolve_full rejects a server list where the only active
-# entry has an out-of-range sysnr (port yields sysnr > 99).
-def test_resolve_full_redir_bounds_rejects_bad_port() -> None:
-    """resolve_full rejects a resolved redirect where sysnr is out of range.
-    T-04-REDIR preserved: port 39321 -> sysnr = (39321-3200)//100 = 361 > 99."""
-    bad_port = 39321  # sysnr = (39321 - 3200) // 100 = 361 -> rejected
-    frame = _make_minimal_sapms_frame(ip_addr="192.168.1.1", port=bad_port)
-    transport = MockTransport([_MS_LOGIN_ACK, frame])
-    client = MessageServerClient(transport)
-    with pytest.raises(ValueError, match=r"(?i)(redirect|redir|sysnr|port|range|bounds)"):
-        client.resolve_full(group="PUBLIC", sysid="A4H")
+def test_resolve_rfc_server_http_explains_an_unreachable_interface(monkeypatch) -> None:
+    """The HTTP port only exists when the profile enables it — say so."""
+    from saprfclib import router
+    from saprfclib.router import MessageServerHttpError, resolve_rfc_server_http
+
+    def boom(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(router, "urlopen", boom)
+    with pytest.raises(MessageServerHttpError, match="ms/server_port_0"):
+        resolve_rfc_server_http("ms", 8101)
 
 
-# Test 6 (T-04-REDIR): resolve_full rejects a server list with all entries having
-# IP 0.0.0.0 (invalid/empty host).
-def test_resolve_full_redir_bounds_rejects_empty_host() -> None:
-    """resolve_full raises ValueError when the selected server has IP 0.0.0.0.
-    T-04-REDIR: host bounds check applied before returning."""
-    frame = _make_minimal_sapms_frame(ip_addr="0.0.0.0", port=3200)
-    transport = MockTransport([_MS_LOGIN_ACK, frame])
-    client = MessageServerClient(transport)
-    with pytest.raises(
-        ValueError, match=r"(?i)(redirect|redir|host|empty|invalid|address|0\.0\.0\.0)"
-    ):
-        client.resolve_full(group="PUBLIC", sysid="A4H")
+def test_message_server_port_is_never_guessed() -> None:
+    """No numeric default: 3600 and 3601 are both one installation generalised.
+
+    The port is 3600/8100 + the MESSAGE SERVER's instance number, which is not the
+    application server's system number. Live scan 2026-08-31: on A4H the app server
+    is sysnr 00 (gateway 3300) while the message server is instance 01 — 3601 and
+    8101 answer, 3600 refuses outright. A single-instance system puts it at 00
+    instead, and nothing observable from the client tells the two apart. Whichever
+    number were defaulted would silently reach a closed port on the other layout.
+    """
+    from saprfclib.connection import _ms_http_port, _ms_port
+
+    with pytest.raises(ValueError, match="cannot determine the binary"):
+        _ms_port("A4H")
+    with pytest.raises(ValueError, match="cannot determine the HTTP"):
+        _ms_http_port("A4H")
+    # The message is actionable: it must name the way out, not just the problem.
+    with pytest.raises(ValueError, match="msserv="):
+        _ms_port("A4H")
+
+    # Explicit values win, as a port or as a numeric string.
+    assert _ms_port("A4H", 3601) == 3601
+    assert _ms_port("A4H", "3699") == 3699
+    assert _ms_http_port("A4H", 8101) == 8101
+
+
+def test_message_server_port_comes_from_etc_services_when_present(monkeypatch) -> None:
+    """sapms<SID> states the instance number rather than assuming it."""
+    from saprfclib import connection as connection_mod
+
+    monkeypatch.setattr(
+        connection_mod._socket_module,
+        "getservbyname",
+        lambda name: 3601 if name == "sapmsA4H" else (_ for _ in ()).throw(OSError()),
+    )
+    from saprfclib.connection import _ms_http_port, _ms_port
+
+    assert _ms_port("A4H") == 3601
+    # The same instance number drives the HTTP port: 8100 + 1.
+    assert _ms_http_port("A4H") == 8101
+
+
+def test_unknown_service_name_is_refused_not_defaulted() -> None:
+    """Silently connecting somewhere else is the failure mode to avoid."""
+    from saprfclib.connection import _ms_port
+
+    with pytest.raises(ValueError, match="not in /etc/services"):
+        _ms_port(None, "sapms_definitely_not_a_real_service")
+
+
+def test_no_message_server_port_formula_is_assumed() -> None:
+    """SAP documents no formula for a modern message server, so none is applied.
+
+    Source: SAP, "TCP/IP Ports of All SAP Products". The message server appears
+    twice in that table:
+
+      Application Server ABAP        sapmsSID     3600   3600-3699   36<NN>
+        "Relevant only for systems installed prior to SAP NetWeaver 7.0 with a
+         central instance (CI)."
+      SAP Central Services (SCS)     sapms<SID>   9310   0-65535     None
+        "Configure the message server port with profile parameter rdisp/msserv."
+
+    So 36<NN> covers legacy central instances only. On an ASCS system the port is
+    whatever the profile says, anywhere in the range, defaulting to 9310. Each
+    plausible constant is wrong for a different layout — 3600 for a legacy CI,
+    9310 for a default SCS, 3601 on the A4H test system — so the port is read
+    from /etc/services or required from the caller, never computed.
+    """
+    from saprfclib.connection import _ms_port
+
+    for candidate in (3600, 9310, 3601):
+        assert _ms_port("A4H", candidate) == candidate
+    with pytest.raises(ValueError, match="cannot determine"):
+        _ms_port("A4H")
+
+
+def test_gateway_ports_match_the_documented_formula() -> None:
+    """sapgw<NN> = 33<NN> and sapgw<NN>s = 48<NN>, both documented and observed.
+
+    Confirmed twice over: SAP's port table gives the formulas, and the A4H message
+    server independently reports RFC 3300 and RFCS 4800 for its sysnr-00
+    application server. Unlike the message server, <NN> here is the application
+    server's own instance number.
+    """
+    for sysnr in (0, 1, 42, 99):
+        assert 3300 + sysnr == int(f"33{sysnr:02d}")
+        assert 4800 + sysnr == int(f"48{sysnr:02d}")
+
+
+def test_message_server_http_base_matches_the_documented_range() -> None:
+    """81<NN>, range 8100-8199 — and documented as not active by default."""
+    from saprfclib.connection import _ms_http_port
+
+    assert _ms_http_port("A4H", 8101) == 8101
+    assert 8100 <= _ms_http_port("A4H", 8199) <= 8199
+
+
+# --------------------------------------------------------------------------- #
+# SAPMS binary protocol — captured from SAP GUI, reproduced live 2026-08-31
+# Golden fixtures: tests/golden/router/sapms_*.bin
+# --------------------------------------------------------------------------- #
+
+SAPMS_DIR = Path(__file__).parent / "golden" / "router"
+
+
+def _fixture(name: str) -> bytes:
+    """A captured frame WITHOUT its NI length prefix — the transport strips that."""
+    return (SAPMS_DIR / name).read_bytes()[4:]
+
+
+def test_our_attach_frame_matches_the_captured_one() -> None:
+    """Byte-for-byte against what SAP GUI actually sends, except the names.
+
+    This is the test the previous implementation could not have passed. It sent
+    a 114-byte body; the real frame is 110, and a live message server closes the
+    connection on the longer one without replying.
+    """
+    from saprfclib.router import _build_sapms_login_frame
+
+    captured = _fixture("sapms_attach_request.bin")
+    ours = _build_sapms_login_frame()
+    assert len(ours) == len(captured) == 0x6E
+    # Names are the caller's; every structural byte must match.
+    for offset in (0x0C, 0x0D, 0x36, 0x42, 0x43, 0x6C, 0x6D):
+        assert ours[offset] == captured[offset], f"byte 0x{offset:02x} differs"
+    assert ours[:12] == captured[:12] == b"**MESSAGE**\x00"
+
+
+def test_the_operation_byte_selects_attach_request_or_detach() -> None:
+    """0x43 is the operation, and 3 was never one of its values.
+
+    An earlier sweep concluded "0x43 must be 3" because 0, 1, 2 and 4 were each
+    dropped when paired with a msgtype the server did not accept — and 8, the
+    value a real client sends, was never tried. The capture settles it: 0x08
+    attaches, 0x01 requests, 0x04 detaches.
+    """
+    from saprfclib.router import (
+        _build_sapms_detach_frame,
+        _build_sapms_login_frame,
+        _build_sapms_server_list_request,
+    )
+
+    assert _build_sapms_login_frame()[0x43] == 0x08
+    assert _build_sapms_server_list_request()[0x43] == 0x01
+    assert _build_sapms_detach_frame()[0x43] == 0x04
+    assert _fixture("sapms_attach_request.bin")[0x43] == 0x08
+    assert _fixture("sapms_serverlist_request.bin")[0x43] == 0x01
+
+
+def test_our_server_list_request_matches_the_captured_one() -> None:
+    """Including the selector byte that picks servers over groups."""
+    from saprfclib.router import _build_sapms_server_list_request
+
+    captured = _fixture("sapms_serverlist_request.bin")
+    ours = _build_sapms_server_list_request()
+    assert len(ours) == len(captured)
+    assert ours[0x6E:0x72] == captured[0x6E:0x72] == bytes.fromhex("1e000101")
+    # Offset 11 of the body: 0x1d asks for servers, 0x1f for logon groups.
+    assert ours[0x6E + 11] == captured[0x6E + 11] == 0x1D
+    assert _fixture("sapms_grouplist_reply.bin")[0x42] == 0x03  # server speaking
+
+
+def test_the_reply_payload_is_key_value_text_not_a_binary_table() -> None:
+    """The old parser looked for binary entries. The wire carries text.
+
+    Records are newline-separated, fields pipe-separated KEY=VALUE.
+    """
+    from saprfclib.router import parse_ms_list_reply
+
+    records = parse_ms_list_reply(_fixture("sapms_serverlist_reply.bin"))
+    assert len(records) == 1
+    server = records[0]
+    assert server["HOSTNAME"] == "sapdemo1xx"
+    assert server["PORT"] == "3200"
+    assert server["ASNAME"].endswith("_A4H_00")
+    assert "DIA" in server["SAPSRV"]
+
+
+def test_group_list_reply_parses_every_group() -> None:
+    from saprfclib.router import parse_ms_list_reply
+
+    records = parse_ms_list_reply(_fixture("sapms_grouplist_reply.bin"))
+    assert {r["GROUP"] for r in records} == {"PUBLIC", "SPACE", "TEST"}
+    assert all(r["PORT"] == "3200" for r in records)
+
+
+def test_reply_with_a_foreign_opcode_block_is_refused() -> None:
+    """A reply that is not the expected opcode must not be parsed as one."""
+    from saprfclib.router import parse_ms_list_reply
+
+    bad = bytearray(_fixture("sapms_serverlist_reply.bin"))
+    bad[0x6E] = 0x99
+    with pytest.raises(ValueError, match="unexpected message-server opcode"):
+        parse_ms_list_reply(bytes(bad))
+
+
+def test_resolve_full_runs_the_captured_exchange() -> None:
+    """End to end against the real frames: attach, request, parse."""
+    transport = MockTransport(
+        [_fixture("sapms_attach_reply.bin"), _fixture("sapms_serverlist_reply.bin")]
+    )
+    ashost, sysnr = MessageServerClient(transport).resolve_full(group="PUBLIC")
+    assert ashost == "sapdemo1xx"
+    # PORT in the reply is the DISPATCHER port (32<NN>), not the gateway. The
+    # captured record reads PORT=3200 for a server whose gateway is 3300.
+    assert sysnr == 0
+    assert transport.sent[0][0x43] == 0x08  # attach
+    assert transport.sent[1][0x43] == 0x01  # request
+
+
+def test_resolve_full_reports_a_refused_attach() -> None:
+    from saprfclib.exceptions import SapRfcError
+
+    denied = bytearray(_fixture("sapms_attach_reply.bin"))
+    denied[0x0D] = 0xEC  # -20
+    with pytest.raises(SapRfcError, match="access denied"):
+        MessageServerClient(MockTransport([bytes(denied)])).resolve_full(group="PUBLIC")
+
+
+def test_resolve_full_rejects_an_unroutable_host() -> None:
+    """T-04-REDIR: never connect to an empty or 0.0.0.0 address."""
+    reply = bytearray(_fixture("sapms_serverlist_reply.bin"))
+    text = reply[0x72:].decode("latin-1").replace("HOSTNAME=sapdemo1xx", "HOSTNAME=0.0.0.0")
+    rebuilt = bytes(reply[:0x72]) + text.encode("latin-1")
+    transport = MockTransport([_fixture("sapms_attach_reply.bin"), rebuilt])
+    with pytest.raises(ValueError, match="unusable application-server address"):
+        MessageServerClient(transport).resolve_full(group="PUBLIC")
+
+
+def test_resolve_full_rejects_a_port_that_is_not_a_system_number() -> None:
+    """T-04-REDIR: the dispatcher port must be 3200 + a system number."""
+    reply = bytearray(_fixture("sapms_serverlist_reply.bin"))
+    text = reply[0x72:].decode("latin-1").replace("PORT=3200", "PORT=9999")
+    rebuilt = bytes(reply[:0x72]) + text.encode("latin-1")
+    transport = MockTransport([_fixture("sapms_attach_reply.bin"), rebuilt])
+    with pytest.raises(ValueError, match="not 3200"):
+        MessageServerClient(transport).resolve_full(group="PUBLIC")
+
+
+def test_both_server_list_opcodes_are_supported() -> None:
+    """0x1e carries text, 0x05 carries a binary table — both are real replies.
+
+    Captured from two different clients against the same message server. The
+    header is identical; only the opcode block and payload shape differ. Neither
+    parser supersedes the other, and asserting that here is what stops the binary
+    one being deleted as dead code the next time only a 0x1e capture is at hand.
+    """
+    from saprfclib.router import parse_ms_list_reply, parse_sapms_server_list
+
+    text_reply = _fixture("sapms_serverlist_reply.bin")
+    assert text_reply[0x6E] == 0x1E
+    assert parse_ms_list_reply(text_reply)[0]["PORT"] == "3200"
+
+    binary_reply = (SAPMS_DIR / "sapms_server_list.bin").read_bytes()
+    assert binary_reply[4 + 0x6E] == 0x05
+    assert parse_sapms_server_list(binary_reply)
+
+
+def test_a_binary_reply_names_the_right_parser() -> None:
+    """Meeting the other opcode must point at the parser that handles it."""
+    from saprfclib.router import parse_ms_list_reply
+
+    binary_reply = (SAPMS_DIR / "sapms_server_list.bin").read_bytes()
+    with pytest.raises(ValueError, match="parse_sapms_server_list"):
+        parse_ms_list_reply(binary_reply)
+
+
+def test_route_entries_are_three_null_terminated_fields() -> None:
+    """host\\0 service\\0 password\\0 — every field terminated, none padded.
+
+    Confirmed by two captures that this builder now reproduces byte for byte: a
+    password-protected route sent by niping (ni_route_password_payload.bin) and
+    the unprotected route in ni_route_payload.bin. An entry with no password
+    still ends with the empty password's NUL.
+    """
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    captured = (SAPMS_DIR / "ni_route_password_payload.bin").read_bytes()
+    ours = build_ni_route(
+        parse_route_string("/H/saprouter.example.com/S/3299/P/s3cr3tp4s"),
+        "192.168.88.7",
+        "3300",
+    )
+    assert ours == captured, "must match what SAP's own client sends"
+    assert b"saprouter.example.com\x003299\x00s3cr3tp4s\x00" in ours
+    # The destination carries an empty password: a bare trailing NUL.
+    assert ours.endswith(b"192.168.88.7\x003300\x00\x00")
+
+
+def test_the_unprotected_route_still_matches_its_fixture() -> None:
+    """The layout change must not disturb the passwordless form."""
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    captured = (SAPMS_DIR / "ni_route_payload.bin").read_bytes()
+    ours = build_ni_route(
+        parse_route_string("/H/saprouter.example.com/S/3299"), "192.168.88.7", "3300"
+    )
+    assert ours == captured
+    assert b"saprouter.example.com\x003299\x00\x00" in ours
+
+
+def test_a_service_name_is_no_longer_truncated() -> None:
+    """The old fixed 6-byte service field was right only by coincidence.
+
+    For a four-character port, "3299" plus two pad NULs happens to be identical
+    to "3299\\0" followed by the empty password's "\\0" — so every numeric port
+    worked and hid the bug. A service NAME is longer: "sapgw00" is seven
+    characters and was silently truncated to "sapgw0", malforming the frame.
+    """
+    from saprfclib.router import build_ni_route, parse_route_string
+
+    ours = build_ni_route(
+        parse_route_string("/H/router.example.com/S/sapgw00"), "app.example.com", "sapgw01"
+    )
+    assert b"sapgw00\x00" in ours, "service name must survive intact"
+    assert b"sapgw01\x00" in ours
+    assert b"sapgw0\x00" not in ours.replace(b"sapgw00\x00", b"").replace(b"sapgw01\x00", b"")

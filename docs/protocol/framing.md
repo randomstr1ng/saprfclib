@@ -270,8 +270,14 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length)     |
 | 0x0330    | capture     | TABLE header (4 bytes; part of binary TABLE encoding)                |
 | 0x0337    | analysis          | Marker / empty record                                                 |
-| 0x0401    | capture     | ABAP exception key/name (UTF-16LE, e.g. "EXAMPLE")                  |
-| 0x0417    | capture     | ABAP exception number (UTF-16LE, 3 chars, e.g. "000")               |
+| 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
+| 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
+| 0x0403    | capture     | ABAP exception key/name (kernel 752; alternative to 0x0401)          |
+| 0x0411    | capture     | Message variable V1                                                  |
+| 0x0415    | capture     | Message class (2 chars, e.g. "00", "FL")                             |
+| 0x0416    | capture     | Message type (1 char, e.g. "X", "E")                                 |
+| 0x0417    | capture     | ABAP exception/message number (3 chars, e.g. "000", "341")           |
+| 0x0418    | capture     | ABAP call-stack breadcrumb (`;W=…,E=…;S=…;D=…` — not parsed)         |
 | 0x0420    | capture     | RFC return code (4B BE uint32; 0=success)                            |
 | 0x0421    | analysis          | Auth / call context                                                   |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
@@ -281,7 +287,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
 | 0x0513    | analysis          | Function call begin (type B)                                         |
 | 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
-| 0x0667    | capture     | Server call duration: float64 LITTLE-endian, microseconds            |
+| 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
@@ -325,7 +331,7 @@ NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
     0x0203  ext len=510    result param value (CHAR(255) UTF-16LE, space-padded)
     ...                    (one name/value pair per output param)
     0x0130  len=80         calling program name "SAPLSTFC" (UTF-16LE padded)
-    0x0667  len=8          server call duration — float64 LE, microseconds
+    0x0667  len=8          float64 LE = server call duration in microseconds
     0xFFFF  len=0          TLV stream terminator
 ```
 
@@ -361,7 +367,7 @@ APPC header (76B) + RFC marker 00000002 (4B)
     0x0420  len=4          return code uint32 BE (0 = success)
     0x0512  len=0          parameter section start (no parameters follow)
     0x0130  len=80         handling program "SAPLSYSU" (UTF-16LE, padded to 40 chars)
-    0x0667  len=8          call duration — float64 LE, microseconds (138.0 here)
+    0x0667  len=8          float64 LE = 138.0 here = 138 us of server time
     0xFFFF  len=0          TLV stream terminator
 ```
 
@@ -408,9 +414,22 @@ Two properties that are easy to get wrong:
   name per chunk files the rows under a table called `item` and loses them.
 
 Row shape observed is the shortcut form: one `<LINE>` element holding the whole
-delimited row, exactly the buffer `DATA` would have held. The documented alternative
-puts one element per field. Both work under the same rule — whatever elements an
-`<item>` contains become that row's keys.
+delimited row. The documented alternative puts one element per field. Both work under
+the same rule — whatever elements an `<item>` contains become that row's keys.
+
+Multi-row is confirmed by capture, not inferred. A ten-row `T100` read arrives as ten
+`<item>` elements split across two `0x3c05` fragments of 9 and 773 bytes, the first
+holding only the opening tag — so **fragment boundaries fall wherever the server
+chooses, not on item boundaries**. Golden fixture:
+`tests/golden/framing/basxml_et_data_multirow_response.bin`.
+
+!!! warning "The XML form is not blank-padded"
+    Unlike the binary encoding, the XML form does **not** pad fields to their DDIC
+    width. The same query returns `ARBGB` as `FL` here and as `FL` followed by
+    eighteen spaces through `DATA`. Row content is otherwise identical field for
+    field, but a caller splitting the delimited row gets trimmed values on one path
+    and padded values on the other. Verified by running the identical query with and
+    without `USE_ET_DATA_4_RETURN`.
 
 !!! danger "This is NOT SAP's BASXML"
     They share a TLV tag and nothing else. SAP's BASXML is a **binary tokenised**
@@ -572,7 +591,7 @@ Server → client (response: COUNTER=2, RESULT=11):
     0x0201  len=14         'COUNTER'    ← CHANGING param (new value)
     0x0203  len=4          02 00 00 00  ← value = 2 (INT4 LE)
     0x0130  len=80         'SAPLMRFC' (program name)
-    0x0667  len=8          server call duration — float64 LE, microseconds
+    0x0667  len=8          float64 LE = server call duration in microseconds
     0xFFFF  len=0          terminator
 ```
 
@@ -934,15 +953,222 @@ parsed out of the response TLV, and the tags carrying it on a system failure hav
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
 
-### Exception TLV semantics (0x0401 vs 0x0417) — PARTIALLY CONFIRMED
+### Multi-frame responses
 
-Wire observation: `0x0417` is a 3-character UTF-16LE string (`"000"`), `0x0401` is an
-N-character UTF-16LE string (`"EXAMPLE"`). The mapping to *exception key* and *message
-number* was confirmed empirically by matching a `RAISE EXAMPLE` in ABAP against the captured
-frame. Not confirmed: whether `0x0401` is always the exception key rather than a message
-class, whether `0x0417` is a message number rather than a sequence number, and which tags
-carry the message class/type/number for `MESSAGE`-bearing exceptions. Consequence:
-`AbapApplicationError` field mapping may be imprecise for exceptions raised with `MESSAGE`.
+A reply larger than one gateway frame arrives as several NI frames whose TLV
+bodies **concatenate directly** — no per-frame trailer, no length preamble on the
+continuation, no re-framing. The second frame carries the remaining bytes of the
+record the first was cut inside.
+
+Captured on A4H, kernel 793, `RFC_READ_TABLE` on `DD03L` with `ROWCOUNT=2000`:
+
+| frame | GW type | total | body | walk |
+|-------|---------|-------|------|------|
+| part 1 | `0x06cb` | 28080 | 28000 | consumes 27799, needs 250 more bytes of a `0x0305` record with 197 left |
+| part 2 | `0x0609` | 25593 | 25513 | not a TLV stream — begins mid-record |
+
+Joined: 53513 bytes, walking cleanly to the `0xFFFF` terminator with 2 trailing.
+Fixtures `multiframe_read_table_part1.bin` / `_part2.bin`.
+
+Before this was understood, `Connection.call` issued one `recv_message()` per
+invoke, so any such reply failed with `malformed TLV: tag 0x0305 length 250
+exceeds remaining payload (197 bytes)` — and left the remainder queued for the
+next call to misread.
+
+#### What drives reassembly, and what must not
+
+Two header fields **do** track continuation, and neither can drive the loop.
+
+| field | continuing frame | last frame |
+|-------|------------------|------------|
+| bytes 17–20, BE int32 | `-1` | `500` |
+| bytes 60–63, BE uint32 | `0` | `1` |
+
+Confirmed by a 591337-byte reply on A4H kernel 793 that arrived as **22 frames**:
+all twenty-one continuing frames read `-1`/`0`, the last read `500`/`1`. A
+two-frame capture could not have established this — with two frames, "continues
+the response" and "does not end the stream" are the same statement, so a real
+marker and a coincidence look identical. Twenty-one agreeing observations are not
+a coincidence.
+
+**They are still not the reassembly condition.** Both read the *continuing* value
+on `signon_incomplete_752_response.bin` and `cpic_logon_error_response.bin` —
+complete terminal replies with nothing following them. Whatever the field means,
+it is broader than "another frame follows", and a loop keyed on it would wait
+forever on a refused logon.
+
+So reassembly is driven by the stream's own `0xFFFF` terminator, which is
+confirmed structure and answers exactly the question being asked.
+`invoke.tlv_stream_status` classifies a buffer three ways, and only the middle one
+reads another frame:
+
+- **complete** — the walk reached the terminator.
+- **truncated** — at least one record parsed, then a record ran past the end.
+- **not_tlv** — nothing parsed. A CPIC-layer refusal lands here: its body is
+  EBCDIC, so record zero claims 50629 bytes inside a 97-byte frame.
+
+The marker is used in the one direction it is safe in. A frame that reports itself
+final while the stream is still short is a genuine inconsistency, and reading on
+would consume the next call's reply — so `_frame_reports_itself_final` refuses
+there and nowhere else.
+
+#### The gateway chunks at 28000 payload bytes
+
+Every continuing frame in the 22-frame reply carried exactly 28000 bytes of
+payload (28080 with the header). That is why a `DD03L` read crosses into several
+frames at around 2000 rows, and why 20000 rows needed 22 of them.
+
+#### Confirmed: bytes 56–59 are the frame's own payload length
+
+BE uint32, exact on all 16 frames checked — the 2 above plus 9 independently
+captured golden fixtures, where it equals the body length on every server
+response and reads `0` on client requests. This **disproves** the earlier mapping
+of 52–63 as an RFC library name string; the region is three BE uint32
+(`2` / payload length / the flag above). Not needed for reassembly, since the NI
+prefix already gives the length, but a free cross-check that the 80-byte header
+split is right.
+
+#### One unexplained observation
+
+The capture continued past part 2 with **40 identical 80-byte frames of GW type
+`0x06ce`** — a bare GW header plus RFC marker, zero TLV payload. What produces
+them is not established. They contribute nothing, and the loop stops at the
+terminator before reaching them, but a reader that kept going on an empty frame
+would spin to its cap rather than progress — so an empty continuation is refused
+explicitly rather than skipped.
+
+### Tag 0x0667 — server-side call duration, microseconds
+
+**Settled.** 8 bytes, little-endian IEEE-754 double, carrying the **server-side
+duration of the call that is being answered, in microseconds**. Per call, not
+cumulative. Bytes at capture tier; meaning at behavioural-probe tier (3).
+
+Two golden fixtures used to disagree about this — `rfcping_response.json` called
+it a duration in microseconds, `stfc_connection_response.json` an `[ASSUMED]`
+timeout in seconds — and neither could be right on the strength of a capture,
+because a capture shows `138.0` without saying what 138.0 counts.
+
+#### How it was settled
+
+The first probe varied rows read and watched the value move by a factor of 400.
+That ruled out a fixed setting, but its verdict — "it tracks the work, so it is a
+duration" — did not follow: rows read moves the server's processing time and the
+size of the response *together*, so a byte counter fit the numbers just as well.
+
+`RFC_PING_AND_WAIT` separates them. It sleeps for `SECONDS` and returns a reply of
+constant size, so the clock moves while the response does not. On A4H, kernel 793:
+
+| `SECONDS` | wall | response | `0x0667` |
+|-----------|------|----------|----------|
+| 0 | 182.09 ms | 236 B | 593.0 |
+| 1 | 1036.75 ms | 236 B | 1001468.0 |
+| 3 | 3038.57 ms | 236 B | 3001166.0 |
+
+Four independent things fall out of those three rows:
+
+1. **Not a byte counter.** The response stayed at 236 bytes while the value went
+   from 593 to 3001166. This is the hypothesis the earlier probe could not
+   exclude, and it is now excluded outright.
+2. **Microseconds.** The rise over the 0-second call is 1000875 for a 1-second
+   sleep and 3000573 for a 3-second one — 1.001 s and 3.001 s read as
+   microseconds, matching the independent variable to 0.1%. Read as
+   milliseconds those are 1000 s and 3000 s, which is absurd.
+3. **Per call, not cumulative.** A running total would put the third call at
+   593 + 1001468 + 3000573 ≈ 4002634. It reads 3001166 — its own duration alone.
+4. **It is the server's own measurement, not ours.** Every value is bracketed by
+   the sleep below it and the wall clock above: 1000000 < 1001468 < 1036750, and
+   3000000 < 3001166 < 3038570. A field that included network time would exceed
+   the wall clock; one that measured something other than this call would not
+   track `SECONDS` at all. The ~600 µs floor at `SECONDS=0` is the server-side
+   cost of the call itself.
+
+The `[ASSUMED]` labels on this tag are removed. The timeout reading is disproven,
+not merely unconfirmed.
+
+#### Why this is worth having
+
+It is the one number that separates server time from network time. A call that
+takes 3 s of wall clock is a very different problem depending on whether
+`0x0667` says 2.99 s (the ABAP is slow) or 40 ms (the network or the gateway is).
+`ConnectionMetrics` measures latency with a local clock, which cannot make that
+distinction; the field is what closes the gap.
+
+The tag is not guaranteed present in every response — it appears in the RFCPING,
+STFC_CONNECTION and RFC_PING_AND_WAIT replies captured so far, and no rule has
+been established that requires it. Any reader must treat absence as "unknown"
+rather than zero.
+
+### Message variables, and a free-text tag that does not exist
+
+`0x0411`–`0x0414` carry message variables V1–V4, consecutively. Confirmed against
+a purpose-built RFM on A4H kernel 793:
+
+```abap
+MESSAGE e398(00) WITH 'ALPHA1' 'BRAVO2' 'CHARLIE3' 'DELTA4'
+        RAISING four_variables.
+```
+
+| tag | value |
+|-----|-------|
+| `0x0415` | `00` (message class) |
+| `0x0416` | `E` (type) |
+| `0x0417` | `398` (number) |
+| `0x0411`–`0x0414` | `ALPHA1`, `BRAVO2`, `CHARLIE3`, `DELTA4` |
+| `0x0401` | `FOUR_VARIABLES` (key) |
+
+The four values are distinct on purpose — four copies of one string would parse
+identically with the tags in any order. Message `00/398` is `& & & &`, read from
+`T100` rather than assumed; `00/001` is `&1&2&3&4&5&6&7&8` and would have run the
+values together. Fixture `exception_msg_variables_response.bin`.
+
+**`0x040B` is removed.** It had been carried as a free-text message tag, never
+observed in any capture, and tried *first* when resolving the message — ahead of
+`0x0402`, which is captured and confirmed on kernel 752. It was kept on the
+reasoning that dropping an untested fallback is no better evidenced than keeping
+it, which was sound while nothing had been aimed at it. This capture aims at it
+directly: a reply carrying a genuine four-variable message is exactly what would
+populate a free-text tag, and `0x040B` is absent. One untested guess outranking
+one confirmed fact is the wrong way round.
+
+**Kernel 793 sends no assembled message text for a classic exception at all** —
+`0x0402` is absent too. The client is expected to build the sentence from the
+class, number and variables via a `T100` lookup, which this library does not make.
+`AbapApplicationError.message` is therefore `None` on this path, and the
+exception's diagnostic string carries the class, number and variables instead of
+dropping them. On this kernel that is the common case, not an edge case.
+
+### Exception TLV semantics — the tag set varies by release
+
+`0x0417` is the marker: its presence is what makes a response an exception rather than a
+result (an exception response carries no `0x0420` at all). It holds the message number —
+3 characters, e.g. `"000"`, `"341"`. The mapping to *exception key* and *message number*
+was confirmed by matching a `RAISE EXAMPLE` in ABAP against the captured frame, and again
+against `FU_NOT_FOUND` from `RFC_GET_FUNCTION_INTERFACE` for a non-remote-enabled module.
+
+**The tag carrying the key is not the same on every release.** Kernel 793 puts it in
+`0x0401`; a 7.52 system puts it in `0x0403` and adds the free message text in `0x0402`,
+neither of which appears in any 793 capture. A reader that knows only the 793 tags gets
+`key=None` and `message=None` from a 7.52 exception while the text sits unread in the
+frame — this is exactly what happened before
+`tests/golden/framing/signon_incomplete_752_response.bin` was captured. Both spellings are
+now read, 793's first.
+
+**The text encoding is not fixed either.** 793 sends these fields as UTF-16LE; the 7.52
+capture sends them single-byte. The two are not distinguishable by "are all bytes < 0x80"
+— ASCII text in UTF-16LE passes that test too and then decodes as `"L o g o n"` — so the
+width is detected per value from the interleaved-NUL pattern rather than assumed from the
+connection's Unicode flag.
+
+Two `[ASSUMED]` labels remain in `invoke.py`, both waiting on a capture that happens
+to contain the field. Neither affects correctness of the data an RFC call returns —
+they can only make an error message less complete than it could be.
+
+| Tag | Assumed to be | Why it is unconfirmed |
+|-----|---------------|-----------------------|
+| `0x0412`–`0x0414` | Message variables V2–V4 | Only V1 (`0x0411`) has ever appeared. The three are inferred from V1 being `0x0411` and the numbering running consecutively. A capture of a `MESSAGE ... WITH` raising four variables would settle it. |
+| `0x040B` | Free-text exception message | Never observed in any capture. It predates the 7.52 work; `0x0402` is now the *confirmed* free-text tag, and the reader tries `0x040B` first only because removing an untested fallback is a change with no evidence behind it either. If a capture shows `0x040B` is something else, it should be dropped rather than relabelled. |
+
+Also captured but not parsed: the grammar of the `0x0418` call-stack breadcrumb.
 
 ### Binary TABLE descriptor layout (0x0302 / 0x0330) — PARTIALLY CONFIRMED
 

@@ -56,6 +56,33 @@ def connect_from_env() -> Connection:
     )
 
 
+def as_return_rows(ret: object) -> list[dict]:
+    """Normalise a BAPI RETURN parameter to a list of rows.
+
+    RETURN is a BAPIRET2 *table* on most BAPIs but a single *structure* on some,
+    BAPI_TRANSACTION_COMMIT among them — and which one you get also depends on the
+    function interface the metadata reports. Code that checks only one shape does
+    not fail when it meets the other; it silently finds no error rows and reports
+    success. That is worth being strict about here, because the caller of this
+    helper decides whether to tell the operator a user was created.
+    """
+    if ret is None:
+        return []
+    if isinstance(ret, dict):
+        return [ret]
+    if isinstance(ret, list):
+        bad = [r for r in ret if not isinstance(r, dict)]
+        if bad:
+            raise TypeError(f"RETURN table contains a non-row entry: {bad[0]!r}")
+        return ret
+    raise TypeError(f"unexpected RETURN shape {type(ret).__name__}: {ret!r}")
+
+
+def rows_failed(rows: list[dict]) -> bool:
+    """True if any BAPIRET2 row is an error row."""
+    return any(row.get("TYPE", "").strip() in ERROR_TYPES for row in rows)
+
+
 def print_return_table(rows: list[dict], indent: str = "  ") -> bool:
     """Print a BAPIRET2 RETURN table. Returns True if it contains an error row.
 
@@ -113,7 +140,7 @@ def create_user(conn: Connection, username: str, password: str) -> bool:
     result = conn.call("BAPI_USER_CREATE1", **payload)
 
     print("RETURN:")
-    failed = print_return_table(result["RETURN"])
+    failed = print_return_table(as_return_rows(result.get("RETURN")))
     if failed:
         print("\nBAPI reported an error — not committing.")
         return False
@@ -121,10 +148,15 @@ def create_user(conn: Connection, username: str, password: str) -> bool:
     # BAPIs stage their work; nothing is persisted until the commit runs.
     print("\nCalling BAPI_TRANSACTION_COMMIT ...")
     commit = conn.call("BAPI_TRANSACTION_COMMIT", WAIT="X")
-    commit_return = commit.get("RETURN")
-    # BAPI_TRANSACTION_COMMIT's RETURN is a single structure, not a table.
-    if isinstance(commit_return, dict) and commit_return.get("TYPE", "").strip() in ERROR_TYPES:
-        print(f"  commit failed: {commit_return.get('MESSAGE', '').strip()}")
+    # RETURN is a structure here on most systems and a table on others. The check
+    # used to look only for a dict, so on a system that answers with a table a
+    # failed commit fell straight through to the success message below and the
+    # operator was told a user existed that did not.
+    commit_rows = as_return_rows(commit.get("RETURN"))
+    if rows_failed(commit_rows):
+        for row in commit_rows:
+            if row.get("TYPE", "").strip() in ERROR_TYPES:
+                print(f"  commit failed: {row.get('MESSAGE', '').strip()}")
         return False
 
     print(f"  committed — user {username!r} created.")
@@ -136,7 +168,7 @@ def show_user(conn: Connection, username: str) -> None:
     print(f"\nCalling BAPI_USER_GET_DETAIL for {username!r} ...")
     detail = conn.call("BAPI_USER_GET_DETAIL", USERNAME=username)
 
-    if print_return_table(detail.get("RETURN", [])):
+    if print_return_table(as_return_rows(detail.get("RETURN"))):
         return
 
     address = detail.get("ADDRESS") or {}

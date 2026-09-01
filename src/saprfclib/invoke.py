@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import struct
 from collections.abc import Iterator
 from typing import Any
@@ -177,13 +178,48 @@ _TAG_EXCEPTION_MSG_CLASS = 0x0415  # message class, e.g. "FL"
 _TAG_EXCEPTION_MSG_TYPE = 0x0416  # message type, e.g. "E"
 _TAG_EXCEPTION_MSG_NUMBER = 0x0417  # same tag as the marker above
 _TAG_EXCEPTION_MSG_V1 = 0x0411  # first message variable
-# [ASSUMED] V2-V4 follow V1 consecutively. No capture yet carries more than one
-# variable, so these are inference from 0x0411; a reply that fills them would confirm
-# or correct them. They are read defensively — an absent tag simply yields None.
+# CONFIRMED: V2-V4 do follow V1 consecutively. Previously inferred from 0x0411,
+# because no capture carried more than one variable. A purpose-built RFM raising
+# MESSAGE e398(00) WITH four DISTINCT values put each one in its own tag --
+# 'ALPHA1' in 0x0411, 'BRAVO2' in 0x0412, 'CHARLIE3' in 0x0413, 'DELTA4' in
+# 0x0414. Distinct values matter: four copies of one string would have parsed
+# identically with the tags in any order.
+# Source: golden fixture exception_msg_variables_response.bin, A4H kernel 793.
 _TAG_EXCEPTION_MSG_V2 = 0x0412
 _TAG_EXCEPTION_MSG_V3 = 0x0413
 _TAG_EXCEPTION_MSG_V4 = 0x0414
-_TAG_EXCEPTION_MESSAGE = 0x040B  # [ASSUMED] free-text message; not seen in any capture
+# 0x040B was carried here as a free-text message tag and is now gone.
+#
+# It had never appeared in any capture. It was kept, and tried FIRST, on the
+# reasoning that dropping an untested fallback is no better evidenced than
+# keeping it. That reasoning was sound while nothing had been aimed at it; the
+# same probe that confirmed V2-V4 aimed at it directly and settles it.
+#
+# That exception carries a genuine four-variable message, so it is exactly the
+# reply that would populate a free-text tag if one existed. Its full tag set is
+# 0x0500, 0x0415, 0x0416, 0x0417, 0x0411-0x0414, 0x0401 -- no 0x040B, and no
+# 0x0402 either. Kernel 793 sends NO assembled message text for a classic
+# exception at all; the client is expected to build it from the message class,
+# number and variables, which needs a T100 lookup this library does not make.
+#
+# Keeping an unevidenced tag in first position is not neutral: whatever it held
+# would be surfaced as the message ahead of 0x0402, which IS confirmed (on 752,
+# fixture signon_incomplete_752_response.bin). One untested guess outranking one
+# captured fact is the wrong way round.
+# Kernel 752 raises the same failure with a different tag set: no 0x0401 at all, the
+# name in 0x0403, and the readable text in 0x0402. Captured live from a signon
+# refusal (0x0415 '00', 0x0416 'X', 0x0417 '341'):
+#     0x0403 'CALL_FUNCTION_SIGNON_INCOMPL'
+#     0x0402 'Logon data incomplete.'
+# 0x0401 appears to name a RAISEd exception and 0x0403 an X-message abort, but only
+# one capture of each exists, so both are read as candidates for the key rather than
+# claiming which is which. Without these fallbacks the same error surfaced with
+# key=None and message=None while the text sat unread in 0x0402.
+_TAG_EXCEPTION_KEY_ALT = 0x0403
+_TAG_EXCEPTION_TEXT = 0x0402
+# 0x0418 accompanies the 752 refusal with an ABAP call-stack breadcrumb, e.g.
+# ";W=SAPMSSY1,E=703,H=2,N=1;S=REMOTE_FUNCTION_CALL,P=S...". Not parsed - the field
+# layout is unconfirmed and nothing needs it.
 
 # RFC version string (confirmed from golden fixture)
 _RFC_VERSION = b"754"
@@ -785,6 +821,69 @@ def parse_gateway_error(payload: bytes) -> str | None:
     return " | ".join(parts) if parts else payload.decode("utf-8", "replace")[:200]
 
 
+_CPIC_PRINTABLE_RATIO = 0.7  # below this, the EBCDIC reading is not text
+
+
+def parse_cpic_error(payload: bytes) -> str | None:
+    """Return the text of a CPIC-layer error frame, if this payload is one.
+
+    When the conversation fails below the RFC layer the peer answers in EBCDIC
+    rather than TLV. Observed live (kernel 793) for every call attempted without a
+    completed logon — no logon frame at all, credentials omitted, and credentials
+    empty all produced the identical 97-byte body::
+
+        c6 d9 c5 c5 40 40 40 40  f1 40 00 00  f0 f0 f0 f2 f4  85 99 99 96 99 ...
+        F  R  E  E  (spaces)     1     ...    0  0  0  2  4   e  r  r  o  r  ...
+
+    decoding to ``FREE 1 00024error during logon``.
+
+    Deliberately not parsed into fields. One capture is not enough to claim the
+    layout — what "FREE" and the numbers mean is unconfirmed — but the message text
+    is plainly useful, and surfacing it beats reporting an unreadable response.
+    Distinct from ``_COM_HEAD``, the EBCDIC "RFC000000000" that prefixes a logon
+    frame in the other direction.
+
+    Returns None for anything that does not read as EBCDIC text, so a genuine TLV
+    frame is never mistaken for one; verified against every golden response fixture.
+    """
+    if not payload:
+        return None
+    raw = payload.rstrip(b"\x00\x20\x40")  # NUL, ASCII space, EBCDIC space
+    if not raw:
+        return None
+    try:
+        text = raw.decode("cp500")
+    except (UnicodeDecodeError, LookupError):
+        return None
+    printable = sum(1 for ch in text if ch.isprintable())
+    if printable / len(text) < _CPIC_PRINTABLE_RATIO:
+        return None
+    words = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    if not words or not re.search(r"[A-Za-z]{4,}", words):
+        return None
+    return words
+
+
+def _decode_error_text(value: bytes | None) -> str:
+    """Decode an error/exception TLV value, detecting its width.
+
+    These fields are NOT reliably UTF-16LE. Kernel 793 sends them UTF-16LE
+    (``0x0417`` = ``b"0\x004\x006\x00"``), while kernel 752 sends the same fields
+    single-byte (``0x0417`` = ``b"341"``, ``0x0411`` = 28 bytes for a 28-character
+    name). Decoding one as the other yields mojibake rather than an error, so the
+    failure is silent and the message reaches the caller as noise.
+
+    UTF-16LE ASCII text has a NUL as every second byte; single-byte text does not.
+    Testing "every byte below 0x80" does not discriminate — UTF-16LE ASCII passes it
+    too — so the interleaved NULs are the reliable signal.
+    """
+    if not value:
+        return ""
+    if len(value) >= 2 and len(value) % 2 == 0 and all(b == 0 for b in value[1::2]):
+        return value.decode("utf-16-le", errors="replace").rstrip("\x00 ")
+    return value.decode("latin-1", errors="replace").rstrip("\x00 ")
+
+
 def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -> None:
     """Raise the typed error an RFC response carries, if it carries one.
 
@@ -814,8 +913,14 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
         try:
             tags = _parse_tlv_stream(resp)
         except ValueError as exc:
-            # Not an RFC response at all. Report that, rather than the tag and length
-            # read out of whatever the bytes actually were.
+            # Not an RFC response at all. Before reporting the tag and length read
+            # out of whatever the bytes actually were, see whether the peer answered
+            # below the RFC layer — a CPIC error frame is EBCDIC, not TLV.
+            cpic = parse_cpic_error(resp)
+            if cpic is not None:
+                raise CommunicationError(
+                    f"the connection failed below the RFC layer: {cpic}"
+                ) from exc
             preview = resp[:40].decode("utf-8", "replace")
             raise CommunicationError(
                 f"the response is not a readable RFC message ({len(resp)} bytes, "
@@ -826,15 +931,17 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
 
     # AbapApplicationError: signaled by 0x0417 exception number tag (from live fixture).
     if _TAG_EXCEPTION_NUMBER in tags:
-        key = _decode_utf16le(tags.get(_TAG_EXCEPTION_KEY))
-        msg_class = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS))
-        msg_type = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE))
-        msg_number = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER))
-        msg_v1 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1))
-        msg_v2 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2))
-        msg_v3 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3))
-        msg_v4 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4))
-        message = _decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
+        key = _decode_error_text(tags.get(_TAG_EXCEPTION_KEY)) or _decode_error_text(
+            tags.get(_TAG_EXCEPTION_KEY_ALT)
+        )
+        msg_class = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_CLASS))
+        msg_type = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_TYPE))
+        msg_number = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_NUMBER))
+        msg_v1 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V1))
+        msg_v2 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V2))
+        msg_v3 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V3))
+        msg_v4 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V4))
+        message = _decode_error_text(tags.get(_TAG_EXCEPTION_TEXT))
         raise AbapApplicationError(
             key=key or None,
             msg_class=msg_class or None,
@@ -854,14 +961,14 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
         rc = struct.unpack(">I", rc_bytes)[0]
         if rc != 0:
             raise AbapSystemFailure(
-                msg_class=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS)) or None,
-                msg_type=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE)) or None,
-                msg_number=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER)) or None,
-                msg_v1=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1)) or None,
-                msg_v2=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
-                msg_v3=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
-                msg_v4=_decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
-                message=_decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
+                msg_class=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_CLASS)) or None,
+                msg_type=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_TYPE)) or None,
+                msg_number=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_NUMBER)) or None,
+                msg_v1=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V1)) or None,
+                msg_v2=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
+                msg_v3=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
+                msg_v4=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
+                message=_decode_error_text(tags.get(_TAG_EXCEPTION_TEXT))
                 or f"RFC return code {rc}",
             )
 
@@ -898,35 +1005,22 @@ def parse_invoke_response(
     # and surfaces later as a confusing KeyError in caller code.
     rc_bytes = tags.get(_TAG_RETURN_CODE)
     if rc_bytes is None:
+        # An empty payload is not a malformed one — there is nothing there to be
+        # malformed. Some releases refuse a call by answering with the frame header
+        # and no body at all (observed on 7.52, where the same refusal that kernel
+        # 793 spells out as an EBCDIC CPIC error arrives as 80 bytes of header), so
+        # say which of the two happened rather than blaming the parser.
+        if not resp:
+            raise CommunicationError(
+                "the server answered with an empty frame: no response body at all, so "
+                "neither a result nor an error was reported. The call did not run and "
+                "the conversation is gone; this connection should be discarded."
+            )
         raise CommunicationError(
             f"malformed RFC response: no return-code TLV 0x{_TAG_RETURN_CODE:04x} and no "
             f"exception tags in {len(resp)} byte(s) of response payload — the server "
             f"aborted the call; this connection should be discarded"
         )
-    if rc_bytes is not None:
-        if len(rc_bytes) != 4:
-            raise ValueError(f"return-code TLV 0x0420 has length {len(rc_bytes)}, expected 4")
-        rc = struct.unpack(">I", rc_bytes)[0]
-        if rc != 0:
-            # Non-zero rc without an exception-key tag → system failure
-            msg_class = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_CLASS))
-            msg_type = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_TYPE))
-            msg_number = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_NUMBER))
-            msg_v1 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V1))
-            msg_v2 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V2))
-            msg_v3 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V3))
-            msg_v4 = _decode_utf16le(tags.get(_TAG_EXCEPTION_MSG_V4))
-            message = _decode_utf16le(tags.get(_TAG_EXCEPTION_MESSAGE))
-            raise AbapSystemFailure(
-                msg_class=msg_class or None,
-                msg_type=msg_type or None,
-                msg_number=msg_number or None,
-                msg_v1=msg_v1 or None,
-                msg_v2=msg_v2 or None,
-                msg_v3=msg_v3 or None,
-                msg_v4=msg_v4 or None,
-                message=message or f"RFC return code {rc}",
-            )
 
     # --- Success path: extract 0x0201/0x0203 value pairs ---
     # Build a name→FieldDesc map for EXPORTING params (server → caller).
@@ -1105,10 +1199,20 @@ def decode_basxml_table(payload: bytes, table_name: str = "") -> list[dict[str, 
     arrives split across 0x3c05 records that must be joined before parsing.
 
     Each ``<item>`` becomes one row and each element inside it a key. The observed
-    form carries the whole delimited row in a single ``<LINE>`` element — the same
-    buffer ``DATA`` would have held — but the documented form puts one element per
-    field, so both are handled by the same walk: whatever elements an item contains
-    become that row's keys.
+    form carries the whole delimited row in a single ``<LINE>`` element, but the
+    documented form puts one element per field, so both are handled by the same walk:
+    whatever elements an item contains become that row's keys.
+
+    Multi-row is confirmed, not inferred: a ten-row T100 read arrived as ten
+    ``<item>`` elements split across two 0x3c05 fragments of 9 and 773 bytes — the
+    first holding only the opening tag. Fragment boundaries fall wherever the server
+    chooses and not on item boundaries, which is why the fragments are joined before
+    parsing rather than parsed one at a time.
+
+    One difference from the binary encoding worth knowing: the XML form does NOT
+    blank-pad fields to their DDIC width. The same query returns ``ARBGB`` as
+    ``'FL'`` here and as ``'FL'`` plus eighteen spaces through ``DATA``. Row content
+    is otherwise identical field for field.
 
     Values are returned as text. No type conversion is applied, because the element
     carries no type information and the row is delimited exactly as the caller's
@@ -1420,3 +1524,136 @@ def _decode_utf16le(value: bytes | None) -> str:
         except Exception:
             pass
     return value.decode("ascii", errors="replace").rstrip("\x00 ")
+
+
+# Response timing record. 8 bytes, little-endian IEEE-754 double, carrying the
+# server-side duration of the call being answered, in microseconds -- per call,
+# not cumulative.
+#
+# Bytes: golden fixtures rfcping_response.bin / stfc_connection_response.bin.
+# Meaning: behavioural probe against A4H kernel 793. RFC_PING_AND_WAIT sleeps a
+# known interval and returns a constant-size reply, which separates duration from
+# response size -- the pair the earlier rows-read probe could not tell apart.
+# Across 0/1/3-second sleeps the reply held at 236 bytes while the value tracked
+# the sleep to 0.1% read as microseconds, and every reading was bracketed by the
+# sleep below it and the wall clock above. See docs/protocol/framing.md.
+_TAG_SERVER_DURATION = 0x0667
+
+
+def extract_server_duration(tlv: bytes) -> float | None:
+    """Server-side duration of the answered call, in **seconds**, or None.
+
+    ``None`` means the tag was not in this response, and it means exactly that.
+    No release rule has been established that requires the field, so absence is
+    unknown rather than zero -- reporting a missing measurement as 0.0 would put a
+    fabricated number into a metrics series, where it reads as an impossibly fast
+    call rather than as no data.
+
+    Walks the same wire dialect as every other reader here: extended lengths for
+    payloads >= 0xFFFF, and a repeated close tag after each record. Never raises:
+    a malformed tail yields whatever was found before it, because the caller is
+    recording a metric and must not turn a timing detail into a call failure.
+    """
+    pos, n = 0, len(tlv)
+    found: float | None = None
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", tlv, pos)
+        pos += 4
+        if tag == _TAG_TERMINATOR:
+            break
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                break
+            length = struct.unpack_from(">I", tlv, pos)[0]
+            pos += 4
+        if pos + length > n:
+            break
+        if tag == _TAG_SERVER_DURATION and length == 8:
+            # Microseconds on the wire; seconds in the public surface, to match
+            # CallStats.duration_s so the two are directly comparable.
+            found = struct.unpack_from("<d", tlv, pos)[0] / 1_000_000.0
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
+            pos += 2
+    return found
+
+
+# Multi-frame responses. A reply larger than the gateway's frame size arrives as
+# several NI frames whose TLV bodies concatenate directly, with no per-frame
+# trailer and no re-framing: the second frame simply carries the remaining bytes
+# of the record the first one was cut inside.
+#
+# Confirmed live on A4H kernel 793, RFC_READ_TABLE on DD03L with ROWCOUNT=2000.
+# The reply arrived as a 28080-byte frame (type 0x06cb) that stopped 197 bytes
+# short of a 250-byte 0x0305 record, followed by a 25593-byte frame (type 0x0609)
+# whose body is not a TLV stream at all -- it begins mid-record. Joining the two
+# bodies gives 53513 bytes that walk cleanly to the 0xFFFF terminator with 2
+# bytes trailing.
+#
+# The termination rule. Two header fields do track continuation, and neither can
+# drive the loop.
+#
+# Bytes 17-20 (BE int32) read -1 on a frame that continues and 500 on the one
+# that ends the response; bytes 60-63 (BE uint32) read 0 and 1. That is now
+# confirmed rather than inferred: a 591337-byte reply on A4H kernel 793 arrived
+# as 22 frames, and all twenty-one continuing frames read -1/0 while the last
+# read 500/1. The gateway chunks at exactly 28000 payload bytes per frame, which
+# is why a DD03L read tipped over into multiple frames at around 2000 rows.
+#
+# They still cannot be the loop condition, because the same values appear on
+# signon_incomplete_752_response.bin and cpic_logon_error_response.bin -- both
+# complete terminal replies with nothing following them. Whatever the field
+# means, it is broader than "another frame follows"; a reader keyed on it would
+# wait forever on a refused logon. So the stream's own 0xFFFF terminator drives
+# reassembly, which is confirmed structure and answers exactly the question being
+# asked.
+#
+# The confirmed direction is the useful one: a frame that reports itself final
+# while the stream is still short is a real inconsistency, and reading on would
+# consume the next call's reply. connection._frame_reports_itself_final uses it
+# as that check and nothing else.
+#
+# Bytes 56-59 (BE uint32) are this frame's own payload length, exact on all 16
+# frames checked -- 9 independently captured golden fixtures plus the 7 probe
+# frames. Not needed for reassembly, since the NI prefix already gives it, but it
+# is a free cross-check that the 80-byte header split is right.
+_TLV_COMPLETE = "complete"
+_TLV_TRUNCATED = "truncated"
+_TLV_NOT_TLV = "not_tlv"
+
+
+def tlv_stream_status(tlv: bytes) -> str:
+    """Classify a TLV buffer: complete, truncated mid-record, or not TLV at all.
+
+    The three-way split matters because only the middle case may read another
+    frame. Treating "not TLV" as "truncated" would make the reader wait on a
+    reply that has already arrived in full:
+
+    - ``complete``  -- the walk reached the 0xFFFF terminator.
+    - ``truncated`` -- at least one record parsed and then a record's length ran
+      past the end of the buffer. This is the multi-frame case: the parser was
+      still in sync when the data stopped.
+    - ``not_tlv``   -- nothing parsed, or the buffer ended without a terminator
+      and without overrunning. A CPIC-layer refusal lands here: its body is
+      EBCDIC, so the very first record claims a 50629-byte length inside a
+      97-byte frame, overrunning on record zero rather than after any.
+    """
+    pos, n = 0, len(tlv)
+    records = 0
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", tlv, pos)
+        pos += 4
+        if tag == _TAG_TERMINATOR:
+            return _TLV_COMPLETE
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                return _TLV_TRUNCATED if records else _TLV_NOT_TLV
+            length = struct.unpack_from(">I", tlv, pos)[0]
+            pos += 4
+        if pos + length > n:
+            return _TLV_TRUNCATED if records else _TLV_NOT_TLV
+        pos += length
+        records += 1
+        if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
+            pos += 2
+    return _TLV_NOT_TLV

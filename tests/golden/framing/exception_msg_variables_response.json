@@ -1,0 +1,140 @@
+{
+  "message_type": "EXCEPTION_WITH_FOUR_MESSAGE_VARIABLES",
+  "capture_source": "live capture 2026-09-01; SAP A4H kernel 793. Reply to Z_SAPRFCLIB_MSGVARS, a purpose-built remote-enabled function module whose entire body is: MESSAGE e398(00) WITH 'ALPHA1' 'BRAVO2' 'CHARLIE3' 'DELTA4' RAISING four_variables. Sanitised: the 8-byte GW conversation handle at offset 40 is zeroed, same byte length, so every offset and length stays valid.",
+  "evidence": "the four values are DISTINCT on purpose -- four copies of one string would have parsed identically with the tags in any order and proved nothing. Message 398 of class 00 was read from T100 as '& & & &' (exactly four placeholders, space separated) rather than assumed; message 001 is '&1&2&3&4&5&6&7&8' and would have run the values together.",
+  "tags_present": [
+    "0x0500",
+    "0x0415",
+    "0x0416",
+    "0x0417",
+    "0x0411",
+    "0x0412",
+    "0x0413",
+    "0x0414",
+    "0x0401"
+  ],
+  "expected_parse": {
+    "raises": "AbapApplicationError",
+    "key": "FOUR_VARIABLES",
+    "msg_class": "00",
+    "msg_type": "E",
+    "msg_number": "398",
+    "msg_v1": "ALPHA1",
+    "msg_v2": "BRAVO2",
+    "msg_v3": "CHARLIE3",
+    "msg_v4": "DELTA4",
+    "message": null
+  },
+  "notes": [
+    "CONFIRMS that message variables V2-V4 occupy 0x0412, 0x0413 and 0x0414, following V1 in 0x0411. This had been inference from 0x0411 alone, because no capture carried more than one variable.",
+    "DISPROVES the free-text tag 0x040B by aiming at it directly. This reply carries a genuine four-variable message, so it is exactly the frame that would populate a free-text tag if one existed -- and 0x040B is absent. It had never appeared in any capture and was nonetheless tried FIRST when resolving the message text, ahead of 0x0402 which is captured and confirmed on kernel 752. One untested guess outranking one confirmed fact is the wrong way round, so 0x040B is removed.",
+    "0x0402 is absent too. Kernel 793 sends NO assembled message text for a classic exception: the client is expected to build the sentence from the message class, number and variables via a T100 lookup, which this library does not make. AbapApplicationError.message is therefore None here, and the exception's diagnostic string now carries the class, number and variables instead of dropping them -- on this kernel that is the common case, not an edge case.",
+    "0x0417 carries the message number '398' and is also the tag whose presence marks the response as an exception rather than a result."
+  ],
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 56,
+      "length": 4,
+      "name": "frame_payload_length",
+      "value": "152",
+      "type": "variable",
+      "note": "BE uint32, this frame's own payload length"
+    },
+    {
+      "offset": 60,
+      "length": 4,
+      "name": "final_frame_flag",
+      "value": "1",
+      "type": "variable",
+      "note": "1 = this frame completes the response"
+    },
+    {
+      "offset": 80,
+      "length": 6,
+      "name": "call_end_marker",
+      "value": "0500 0000 ",
+      "type": "variable",
+      "note": "tag 0x0500 len=0"
+    },
+    {
+      "offset": 86,
+      "length": 10,
+      "name": "msg_class",
+      "value": "0415 0004 30003000",
+      "type": "variable",
+      "note": "tag 0x0415 len=4, decodes to '00'"
+    },
+    {
+      "offset": 96,
+      "length": 8,
+      "name": "msg_type",
+      "value": "0416 0002 4500",
+      "type": "variable",
+      "note": "tag 0x0416 len=2, decodes to 'E'"
+    },
+    {
+      "offset": 104,
+      "length": 12,
+      "name": "msg_number",
+      "value": "0417 0006 330039003800",
+      "type": "variable",
+      "note": "tag 0x0417 len=6, decodes to '398'"
+    },
+    {
+      "offset": 116,
+      "length": 18,
+      "name": "msg_v1",
+      "value": "0411 000c 41004c005000480041003100",
+      "type": "variable",
+      "note": "tag 0x0411 len=12, decodes to 'ALPHA1'"
+    },
+    {
+      "offset": 134,
+      "length": 18,
+      "name": "msg_v2",
+      "value": "0412 000c 42005200410056004f003200",
+      "type": "variable",
+      "note": "tag 0x0412 len=12, decodes to 'BRAVO2'"
+    },
+    {
+      "offset": 152,
+      "length": 22,
+      "name": "msg_v3",
+      "value": "0413 0010 43004800410052004c00490045003300",
+      "type": "variable",
+      "note": "tag 0x0413 len=16, decodes to 'CHARLIE3'"
+    },
+    {
+      "offset": 174,
+      "length": 18,
+      "name": "msg_v4",
+      "value": "0414 000c 440045004c00540041003400",
+      "type": "variable",
+      "note": "tag 0x0414 len=12, decodes to 'DELTA4'"
+    },
+    {
+      "offset": 192,
+      "length": 34,
+      "name": "exception_key",
+      "value": "0401 001c 46004f00550052005f005600410052004900410042004c0045005300",
+      "type": "variable",
+      "note": "tag 0x0401 len=28, decodes to 'FOUR_VARIABLES'"
+    },
+    {
+      "offset": 226,
+      "length": 4,
+      "name": "terminator",
+      "value": "ffff0000",
+      "type": "fixed",
+      "note": "end of TLV stream"
+    }
+  ]
+}

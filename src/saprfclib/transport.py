@@ -32,6 +32,8 @@ import socket
 import struct
 from typing import cast
 
+from saprfclib.exceptions import SapRfcError
+
 __all__ = [
     "Transport",
     "build_ni_frame",
@@ -39,12 +41,130 @@ __all__ = [
     "connect_tcp",
     "AsyncTransport",
     "connect_tcp_async",
+    "raise_for_ni_error",
+    "is_ni_pong",
+    "enable_keepalive",
+    "DEFAULT_CONNECT_TIMEOUT",
+    "DEFAULT_READ_TIMEOUT",
 ]
+
+# Connecting and waiting for an answer are different waits and need different
+# limits. A TCP connect that has not completed in 10s is not going to; an RFC
+# call that has not answered in 10s may simply be a large BAPI still running.
+# Passing one number for both — which socket.create_connection does, since its
+# timeout becomes the socket's per-operation timeout — forces a choice between
+# hanging forever on a wedged work process and aborting legitimate long calls.
+DEFAULT_CONNECT_TIMEOUT = 10.0
+
+# None means "wait as long as the server takes". That is the correct default for
+# a protocol with no server-side call-duration bound: capping it would abort
+# valid work. It is dangerous only when the peer goes away silently without
+# closing the socket, which is what keepalive below is for.
+DEFAULT_READ_TIMEOUT: float | None = None
+
+# TCP keepalive probing. A stateful firewall or NAT between client and SAP will
+# silently drop an idle mapping, and neither end is told. Without keepalive the
+# next recv() blocks until the OS default gives up (two hours on Linux), which
+# in practice means a hung application. These values start probing after 60s of
+# idle and give up after 5 failed probes at 10s intervals, so a dead path is
+# detected in ~110s rather than ~2h.
+_KEEPALIVE_IDLE = 60
+_KEEPALIVE_INTERVAL = 10
+_KEEPALIVE_COUNT = 5
+
+
+def enable_keepalive(sock: socket.socket) -> None:
+    """Turn on TCP keepalive with probe timings suited to RFC connections.
+
+    The per-timing options are platform-specific and simply absent on some
+    systems; each is applied only if this platform defines it, so enabling
+    keepalive never fails on a platform that spells the knobs differently. The
+    base SO_KEEPALIVE flag is portable and is what actually matters — the
+    timings only shorten the detection window from the OS default.
+    """
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for name, value in (
+        ("TCP_KEEPIDLE", _KEEPALIVE_IDLE),
+        ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL),
+        ("TCP_KEEPCNT", _KEEPALIVE_COUNT),
+    ):
+        option = getattr(socket, name, None)
+        if option is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+            except OSError:  # pragma: no cover - platform-dependent
+                # The flag is set; only the timing refinement was refused.
+                pass
 
 
 # framing.md lines 355-368 reference implementation: 4-byte big-endian uint32.
 _NI_HEADER = struct.Struct(">I")
 _NI_HEADER_SIZE = _NI_HEADER.size  # 4
+
+
+# NI control messages are 8-byte ASCII payloads the NI layer handles itself,
+# before anything reaches the RFC layer (docs/protocol/framing.md). NI_RTERR is
+# how a SAProuter reports that it will not carry the route — wrong password,
+# route denied by the router's permission table, or the target unreachable.
+#
+# Nothing here claims to know what follows the marker, and nothing needs to: the
+# marker alone identifies the frame as a router refusal. Without this check that
+# frame reaches the session as if it were the NI version response and is
+# misparsed, so a rejected route surfaces as a confusing protocol error several
+# steps later instead of as "the router said no".
+_NI_RTERR = b"NI_RTERR"
+_NI_PONG = b"NI_PONG"
+
+_NI_ERROR_FALLBACK = (
+    "the SAProuter refused the route. Common causes: the route is not permitted "
+    "by the router's permission table, a hop password is wrong or missing, or the "
+    "target host/port is unreachable from the router"
+)
+
+
+def _ni_error_text(payload: bytes) -> str:
+    """Pull the router's own message out of an NI_RTERR frame.
+
+    Confirmed by live capture (tests/golden/router/ni_rterr_route_denied.bin): the
+    frame carries a NUL-separated ``*ERR*`` record — the same shape the gateway
+    uses — whose second field is the human-readable reason, for example
+    ``saprouter: route permission denied (203.0.113.42 to 10.99.99.99, 3300)``.
+
+    That text names the source address, the target and the port, which is exactly
+    what someone debugging a denied route needs. Falls back to a generic
+    explanation when the record is absent or unreadable, since the marker alone
+    already establishes that the route was refused.
+    """
+    start = payload.find(b"*ERR*")
+    if start < 0:
+        return _NI_ERROR_FALLBACK
+    fields = [f for f in payload[start:].split(b"\x00") if f.strip()]
+    # fields[0] is the "*ERR*" sentinel, fields[1] a record number, fields[2] the
+    # message. Anything shorter means a shape this has not seen.
+    if len(fields) < 3:
+        return _NI_ERROR_FALLBACK
+    message = fields[2].decode("latin-1", "replace").strip()
+    return message or _NI_ERROR_FALLBACK
+
+
+def raise_for_ni_error(payload: bytes) -> None:
+    """Raise if ``payload`` is an NI-layer error control message.
+
+    Called for every inbound frame, so a router refusal is reported where it
+    happens rather than as a malformed RFC frame several steps later.
+    """
+    if payload.startswith(_NI_RTERR):
+        raise SapRfcError(f"SAProuter refused the route: {_ni_error_text(payload)}")
+
+
+def is_ni_pong(payload: bytes) -> bool:
+    """True if ``payload`` is the NI acknowledgement a SAProuter sends.
+
+    Confirmed live: a router that accepts an NI_ROUTE answers with the 8-byte
+    ``NI_PONG\0`` control message before it begins forwarding, and one that
+    refuses answers with NI_RTERR instead.
+    """
+    return payload.startswith(_NI_PONG)
 
 
 def build_ni_frame(payload: bytes) -> bytes:
@@ -90,10 +210,17 @@ class Transport:
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
+        # Cumulative wire bytes, including the 4-byte NI length prefix, so the
+        # figure matches what a packet capture would show rather than the
+        # payload the RFC layer sees.
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
     def send_message(self, payload: bytes) -> None:
         """Send one NI-framed message (4-byte BE length prefix + payload)."""
-        self._sock.sendall(build_ni_frame(payload))
+        frame = build_ni_frame(payload)
+        self._sock.sendall(frame)
+        self.bytes_sent += len(frame)
 
     def recv_message(self) -> bytes:
         """Receive one NI-framed message; loop until complete (short-read guard).
@@ -107,7 +234,10 @@ class Transport:
             raise ValueError(
                 f"NI frame length {length} exceeds cap {self._MAX_FRAME_BYTES} (DoS guard)"
             )
-        return _recv_exactly(self._sock, length)
+        payload = _recv_exactly(self._sock, length)
+        self.bytes_received += _NI_HEADER_SIZE + len(payload)
+        raise_for_ni_error(payload)
+        return payload
 
     @property
     def local_address(self) -> tuple[str, int]:
@@ -128,13 +258,41 @@ class Transport:
         self._sock.close()
 
 
-def connect_tcp(host: str, port: int, *, timeout: float | None = None) -> Transport:
+def connect_tcp(
+    host: str,
+    port: int,
+    *,
+    timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
+) -> Transport:
     """Open a blocking TCP socket and return a Transport bound to it.
 
-    Sets TCP_NODELAY so small RFC frames are not delayed by Nagle's algorithm.
+    Sets TCP_NODELAY so small RFC frames are not delayed by Nagle's algorithm,
+    and enables TCP keepalive so a silently dropped path is detected rather than
+    blocking a later read indefinitely.
+
+    Args:
+        connect_timeout: how long to wait for the TCP handshake. Defaults to
+            :data:`DEFAULT_CONNECT_TIMEOUT`; ``None`` waits indefinitely.
+        read_timeout: how long a single read may block once connected. Defaults
+            to :data:`DEFAULT_READ_TIMEOUT` (``None`` — wait for the server),
+            because RFC has no server-side bound on how long a call may take.
+        timeout: deprecated single value applied to both. Kept so existing
+            callers keep working; prefer the two explicit arguments, since one
+            number cannot express "connect quickly, then wait as long as the
+            call needs".
     """
-    sock = socket.create_connection((host, port), timeout=timeout)
+    if timeout is not None:
+        connect_timeout = timeout
+        read_timeout = timeout
+    sock = socket.create_connection((host, port), timeout=connect_timeout)
+    # create_connection leaves its connect timeout on the socket, where it would
+    # then apply to every later recv. Set the read timeout explicitly so the two
+    # are never conflated by accident.
+    sock.settimeout(read_timeout)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    enable_keepalive(sock)
     return Transport(sock)
 
 
@@ -162,13 +320,17 @@ class AsyncTransport:
     ) -> None:
         self._reader = reader
         self._writer = writer
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
     async def send_message(self, payload: bytes) -> None:
         """Send one NI-framed message (4-byte BE length prefix + payload).
 
         Awaits drain() after write to enforce backpressure (Pitfall 6).
         """
-        self._writer.write(_NI_HEADER.pack(len(payload)) + payload)
+        frame = _NI_HEADER.pack(len(payload)) + payload
+        self._writer.write(frame)
+        self.bytes_sent += len(frame)
         await self._writer.drain()
 
     async def recv_message(self) -> bytes:
@@ -186,7 +348,10 @@ class AsyncTransport:
             raise ValueError(
                 f"NI frame length {length} exceeds cap {self._MAX_FRAME_BYTES} (DoS guard)"
             )
-        return await self._reader.readexactly(length)
+        payload = await self._reader.readexactly(length)
+        self.bytes_received += _NI_HEADER_SIZE + len(payload)
+        raise_for_ni_error(payload)
+        return payload
 
     @property
     def local_address(self) -> tuple[str, int]:
@@ -215,17 +380,29 @@ async def connect_tcp_async(
     port: int,
     *,
     timeout: float | None = None,
+    connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
 ) -> AsyncTransport:
     """Open an asyncio TCP connection and return an AsyncTransport.
 
-    Sets TCP_NODELAY so small RFC frames are not delayed by Nagle's algorithm,
-    mirroring the sync connect_tcp behaviour (transport.py:119-126).
+    Sets TCP_NODELAY and enables TCP keepalive, mirroring :func:`connect_tcp`.
+
+    There is no ``read_timeout`` here on purpose: an asyncio caller bounds a read
+    with ``asyncio.wait_for`` around the await, which cancels cleanly. Setting a
+    socket-level timeout underneath the event loop would not do that.
+
+    Args:
+        connect_timeout: how long to wait for the connection. Defaults to
+            :data:`DEFAULT_CONNECT_TIMEOUT`; ``None`` waits indefinitely.
+        timeout: deprecated alias for ``connect_timeout``.
     """
+    if timeout is not None:
+        connect_timeout = timeout
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(host, port),
-        timeout=timeout,
+        timeout=connect_timeout,
     )
     sock = writer.get_extra_info("socket")
     if sock is not None:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        enable_keepalive(sock)
     return AsyncTransport(reader, writer)

@@ -34,7 +34,13 @@ except (
     __version__ = "0.0.0.dev0"
 
 from saprfclib.codec import decode, encode
-from saprfclib.connection import AsyncConnection, connect, connect_async
+from saprfclib.connection import (
+    AsyncConnection,
+    CallStats,
+    ConnectionMetrics,
+    connect,
+    connect_async,
+)
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
@@ -48,7 +54,7 @@ from saprfclib.exceptions import (
     WebSocketError,
 )
 from saprfclib.language import language_iso_to_sap, language_sap_to_iso
-from saprfclib.pool import AsyncConnectionPool, ConnectionPool
+from saprfclib.pool import AsyncConnectionPool, ConnectionPool, PoolMetrics
 from saprfclib.server import AsyncRfcServer, RfcServer
 from saprfclib.stores import (
     AsyncTidStore,
@@ -84,6 +90,9 @@ __all__ = [
     # Async connection + pool + server (Phase 9 / D-08)
     "connect_async",
     "AsyncConnection",
+    "CallStats",
+    "ConnectionMetrics",
+    "PoolMetrics",
     "AsyncConnectionPool",
     "AsyncRfcServer",
     # Sync server

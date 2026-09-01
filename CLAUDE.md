@@ -45,6 +45,31 @@ If you cannot reach tier 1–3 for a value, you have two legitimate options:
 You do not have a third option. Shipping an unsourced constant is worse than shipping
 nothing — a missing feature is visible, a wrong byte is not.
 
+### Nothing ships unvalidated — including defaults
+
+The tier table above governs *wire values*. This rule governs **commits**: no
+change lands unless every fact it encodes is traceable to a source, and the
+commit says which. That includes the things that do not look like protocol
+facts:
+
+- **Default values.** A default is a claim about what is usually true. "Port 3601,
+  because that is what the lab system uses" is one observation generalised to every
+  installation. If a correct default cannot be derived, there are two honest options:
+  derive it from something the system tells you (a service name in `/etc/services`,
+  a value the server reports), or require the caller to supply it. Picking the value
+  that happens to work here and calling it conventional is a guess.
+- **Error and fallback paths.** "This probably cannot happen" is not validation.
+- **Anything learned from reverse engineering.** RE is legitimate for working out
+  *what to test*. It is not, by itself, validation, and per the legal boundary below
+  it cannot be cited in this repository at all. A fact derived that way is confirmed
+  by putting it on the wire against a real system, and is then recorded as observed
+  wire behaviour — the capture is the evidence, not the disassembly.
+
+If something cannot be validated before the commit, it is labelled `[ASSUMED]`, the
+label says what would settle it, and the PR or commit message says so plainly. An
+unlabelled guess is the one thing that must not get through, because it is
+indistinguishable from a confirmed fact six months later.
+
 ### What "document the gap" means
 
 Leave the code path raising a clear error naming what is unknown, add the open question

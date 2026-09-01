@@ -1,0 +1,11 @@
+version 1.2
+sapdemo1_A4H_00
+DIAG	sapdemo1	3200	LB=7
+DIAGS	sapdemo1	3200	p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE
+RFC	sapdemo1	3300	
+RFCS	sapdemo1	4800	p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE
+HTTP	sapdemo1	50000	
+HTTPS	sapdemo1	50001	
+HTTP	sapdemo1	50000	VHOST=0
+HTTPS	sapdemo1	50001	VHOST=0
+

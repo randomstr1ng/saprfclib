@@ -51,6 +51,19 @@ class LoopbackWsServer:
         self._rx: list[bytes] = []  # reassembly buffer for fragmented messages
         self._thread = threading.Thread(target=self._run, name="loopback-ws", daemon=True)
 
+    def close(self) -> None:
+        """Close the server half of the socketpair.
+
+        Without this the pair leaks: transport.close() only owns the client end, so
+        the server socket stays open until garbage collection and Python reports
+        ResourceWarning. Harmless under the default filters, but it makes the suite
+        unrunnable with -W error and can exhaust descriptors in a long run.
+        """
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
     def start(self) -> None:
         self._thread.start()
 
@@ -133,6 +146,7 @@ def test_binary_round_trip() -> None:
         assert transport.recv_message() == payload
     finally:
         transport.close()
+        server.close()
 
 
 def test_empty_and_large_payload_round_trip() -> None:
@@ -145,6 +159,7 @@ def test_empty_and_large_payload_round_trip() -> None:
         assert transport.recv_message() == big
     finally:
         transport.close()
+        server.close()
 
 
 def test_incoming_ping_is_answered_with_pong() -> None:
@@ -156,6 +171,7 @@ def test_incoming_ping_is_answered_with_pong() -> None:
         assert server.pong_received.wait(timeout=2.0), "server never observed a Pong"
     finally:
         transport.close()
+        server.close()
 
 
 def test_recv_message_enforces_dos_cap_without_allocating() -> None:
@@ -168,6 +184,7 @@ def test_recv_message_enforces_dos_cap_without_allocating() -> None:
             transport.recv_message()
     finally:
         transport.close()
+        server.close()
 
 
 def test_close_sets_stopped_and_joins_ping_thread() -> None:
@@ -177,6 +194,7 @@ def test_close_sets_stopped_and_joins_ping_thread() -> None:
     assert ping_thread is not None
     assert ping_thread.is_alive()
     transport.close()
+    server.close()
     assert transport._stopped is True
     # close() joins and clears the reference; the joined thread has terminated.
     assert not ping_thread.is_alive()
@@ -186,12 +204,14 @@ def test_close_sets_stopped_and_joins_ping_thread() -> None:
 def test_close_is_idempotent() -> None:
     transport, server = _make_ws_loopback()
     transport.close()
+    server.close()
     transport.close()  # must not raise
 
 
 def test_send_after_close_raises_communication_error() -> None:
     transport, server = _make_ws_loopback()
     transport.close()
+    server.close()
     with pytest.raises((CommunicationError, WebSocketError, OSError, ValueError)):
         transport.send_message(b"after close")
 

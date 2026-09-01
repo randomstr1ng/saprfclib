@@ -77,6 +77,7 @@ nav:
     - Framing: protocol/framing.md
     - Serialization: protocol/serialization.md
     - Handshake: protocol/handshake.md
+    - Message Server: protocol/message_server.md
     - SNC: protocol/snc.md
     - tRFC / bgRFC: protocol/trfc.md
     - RE Methodology: protocol/methodology.md

@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import struct
 import threading
@@ -260,7 +261,20 @@ def _extract_5001_params(data: bytes) -> dict[str, str]:
 
     # pos now past all declarations; scan for each pending param's value:
     # pattern: 0x43 [val_len_1B] 0x80 [val_bytes] 0x45
+    #
+    # Values are consumed in order, so pos only moves forward and the whole loop
+    # is linear in the frame -- as long as a failed search stops it. It did not:
+    # when no value was found for a name, pos stayed put and the next name
+    # rescanned the same bytes to the end, making the cost quadratic in
+    # attacker-controlled input. A 269 KB frame carrying 800 declarations and no
+    # values took six seconds of CPU, and this runs on every inbound frame a
+    # registered server receives.
+    #
+    # Stopping is also the correct answer, not just the fast one: a search that
+    # failed over a region will fail identically for every later name, because it
+    # covers exactly the same bytes.
     for name in pending:
+        found = False
         i = pos
         while i + 3 < n:
             if data[i] == 0x43 and data[i + 2] == 0x80:
@@ -269,8 +283,11 @@ def _extract_5001_params(data: bytes) -> dict[str, str]:
                 if val_end < n and data[val_end] == 0x45:
                     params[name] = data[i + 3 : val_end].decode("ascii", "replace")
                     pos = val_end + 1
+                    found = True
                     break
             i += 1
+        if not found:
+            break
 
     return params
 
@@ -349,23 +366,67 @@ def _extract_trfc_params_from_5001(raw_5001: bytes) -> tuple[str, str]:
     return tid, arfcfnam
 
 
-def _gwserv_port(gwserv: str) -> int:
-    """Resolve SAP gateway service name to TCP port.
+# Gateway ports, per SAP's "TCP/IP Ports of All SAP Products":
+#   Gateway          sapgw<NN>    3300   range 3300-3399   33<NN>
+#   Gateway secured  sapgw<NN>s   4800   range 4800-4899   48<NN>
+# <NN> is the application server's instance number, so it is 00-99.
+_GW_PORT_BASE = 3300
+_GW_SNC_PORT_BASE = 4800
+_MAX_INSTANCE = 99
 
-    sapgwNN → 3300+NN; numeric string → int; else socket lookup.
+
+def _instance_from_service(name: str, prefix: str) -> int:
+    """Parse the instance number out of a ``sapgw00``-style service name.
+
+    Raises rather than falling back. A gateway service name whose instance cannot
+    be read is a configuration mistake, and answering it with a plausible default
+    connects the server to the wrong gateway — which does not fail visibly, it
+    registers somewhere nobody is looking for it.
+    """
+    suffix = name.strip()[len(prefix) :]
+    if not suffix.isdigit():
+        raise ValueError(
+            f"cannot read an instance number from service name {name!r}: "
+            f"expected {prefix}NN with NN a two-digit instance, e.g. {prefix}00"
+        )
+    instance = int(suffix)
+    if not 0 <= instance <= _MAX_INSTANCE:
+        raise ValueError(
+            f"instance {instance} in service name {name!r} is outside 0-{_MAX_INSTANCE}; "
+            f"the documented gateway range is {_GW_PORT_BASE}-{_GW_PORT_BASE + 99}"
+        )
+    return instance
+
+
+def _gwserv_port(gwserv: str) -> int:
+    """Resolve a SAP gateway service name to a TCP port.
+
+    ``sapgwNN`` becomes 3300+NN; a numeric string is taken as the port; anything
+    else is looked up in /etc/services.
+
+    Every unreadable form raises. This used to answer ``sapgwfoo``, a bare
+    ``sapgw`` and anything else it could not parse with 3300, and to compute
+    ``sapgw999`` as 4299 and ``sapgw-5`` as 3295 — ports that are not gateways at
+    all. A server that registers against the wrong gateway does not report an
+    error; it simply never receives the calls it is waiting for.
     """
     s = gwserv.strip().lower()
     if s.startswith("sapgw"):
-        try:
-            return 3300 + int(s[5:])
-        except ValueError:
-            return 3300
-    try:
-        return int(s)
-    except ValueError:
-        import socket as _sock
+        return _GW_PORT_BASE + _instance_from_service(s, "sapgw")
+    if s.isdigit():
+        port = int(s)
+        if not 0 < port <= 65535:
+            raise ValueError(f"gateway port {port} is outside 1-65535")
+        return port
+    import socket as _sock
 
+    try:
         return _sock.getservbyname(s, "tcp")
+    except OSError:
+        raise ValueError(
+            f"gateway service {gwserv!r} is neither a sapgwNN name, a port number, "
+            f"nor an entry in /etc/services"
+        ) from None
 
 
 def _dispatcher_svc_8(gwserv: str) -> bytes:
@@ -378,15 +439,30 @@ def _dispatcher_svc_8(gwserv: str) -> bytes:
     """
     s = gwserv.strip().lower()
     if s.startswith("sapgw"):
-        suffix = gwserv.strip()[5:]  # "00" from "sapgw00"
+        instance = _instance_from_service(s, "sapgw")
+    elif s.isdigit():
+        port = int(s)
+        # Both documented gateway ranges map to an instance: 33<NN> plain and
+        # 48<NN> SNC-secured. Taking port-3300 unconditionally turned the SNC
+        # gateway 4800 into instance 1500 and produced "sapdp150" — a truncated
+        # name for a dispatcher that does not exist.
+        if _GW_PORT_BASE <= port <= _GW_PORT_BASE + _MAX_INSTANCE:
+            instance = port - _GW_PORT_BASE
+        elif _GW_SNC_PORT_BASE <= port <= _GW_SNC_PORT_BASE + _MAX_INSTANCE:
+            instance = port - _GW_SNC_PORT_BASE
+        else:
+            raise ValueError(
+                f"gateway port {port} is in neither documented range "
+                f"({_GW_PORT_BASE}-{_GW_PORT_BASE + 99} plain, "
+                f"{_GW_SNC_PORT_BASE}-{_GW_SNC_PORT_BASE + 99} SNC), so the dispatcher "
+                f"service name cannot be derived. Pass gwserv as a sapgwNN name."
+            )
     else:
-        try:
-            port = int(s)
-            sysnr = port - 3300  # 3300 = sapgw00, 3301 = sapgw01, ...
-            suffix = f"{sysnr:02d}"
-        except ValueError:
-            suffix = "00"
-    return f"sapdp{suffix}".ljust(8).encode("ascii")[:8]
+        raise ValueError(
+            f"cannot derive a dispatcher service name from gwserv {gwserv!r}: "
+            f"expected sapgwNN or a gateway port number"
+        )
+    return f"sapdp{instance:02d}".ljust(8).encode("ascii")[:8]
 
 
 class RfcServer:
@@ -883,11 +959,11 @@ class RfcServer:
         unit_store.persist(unit_id, unit_type)
 
         # --- execute buffered calls (exception-isolated, T-06-U03) ---
-        # Each buffered call in the frame was embedded by build_bgrfc_request as
-        # raw bytes under BGRFC_CALL_N params.  For each call, extract and attempt
-        # to dispatch through the standard handler registry (existing isolation block).
-        # If the call bytes cannot be parsed or the handler is missing, treat as
-        # a handler error but continue (isolation: one bad call does not abort the unit).
+        # Each buffered call in the frame was embedded by build_bgrfc_request as raw
+        # bytes under BGRFC_CALL_N params. A unit is one LUW: the calls in it either
+        # all run or none of them count, and the caller re-ships the whole unit after
+        # a failure. So execution stops at the first error rather than carrying on --
+        # running the remaining calls would double-execute them on the resend.
         call_error: str | None = None
         call_count_str = self._extract_param_from_frame(tlv, "BGRFC_CALL_COUNT")
         call_count = 0
@@ -895,25 +971,48 @@ class RfcServer:
             try:
                 call_count = int(call_count_str)
             except ValueError:
-                call_count = 0
+                # Treating an unreadable count as zero commits the unit having run
+                # nothing, and reports that to the caller as a completed LUW.
+                return self._build_system_failure(
+                    f"BGRFC_DEST_SHIP: unreadable BGRFC_CALL_COUNT {call_count_str!r}"
+                )
+            if call_count < 0:
+                return self._build_system_failure(
+                    f"BGRFC_DEST_SHIP: negative BGRFC_CALL_COUNT {call_count}"
+                )
 
         for i in range(call_count):
             call_bytes = self._extract_raw_param_from_frame(tlv, f"BGRFC_CALL_{i}")
             if call_bytes is None:
-                continue
+                # The frame declared more calls than it carries. Skipping the gap
+                # would commit a partial LUW as a complete one.
+                call_error = (
+                    f"bgRFC: frame declares {call_count} call(s) but BGRFC_CALL_{i} is missing"
+                )
+                break
             # Try to decode the embedded call (func_name from UTF-16LE until NUL NUL).
             try:
                 call_error = self._execute_buffered_call(call_bytes)
             except Exception as exc:  # noqa: BLE001 — isolate ALL errors (T-06-U03)
                 call_error = str(exc).splitlines()[0][:512]
+            if call_error is not None:
+                break
 
         if call_error is not None:
             # Exception in a unit call → rollback path (T-06-U03)
             if self._on_rollback_unit is not None:
                 try:
                     self._on_rollback_unit(unit_id, unit_type)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — a bad callback must not kill the server
+                    # Isolated on purpose, but never silently: a rollback handler that
+                    # throws has left the caller's own state half-undone, and that is
+                    # the one thing nobody finds out about later.
+                    _logger.exception(
+                        "bgRFC: on_rollback_unit raised for unit %s (type %s); the unit "
+                        "was rolled back on the wire but the callback did not complete",
+                        unit_id,
+                        unit_type,
+                    )
             return self._build_system_failure(call_error)
 
         # --- success path → on_commit + store committed + on_confirm ---
@@ -921,16 +1020,27 @@ class RfcServer:
             try:
                 self._on_commit_unit(unit_id, unit_type)
             except Exception:  # noqa: BLE001 — isolate callback errors
-                # Commit callback error: still confirm store (persist-then-commit separation)
-                pass
+                # Commit callback error: still confirm store (persist-then-commit
+                # separation). Logged because the unit is about to be confirmed as
+                # done while the caller's commit handler did not finish.
+                _logger.exception(
+                    "bgRFC: on_commit_unit raised for unit %s (type %s); the unit is "
+                    "being confirmed anyway (persist-then-commit separation)",
+                    unit_id,
+                    unit_type,
+                )
 
         unit_store.confirm(unit_id, unit_type)
 
         if self._on_confirm_unit is not None:
             try:
                 self._on_confirm_unit(unit_id, unit_type)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — cleanup must not fail the unit
+                _logger.exception(
+                    "bgRFC: on_confirm_unit raised for unit %s (type %s)",
+                    unit_id,
+                    unit_type,
+                )
 
         return self._build_rfc_ok_response()
 
@@ -947,8 +1057,12 @@ class RfcServer:
         if self._on_confirm_unit is not None:
             try:
                 self._on_confirm_unit(unit_id, unit_type)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — cleanup must not fail the unit
+                _logger.exception(
+                    "bgRFC: on_confirm_unit raised for unit %s (type %s)",
+                    unit_id,
+                    unit_type,
+                )
         return self._build_rfc_ok_response()
 
     def _dispatch_bgrfc_state_query(self, tlv: bytes) -> bytes:
@@ -962,8 +1076,21 @@ class RfcServer:
         if self._on_get_unit_state is not None:
             try:
                 state = self._on_get_unit_state(unit_id, unit_type)
-            except Exception:  # noqa: BLE001
-                state = UnitState.NOT_FOUND
+            except Exception as exc:  # noqa: BLE001
+                # Answering NOT_FOUND here is the worst available answer: it tells the
+                # caller the unit was never seen, so the caller ships it again — and if
+                # it had in fact committed, the LUW runs twice. A failed lookup is not
+                # an absent unit; report that we do not know.
+                _logger.exception(
+                    "bgRFC: on_get_unit_state raised for unit %s (type %s)",
+                    unit_id,
+                    unit_type,
+                )
+                return self._build_system_failure(
+                    f"BGRFC_CHECK_UNIT_STATE_SERVER: state lookup for {unit_id} failed "
+                    f"({type(exc).__name__}: {str(exc).splitlines()[0][:200]}) — the "
+                    f"state is unknown, not NOT_FOUND"
+                )
         else:
             state = self._unit_store.get_unit_state(unit_id, unit_type)
         # Encode state name as a CHAR param in the response TLV.
@@ -987,22 +1114,36 @@ class RfcServer:
         This method is exception-isolated: the caller wraps it in try/except to
         satisfy T-06-U03 (no traceback leak, no credential leak).
         """
+        # Returning None here means "this call succeeded" to the caller, which then
+        # commits and confirms the unit. A call that could not be run is not a call
+        # that ran, so every unexecutable case below reports an error instead.
         if not call_bytes:
-            return None
+            return "bgRFC: buffered call is empty"
 
-        # Decode func_name: the first UTF-16LE string up to NUL NUL (b"\x00\x00" separator)
+        # Decode func_name: the leading UTF-16LE string up to its NUL terminator.
+        #
+        # The terminator is a 0x0000 *code unit*, so it can only start at an even
+        # offset. Scanning with bytes.find(b"\x00\x00") instead matched the low NUL
+        # of the last character plus the first NUL of the terminator -- an odd offset,
+        # every time, for any ASCII name. The odd result was then rejected as
+        # unaligned and the whole payload taken as the name, so the separator branch
+        # never ran and a call carrying parameters decoded to a garbage name.
+        nul_pos = -1
+        for off in range(0, len(call_bytes) - 1, 2):
+            if call_bytes[off] == 0 and call_bytes[off + 1] == 0:
+                nul_pos = off
+                break
         try:
-            nul_pos = call_bytes.find(b"\x00\x00")
-            if nul_pos < 0 or nul_pos % 2 != 0:
-                # No NUL NUL separator found — entire payload is the func_name
+            if nul_pos < 0:
+                # No terminator — the whole payload is the name.
                 func_name = call_bytes.decode("utf-16-le").rstrip("\x00 ")
             else:
                 func_name = call_bytes[:nul_pos].decode("utf-16-le").rstrip("\x00 ")
-        except Exception:
-            return None  # Cannot decode func_name — skip this call
+        except UnicodeDecodeError as exc:
+            return f"bgRFC: cannot decode function name from buffered call ({exc})"
 
         if not func_name:
-            return None
+            return "bgRFC: buffered call carries an empty function name"
 
         entry = self._registry.get(func_name.upper())
         if entry is None and self._generic is not None:
@@ -1011,9 +1152,21 @@ class RfcServer:
             # No handler registered — return error (does not crash the unit)
             return f"bgRFC: no handler registered for {func_name!r}"
 
-        func_desc, handler = entry
+        _func_desc, handler = entry
         # For bgRFC buffered calls, params are not yet deserialized (OG-06-02).
         # Pass an empty request dict until live-capture confirms the encoding.
+        # Say so whenever the call carries more than the name we consumed: the
+        # handler is about to run against no data, and doing that to a business
+        # handler without a word is worse than the missing feature itself.
+        consumed = len(call_bytes) if nul_pos < 0 else nul_pos + 2
+        if len(call_bytes) > consumed:
+            _logger.warning(
+                "bgRFC: calling %s with an empty request — the buffered-call parameter "
+                "encoding is not implemented (OG-06-02), so %d byte(s) of this call are "
+                "being dropped",
+                func_name,
+                len(call_bytes) - consumed,
+            )
         try:
             handler({})
         except Exception as exc:  # noqa: BLE001 — isolate (T-06-U03)
@@ -1238,7 +1391,16 @@ class RfcServer:
                     continue  # pure IMPORTING — client sent it, server does not echo
                 name_upper = field.name.upper()
                 if name_upper not in result_upper:
-                    continue  # handler did not supply this output — skip (optional)
+                    # Skipping is right — output params are optional — but a handler
+                    # that meant to fill this one gets no hint: the client just sees
+                    # the key missing from its result dict.
+                    _logger.debug(
+                        "server: handler for %s returned no value for output parameter "
+                        "%s; it will be absent from the client's result",
+                        func_desc.name,
+                        field.name,
+                    )
+                    continue
                 value = result_upper[name_upper]
                 if field.rfctype == RFCTYPE_TABLE:
                     parts.extend(self._build_table_records(field, value, len(dm_ids) + 1))
@@ -1389,7 +1551,16 @@ class RfcServer:
             _pid9 = prog_id_enc[:9]
             proc_name_10 = _pid9 + b"\x00" + b"\x20" * (9 - len(_pid9))
             local_host_8 = local_host[:8].encode("ascii", "replace").ljust(8, b"\x20")
-            prog_id_16 = prog_id_enc[:8].ljust(16, b"\x20")
+            # 16-byte field, so truncate at 16 — not 8.
+            #
+            # This read prog_id_enc[:8] and was invisible for the capture it was
+            # written from: that used the program ID "python3", seven characters,
+            # so slicing at 8 changed nothing and ljust(16) produced the right
+            # bytes. Any longer ID was silently cut in half — "SAPRFC_TEST"
+            # registered as "SAPRFC_T" — and the gateway then never matches the
+            # SM59 destination, so the server waits for calls that never arrive
+            # with nothing anywhere reporting a problem.
+            prog_id_16 = prog_id_enc[:16].ljust(16, b"\x20")
             ni_init = (
                 b"\x02\x0b"
                 + local_ip_bytes
@@ -1551,7 +1722,7 @@ class AsyncRfcServer(RfcServer):
 
     Handlers may be ``async def handler(request: dict) -> dict`` (awaited) or
     plain ``def handler(request: dict) -> dict`` (called directly).  The
-    dispatch path checks ``asyncio.iscoroutinefunction`` before calling and
+    dispatch path checks ``inspect.iscoroutinefunction`` before calling and
     awaits the result if it returns a coroutine.
 
     Server I/O lifecycle::
@@ -1634,7 +1805,7 @@ class AsyncRfcServer(RfcServer):
         # Dispatch: await async handlers; call sync handlers directly.
         # CancelledError (BaseException) propagates — not caught (Pitfall 7).
         try:
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 result = await handler(request)
             else:
                 result = handler(request)
@@ -1669,7 +1840,15 @@ class AsyncRfcServer(RfcServer):
         peer = writer.get_extra_info("peername", default=("?", 0))
         _logger.debug("[saprfclib-async-server] client connected from %s:%s", *peer)
 
-        tasks: list[asyncio.Task[None]] = []
+        # A set with a done-callback, not a list that only grows.
+        #
+        # Two reasons. Appending to a list and never removing leaks one Task per
+        # call for the lifetime of the connection -- a server handling a million
+        # calls retains a million finished Tasks. And asyncio only holds a weak
+        # reference to a running task, so something must keep a strong one or the
+        # task can be garbage-collected mid-flight; discarding on completion does
+        # both jobs at once.
+        tasks: set[asyncio.Task[None]] = set()
         try:
             while True:
                 try:
@@ -1696,14 +1875,16 @@ class AsyncRfcServer(RfcServer):
                         self._dispatch_and_reply_async(transport, frame),
                         name=f"saprfclib-dispatch-{ft:#06x}",
                     )
-                    tasks.append(task)
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
                 else:
                     _logger.debug("[saprfclib-async-server] unhandled frame 0x%04x, skip", ft)
         except asyncio.CancelledError:
             raise
         finally:
-            # Cancel any outstanding dispatch tasks on disconnect.
-            for t in tasks:
+            # Cancel any dispatch still in flight when the client goes away.
+            # Iterate a copy: the done-callback mutates the set as tasks finish.
+            for t in list(tasks):
                 if not t.done():
                     t.cancel()
             # Close the async transport (best-effort; swallow OSError).

@@ -92,8 +92,25 @@ class AbapApplicationError(SapRfcError):
         self.msg_v4 = msg_v4
         self.message = message
         # Build a useful diagnostic string, omitting absent parts.
-        diagnostic = ": ".join(part for part in (key, message) if part is not None)
-        super().__init__(diagnostic)
+        #
+        # When the server sends no assembled text the variables are all a caller
+        # gets, and dropping them from the string throws away the only part that
+        # says what actually went wrong. That is not an edge case: a classic
+        # exception on kernel 793 carries the message class, number and variables
+        # and NO free text at all -- the client is expected to build the sentence
+        # from T100, which this library does not do. Reporting bare
+        # 'FOUR_VARIABLES' while holding 'ALPHA1', 'BRAVO2', 'CHARLIE3' and
+        # 'DELTA4' unread on the object was the common case, not the rare one.
+        parts = [p for p in (key, message) if p]
+        if message is None:
+            if msg_class and msg_number:
+                parts.append(
+                    f"message {msg_class}/{msg_number}{f' type {msg_type}' if msg_type else ''}"
+                )
+            variables = [v for v in (msg_v1, msg_v2, msg_v3, msg_v4) if v]
+            if variables:
+                parts.append(" ".join(variables))
+        super().__init__(": ".join(parts))
 
 
 class AbapSystemFailure(SapRfcError):

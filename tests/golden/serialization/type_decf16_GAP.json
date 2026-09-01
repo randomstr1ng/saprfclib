@@ -1,19 +1,16 @@
 {
   "message_type": "RFCTYPE_DECF16_FIELD_GAP_MARKER",
   "gap_id": "GAP-B-01",
-  "status": "open — no live capture available",
+  "status": "CLOSED 2026-08-31 — live capture recorded",
   "rfctype": {
     "RFCTYPE_DECF16": 23,
     "RFCTYPE_DECF34": 24
   },
-  "summary": "No RFC function module on the SAP A4H test system (sysnr=00) exposes a DECFLOAT16 or DECFLOAT34 typed parameter. All probes (STFC_DECFLOAT, RFC_DECFLOAT_TEST, DEMO_DECFLOAT_ARITH) returned FU_NOT_FOUND. Per the no-guessing constraint (PROJECT.md D-04/D-05), the DecFloat wire encoding is NOT guessed and NO fixture .bin is fabricated.",
-  "decision": "No type_decf16/type_decf34 .bin+.json fixtures are created. This file is a documentation-only marker (no .bin pair) so the golden-fixture runner skips it. Plan 04 ships NotImplementedError for RFCTYPE_DECF16 (23) and RFCTYPE_DECF34 (24) until a live DecFloat capture closes GAP-B-01.",
-  "header_evidence_only": "SDK type definitions lines 1159-1169 indicate IEEE 754r DPD transmitted big-endian (DecFloat16ToDecFloat16Neutral 'preferred neutral network byte order is Big-Endian'). HIGH confidence from headers but UNCONFIRMED on the wire — insufficient to implement per no-guessing policy.",
-  "probe_log": [
-    "STFC_DECFLOAT → FU_NOT_FOUND",
-    "RFC_DECFLOAT_TEST → FU_NOT_FOUND",
-    "DEMO_DECFLOAT_ARITH → FU_NOT_FOUND"
-  ],
-  "capture_source": "live probe session 2026-06-26 — SAP A4H sysnr=00; no reachable DECFLOAT-typed RFM after exhausting the D-05 fallback chain",
-  "closes_when": "A live capture of a DECFLOAT16 (8-byte) and/or DECFLOAT34 (16-byte) wire field is recorded; then create type_decf16/type_decf34 fixtures and flip GAP-B-01 to CLOSED in docs/protocol/serialization.md."
+  "summary": "The DECFLOAT16/34 wire form is IEEE 754-2008 densely packed decimal, LITTLE-ENDIAN. Captured from A4H (kernel 793) via a purpose-built remote-enabled function module returning nine values of known decimal magnitude at both widths. The capture is tests/golden/serialization/decfloat_response.bin; every expectation in tests/test_decfloat.py is driven from it, decoding and re-encoding byte-exactly in both directions.",
+  "how_it_was_settled": "DPD packs three decimal digits per ten bits, so the number twelve encodes as 0x12 where a binary-integer (BID) encoding would give 0x0c. One captured value of known magnitude therefore separates the two schemes outright. All nine values matched DPD; none matched BID.",
+  "byte_order_correction": "This marker previously recorded big-endian as the expected order, and docs/protocol/serialization.md said the same. The capture disproves it. DECFLOAT16 42.0 is 22 34 00 00 00 00 02 20 as IEEE lays the fields out, and arrives on the wire reversed as 20 02 00 00 00 00 34 22. Read big-endian it decodes to 4.00000000801022E-128 — a plausible number rather than an error, which is why an assumption here would have corrupted values silently.",
+  "why_the_earlier_probe_found_nothing": "The 2026-06-26 probe guessed three function-module names (STFC_DECFLOAT, RFC_DECFLOAT_TEST, DEMO_DECFLOAT_ARITH), all of which returned FU_NOT_FOUND, and that was recorded as 'no DECFLOAT-typed RFM exists'. Missing three guessed names is not evidence of absence. Querying the dictionary directly (DD04L/DD03L for DECFLOAT-typed elements, FUPARAREF for the parameters referencing them, TFDIR for the remote-enabled subset) found 128 such data elements and 38 remote-enabled function modules touching them — though none exposing a scalar DECFLOAT parameter, which is why a purpose-built module was still required.",
+  "ddic_note": "DDIC DATATYPE codes for these types are four characters: D16D/D16N/D16R/D16S for DECFLOAT16 and D34D/D34N/D34R/D34S for DECFLOAT34. DF16_DEC and similar are ABAP type names, not DATATYPE codes; querying on them matches nothing.",
+  "metadata_note": "RFC_GET_FUNCTION_INTERFACE reports DECFLOAT16 with EXID 'a' and DECFLOAT34 with EXID 'e'. See the separate fix mapping 'a', without which every DECFLOAT16 parameter was dropped from the descriptor.",
+  "capture_source": "live capture 2026-08-31 — SAP A4H sysnr=00, kernel 793, release 758, Unicode. Sanitised: GW conversation handle zeroed and the 16-byte session token replaced, both length-preserving."
 }

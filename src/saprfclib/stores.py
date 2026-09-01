@@ -466,7 +466,15 @@ class SqliteTidStore:
         # check_same_thread=False: safe because threading.Lock serialises access.
         self._db: sqlite3.Connection = sqlite3.connect(path, check_same_thread=False)
         self._lock: threading.Lock = threading.Lock()
-        self._migrate()
+        try:
+            self._migrate()
+        except Exception:
+            # __init__ raising leaves this object unreachable with its sqlite
+            # connection still open; it is then finalised at some arbitrary later
+            # point and the ResourceWarning is attributed to whatever is running
+            # then. Close it on the way out.
+            self._db.close()
+            raise
 
     def _migrate(self) -> None:
         """Auto-migrate schema on first open (D-05 / Pitfall 3)."""
@@ -474,6 +482,16 @@ class SqliteTidStore:
             # PRAGMA user_version does not support ? placeholders.
             # The version value is a code constant, NOT user input — safe literal.
             ver: int = self._db.execute("PRAGMA user_version").fetchone()[0]
+            if ver > _SCHEMA_VERSION:
+                # The file was written by a newer saprfclib. Opening it anyway would
+                # read and write it through the older schema this build knows, on a
+                # store whose whole job is to survive a crash intact — so refuse
+                # rather than quietly degrade someone's durable state.
+                raise RuntimeError(
+                    f"{type(self).__name__}: database schema version {ver} is newer "
+                    f"than this library supports ({_SCHEMA_VERSION}). It was written by "
+                    f"a later saprfclib; upgrade rather than opening it with this one."
+                )
             if ver < _SCHEMA_VERSION:
                 self._db.execute(
                     "CREATE TABLE IF NOT EXISTS tids ("
@@ -483,8 +501,12 @@ class SqliteTidStore:
                     " updated REAL"
                     ")"
                 )
-                # Set schema version — literal constant, not user data (safe).
-                self._db.execute("PRAGMA user_version = 1")  # = _SCHEMA_VERSION
+                # PRAGMA does not take ? placeholders, so the value is interpolated.
+                # _SCHEMA_VERSION is an int constant in this module, never user input.
+                # Interpolating it rather than repeating the literal is the point: the
+                # two were separate before, so bumping the constant would have written
+                # a new schema and stamped it with the old version.
+                self._db.execute(f"PRAGMA user_version = {int(_SCHEMA_VERSION)}")
 
     # ---------------------------------------------------------------------- #
     # TidStore state methods
@@ -633,12 +655,30 @@ class SqliteUnitStore:
         # ONE persistent connection for the store lifetime (Pitfall 5).
         self._db: sqlite3.Connection = sqlite3.connect(path, check_same_thread=False)
         self._lock: threading.Lock = threading.Lock()
-        self._migrate()
+        try:
+            self._migrate()
+        except Exception:
+            # __init__ raising leaves this object unreachable with its sqlite
+            # connection still open; it is then finalised at some arbitrary later
+            # point and the ResourceWarning is attributed to whatever is running
+            # then. Close it on the way out.
+            self._db.close()
+            raise
 
     def _migrate(self) -> None:
         """Auto-migrate schema on first open (D-05 / Pitfall 3)."""
         with self._lock, self._db:
             ver: int = self._db.execute("PRAGMA user_version").fetchone()[0]
+            if ver > _SCHEMA_VERSION:
+                # The file was written by a newer saprfclib. Opening it anyway would
+                # read and write it through the older schema this build knows, on a
+                # store whose whole job is to survive a crash intact — so refuse
+                # rather than quietly degrade someone's durable state.
+                raise RuntimeError(
+                    f"{type(self).__name__}: database schema version {ver} is newer "
+                    f"than this library supports ({_SCHEMA_VERSION}). It was written by "
+                    f"a later saprfclib; upgrade rather than opening it with this one."
+                )
             if ver < _SCHEMA_VERSION:
                 self._db.execute(
                     "CREATE TABLE IF NOT EXISTS units ("
@@ -650,8 +690,12 @@ class SqliteUnitStore:
                     " PRIMARY KEY(unit_id, unit_type)"
                     ")"
                 )
-                # Set schema version — literal constant, not user data (safe).
-                self._db.execute("PRAGMA user_version = 1")  # = _SCHEMA_VERSION
+                # PRAGMA does not take ? placeholders, so the value is interpolated.
+                # _SCHEMA_VERSION is an int constant in this module, never user input.
+                # Interpolating it rather than repeating the literal is the point: the
+                # two were separate before, so bumping the constant would have written
+                # a new schema and stamped it with the old version.
+                self._db.execute(f"PRAGMA user_version = {int(_SCHEMA_VERSION)}")
 
     # ---------------------------------------------------------------------- #
     # UnitStore state methods

@@ -1,0 +1,26 @@
+{
+  "message_type": "MULTIFRAME_INVOKE_RESPONSE",
+  "capture_source": "live capture 2026-09-01; SAP NetWeaver AS ABAP (A4H) kernel 793. Reply to RFC_READ_TABLE with QUERY_TABLE=DD03L, DELIMITER='|', ROWCOUNT=2000. Sanitised: the 8-byte GW conversation handle at offset 40 is zeroed in both frames, same byte length, so every offset and length field stays valid. The bodies are SAPCOMPRESS-compressed table rows and contain no hostname, SID, user name or address - the only ASCII runs in 53673 bytes were the handle and the string 'ET_DATA'. NI length prefixes stripped.",
+  "evidence": "the two frames were read consecutively from one socket; joining their bodies gives 53513 bytes that walk cleanly to the 0xFFFF terminator with 2 bytes trailing, which neither frame does alone",
+  "files": {
+    "multiframe_read_table_part1.bin": "28080 bytes, GW type 0x06cb. Body 28000 B. The TLV walk consumes 27799 B and stops needing 250 bytes of a 0x0305 record with 197 left - in sync, simply out of data.",
+    "multiframe_read_table_part2.bin": "25593 bytes, GW type 0x0609. Body 25513 B. NOT a TLV stream: it begins mid-record, with the remaining bytes of the 0x0305 record part1 was cut inside. Walking it standalone fails immediately on a bogus tag 0x1d5e.",
+    "multiframe_middle_frame.bin": "28080 bytes, from a 22-frame reply to RFC_READ_TABLE on DD03L with ROWCOUNT=20000 (591337 bytes total). A MIDDLE frame -- neither first nor last -- which is what a two-frame capture cannot provide. Bytes 17-20 read -1 and bytes 60-63 read 0, as on every one of the twenty-one continuing frames.",
+    "multiframe_final_frame.bin": "1657 bytes, the last frame of that same 22-frame reply. Bytes 17-20 read 500 and bytes 60-63 read 1. Bytes 56-59 give its own payload length, 1577."
+  },
+  "notes": [
+    "This is the capture that established multi-frame responses. Before it, Connection.call issued exactly one recv_message() per invoke, so any reply larger than one gateway frame failed with 'malformed TLV: tag 0x0305 length 250 exceeds remaining payload (197 bytes)' - and, worse, left the remainder queued on the socket for the next call to misread.",
+    "The bodies concatenate directly. There is no per-frame trailer, no length preamble on the continuation, and no re-framing: part2 is the literal continuation of part1's byte stream.",
+    "Bytes 56-59 are a BE uint32 giving THIS frame's payload length: 28000 and 25513, matching exactly. Verified against 9 other golden fixtures where it also equals the body length on every server response, and reads 0 on client requests. The doc previously mapped 52-63 as an RFC library name string, which these frames disprove - the region is three BE uint32.",
+    "SETTLED by a 22-frame capture. Bytes 17-20 (BE int32) read -1 on a continuing frame and 500 on the last; bytes 60-63 (BE uint32) read 0 and 1. All twenty-one continuing frames of the 20000-row reply agreed, so this is no longer inference from a single continuing frame. The earlier note here said no field was confirmed to mean 'more follows' -- that was the right call on two frames, where 'continues the response' and 'does not end the stream' are the same statement.\nThey are still NOT the reassembly condition, and that has not changed: both read the continuing value on signon_incomplete_752_response.bin and cpic_logon_error_response.bin, complete terminal replies with nothing following. Whatever the field means it is broader than 'another frame follows', and a loop keyed on it would wait forever on a refused logon. The stream's 0xFFFF terminator drives reassembly; the marker is used only in the direction it is safe in -- a frame claiming to be final while the stream is short is an inconsistency worth refusing, because reading on would consume the next call's reply.",
+    "The capture continued past part2 with 40 identical 80-byte frames of GW type 0x06ce - a bare GW header plus RFC marker, zero TLV payload. What produces them is not established. They contribute nothing to reassembly and the loop stops before reaching them, but a reader that kept going on an empty frame would spin rather than progress, which is why one is refused explicitly.",
+    "The gateway chunks at exactly 28000 payload bytes per frame (28080 with the 80-byte header). That is why a DD03L read crosses into multiple frames at around 2000 rows, and why the 20000-row reply needed 22."
+  ],
+  "expected_parse": {
+    "part1_alone": "truncated",
+    "part2_alone": "not_tlv",
+    "joined": "complete",
+    "joined_body_length": 53513,
+    "joined_walk_consumes": 53511
+  }
+}

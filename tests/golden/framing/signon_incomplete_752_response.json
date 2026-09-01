@@ -1,0 +1,52 @@
+{
+  "message_type": "SIGNON_INCOMPLETE_RESPONSE",
+  "capture_source": "live capture 2026-08-31; SAP NetWeaver AS ABAP 7.52 kernel 753. Reply to an RFC_PING invoke sent after a logon frame that omits the user and password TLVs. Sanitised: GW conversation handle zeroed, internal hostname and SID replaced, host address replaced with RFC 5737 TEST-NET-1. Every substitution is the same byte length as what it replaced, so all TLV lengths and offsets remain valid. No NI length prefix.",
+  "evidence": "byte-identical bodies were produced by six attempts on this system - RFC_PING, RFC_SYSTEM_INFO and SAP_RFC_SYSTEM_INFO, each with the credential TLVs omitted and with them present but empty - while an authenticated logon on the same system succeeded",
+  "ni_header_length": 0,
+  "notes": [
+    "This is the 7.52 counterpart of cpic_logon_error_response.bin. The same unauthenticated attempt that a kernel 793 system refuses below the RFC layer with an EBCDIC CPIC frame is refused here at the RFC layer, with an ordinary ABAP exception. Neither release exposes any function module pre-authentication.",
+    "The exception key arrives in 0x0403 and the message text in 0x0402. Neither tag appears in the kernel 793 exception captures, which carry the key in 0x0401 and no free text at all - so a reader that knows only the 793 tags reports key=None and message=None while 'Logon data incomplete.' sits unread in the frame.",
+    "0x0411 repeats the key as message variable 1. 0x0415/0x0416/0x0417 carry message class 00, type X, number 341 as on 793.",
+    "The text fields here are single-byte, NOT UTF-16LE. A UTF-16LE-only decoder renders them as mojibake ('Logon data incomplete.' becomes '潌潧⁮慤慴⁩据浯汰瑥⹥'). Width is detected per value from the interleaved NUL pattern rather than assumed from the connection's Unicode flag.",
+    "0x0418 carries an ABAP call-stack breadcrumb (window, event, screen, program). Not parsed - one capture is not enough to fix the grammar - but it is what identifies the refusal as coming from SAPMSSY1 rather than from a function module.",
+    "There is no 0x0450/0x0452/0x0453 in this frame. The system identifies itself through 0x0008 (host_SID_instance), 0x0006, 0x0007 and 0x0018 instead. A reader that expects 0x0450 gets an empty sys_id, which is why descriptor caching cannot key on it unconditionally."
+  ],
+  "expected_parse": {
+    "raises": "AbapApplicationError",
+    "key": "CALL_FUNCTION_SIGNON_INCOMPL",
+    "message": "Logon data incomplete.",
+    "msg_class": "00",
+    "msg_type": "X",
+    "msg_number": "341",
+    "msg_v1": "CALL_FUNCTION_SIGNON_INCOMPL",
+    "has_return_code": false,
+    "body_length": 413,
+    "total_length": 493
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06cb",
+      "type": "fixed",
+      "note": "RFC data frame"
+    },
+    {
+      "offset": 40,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "00000000",
+      "type": "variable",
+      "note": "SANITISED, length preserved"
+    },
+    {
+      "offset": 80,
+      "length": 4,
+      "name": "tlv_start",
+      "value": "0x0101",
+      "type": "fixed",
+      "note": "first TLV record of the body"
+    }
+  ]
+}

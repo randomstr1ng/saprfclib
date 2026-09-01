@@ -289,7 +289,7 @@ def test_end_to_end_mock(monkeypatch) -> None:
     # Script the MockTransport: 4 handshake responses + 1 bootstrap + 1 invoke
     responses = _scripted_handshake_responses(extra=[bootstrap_resp, invoke_resp])
     transport = MockTransport(responses)
-    monkeypatch.setattr(connection_mod, "connect_tcp", lambda host, port, timeout=None: transport)
+    monkeypatch.setattr(connection_mod, "connect_tcp", lambda host, port, **_kwargs: transport)
 
     # Use the public saprfclib.connect() factory
     conn = saprfclib.connect(
