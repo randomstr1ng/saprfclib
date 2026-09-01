@@ -28,6 +28,7 @@ import struct
 
 import pytest
 
+from saprfclib.connection import Connection
 from saprfclib.exceptions import AbapSystemFailure, CommunicationError
 from saprfclib.invoke import tlv_record as tr
 from saprfclib.session import Session, SessionState
@@ -166,3 +167,54 @@ def test_is_retired_tolerates_a_connection_without_a_session() -> None:
     from saprfclib.pool import _is_retired
 
     assert _is_retired(object()) is False
+
+
+# --------------------------------------------------------------------------- #
+# The async core, and the sync facade layered over it
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_async_call_retires_on_a_truncated_reply() -> None:
+    """The async path needs its own cover: it has a separate send/recv block."""
+    from tests.test_phase09_async_client import _make_ready_conn, _stfc_desc
+
+    conn, _ = _make_ready_conn([_truncated_response()])
+    conn._cache.put("TST", _stfc_desc())
+    with pytest.raises(ValueError, match="0x0305"):
+        await conn.call("STFC_CONNECTION", REQUTEXT="hi")
+    assert conn._session.state is SessionState.BROKEN
+
+
+def test_the_sync_facade_and_its_async_core_share_one_session() -> None:
+    """A classic TCP Connection is a facade; retiring must be visible through it.
+
+    Connection.call delegates to self._async_conn.call for classic TCP, so the
+    retirement happens on the async core. Connection._from_async assigns
+    ``inst._session = async_conn._session`` -- the same object, not a copy -- which
+    is what makes the BROKEN state visible to conn._session, to the caller's next
+    call, and to the pool's _is_retired guard.
+
+    If that ever became a copy the failure would be quiet in the worst way: the
+    async core would refuse correctly, but the pool would see a READY session on
+    the facade, judge the connection healthy, and lend it out. Worth an assertion
+    of its own precisely because nothing else would notice.
+    """
+    from saprfclib.pool import _is_retired
+
+    class FakeAsyncConn:
+        def __init__(self) -> None:
+            self._session = Session()
+            self._transport = None
+            self._cache = None
+            self._struct_desc_cache = None
+            self._strict_params = False
+            self._dropped_params_seen: set[object] = set()
+
+    core = FakeAsyncConn()
+    facade = Connection._from_async(core, loop_thread=None)
+    assert facade._session is core._session
+
+    core._session.mark_broken("truncated reply")
+    assert facade._session.state is SessionState.BROKEN
+    assert _is_retired(facade) is True
