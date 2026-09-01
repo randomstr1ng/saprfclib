@@ -178,17 +178,34 @@ _TAG_EXCEPTION_MSG_CLASS = 0x0415  # message class, e.g. "FL"
 _TAG_EXCEPTION_MSG_TYPE = 0x0416  # message type, e.g. "E"
 _TAG_EXCEPTION_MSG_NUMBER = 0x0417  # same tag as the marker above
 _TAG_EXCEPTION_MSG_V1 = 0x0411  # first message variable
-# [ASSUMED] V2-V4 follow V1 consecutively. No capture yet carries more than one
-# variable, so these are inference from 0x0411; a reply that fills them would confirm
-# or correct them. They are read defensively — an absent tag simply yields None.
+# CONFIRMED: V2-V4 do follow V1 consecutively. Previously inferred from 0x0411,
+# because no capture carried more than one variable. A purpose-built RFM raising
+# MESSAGE e398(00) WITH four DISTINCT values put each one in its own tag --
+# 'ALPHA1' in 0x0411, 'BRAVO2' in 0x0412, 'CHARLIE3' in 0x0413, 'DELTA4' in
+# 0x0414. Distinct values matter: four copies of one string would have parsed
+# identically with the tags in any order.
+# Source: golden fixture exception_msg_variables_response.bin, A4H kernel 793.
 _TAG_EXCEPTION_MSG_V2 = 0x0412
 _TAG_EXCEPTION_MSG_V3 = 0x0413
 _TAG_EXCEPTION_MSG_V4 = 0x0414
-# [ASSUMED] free-text message. Never seen in any capture; predates the kernel 752
-# work, which found the confirmed free-text tag to be 0x0402 (below). Tried first only
-# because dropping an untested fallback is no better evidenced than keeping it. See
-# docs/protocol/framing.md — if a capture shows 0x040B is something else, remove it.
-_TAG_EXCEPTION_MESSAGE = 0x040B
+# 0x040B was carried here as a free-text message tag and is now gone.
+#
+# It had never appeared in any capture. It was kept, and tried FIRST, on the
+# reasoning that dropping an untested fallback is no better evidenced than
+# keeping it. That reasoning was sound while nothing had been aimed at it; the
+# same probe that confirmed V2-V4 aimed at it directly and settles it.
+#
+# That exception carries a genuine four-variable message, so it is exactly the
+# reply that would populate a free-text tag if one existed. Its full tag set is
+# 0x0500, 0x0415, 0x0416, 0x0417, 0x0411-0x0414, 0x0401 -- no 0x040B, and no
+# 0x0402 either. Kernel 793 sends NO assembled message text for a classic
+# exception at all; the client is expected to build it from the message class,
+# number and variables, which needs a T100 lookup this library does not make.
+#
+# Keeping an unevidenced tag in first position is not neutral: whatever it held
+# would be surfaced as the message ahead of 0x0402, which IS confirmed (on 752,
+# fixture signon_incomplete_752_response.bin). One untested guess outranking one
+# captured fact is the wrong way round.
 # Kernel 752 raises the same failure with a different tag set: no 0x0401 at all, the
 # name in 0x0403, and the readable text in 0x0402. Captured live from a signon
 # refusal (0x0415 '00', 0x0416 'X', 0x0417 '341'):
@@ -924,9 +941,7 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
         msg_v2 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V2))
         msg_v3 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V3))
         msg_v4 = _decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V4))
-        message = _decode_error_text(tags.get(_TAG_EXCEPTION_MESSAGE)) or _decode_error_text(
-            tags.get(_TAG_EXCEPTION_TEXT)
-        )
+        message = _decode_error_text(tags.get(_TAG_EXCEPTION_TEXT))
         raise AbapApplicationError(
             key=key or None,
             msg_class=msg_class or None,
@@ -953,8 +968,7 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
                 msg_v2=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V2)) or None,
                 msg_v3=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V3)) or None,
                 msg_v4=_decode_error_text(tags.get(_TAG_EXCEPTION_MSG_V4)) or None,
-                message=_decode_error_text(tags.get(_TAG_EXCEPTION_MESSAGE))
-                or _decode_error_text(tags.get(_TAG_EXCEPTION_TEXT))
+                message=_decode_error_text(tags.get(_TAG_EXCEPTION_TEXT))
                 or f"RFC return code {rc}",
             )
 

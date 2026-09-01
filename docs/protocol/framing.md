@@ -1098,6 +1098,45 @@ STFC_CONNECTION and RFC_PING_AND_WAIT replies captured so far, and no rule has
 been established that requires it. Any reader must treat absence as "unknown"
 rather than zero.
 
+### Message variables, and a free-text tag that does not exist
+
+`0x0411`–`0x0414` carry message variables V1–V4, consecutively. Confirmed against
+a purpose-built RFM on A4H kernel 793:
+
+```abap
+MESSAGE e398(00) WITH 'ALPHA1' 'BRAVO2' 'CHARLIE3' 'DELTA4'
+        RAISING four_variables.
+```
+
+| tag | value |
+|-----|-------|
+| `0x0415` | `00` (message class) |
+| `0x0416` | `E` (type) |
+| `0x0417` | `398` (number) |
+| `0x0411`–`0x0414` | `ALPHA1`, `BRAVO2`, `CHARLIE3`, `DELTA4` |
+| `0x0401` | `FOUR_VARIABLES` (key) |
+
+The four values are distinct on purpose — four copies of one string would parse
+identically with the tags in any order. Message `00/398` is `& & & &`, read from
+`T100` rather than assumed; `00/001` is `&1&2&3&4&5&6&7&8` and would have run the
+values together. Fixture `exception_msg_variables_response.bin`.
+
+**`0x040B` is removed.** It had been carried as a free-text message tag, never
+observed in any capture, and tried *first* when resolving the message — ahead of
+`0x0402`, which is captured and confirmed on kernel 752. It was kept on the
+reasoning that dropping an untested fallback is no better evidenced than keeping
+it, which was sound while nothing had been aimed at it. This capture aims at it
+directly: a reply carrying a genuine four-variable message is exactly what would
+populate a free-text tag, and `0x040B` is absent. One untested guess outranking
+one confirmed fact is the wrong way round.
+
+**Kernel 793 sends no assembled message text for a classic exception at all** —
+`0x0402` is absent too. The client is expected to build the sentence from the
+class, number and variables via a `T100` lookup, which this library does not make.
+`AbapApplicationError.message` is therefore `None` on this path, and the
+exception's diagnostic string carries the class, number and variables instead of
+dropping them. On this kernel that is the common case, not an edge case.
+
 ### Exception TLV semantics — the tag set varies by release
 
 `0x0417` is the marker: its presence is what makes a response an exception rather than a

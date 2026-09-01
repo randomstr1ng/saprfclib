@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Message variables V2–V4 are confirmed at `0x0412`–`0x0414`, following V1 at `0x0411`.
+  Previously inferred from `0x0411` alone, because no capture carried more than one
+  variable. A purpose-built RFM raising `MESSAGE e398(00)` with four **distinct** values
+  put each in its own tag — four copies of one string would have parsed identically with
+  the tags in any order.
+- The free-text tag `0x040B` is removed. It had never appeared in any capture and was
+  nonetheless tried *first* when resolving an exception's message, ahead of `0x0402`
+  which is captured and confirmed on kernel 752. The same probe aimed at it directly: a
+  reply carrying a genuine four-variable message is exactly what would populate a
+  free-text tag, and it is absent. One untested guess outranking one confirmed fact is
+  the wrong way round.
+- `AbapApplicationError`'s diagnostic string now carries the message class, number and
+  variables when the server sends no assembled text. Kernel 793 sends none for a classic
+  exception — `0x0402` is absent too, and the sentence is the client's to build from
+  `T100`, which this library does not do. The error reported a bare `FOUR_VARIABLES`
+  while holding `ALPHA1`, `BRAVO2`, `CHARLIE3` and `DELTA4` unread on the object. On this
+  kernel that was the common case, not an edge case. A server-supplied message still
+  wins, so the 752 shape is unchanged.
+
 - The multi-frame continuation markers are settled by a 22-frame capture. Bytes 17–20
   (BE int32) read `-1` on a continuing frame and `500` on the last; bytes 60–63 (BE
   uint32) read `0` and `1`. All twenty-one continuing frames of a 591337-byte reply
