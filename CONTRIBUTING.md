@@ -169,8 +169,10 @@ Python.
    the paths where bugs in this project keep being found, because they are the
    ones nobody exercises by accident.
 
-   Some code cannot be covered offline at all (SNC, WebSocket RFC, the server's
-   gateway registration). Those need a live system and are marked `integration`.
+   Some code cannot be covered offline at all: `snc.py` needs a GSS library and an
+   SNC-configured system, `ws.py` needs a live WebSocket RFC endpoint. That is
+   roughly 220 statements, so the offline ceiling sits well under 100% — read the
+   figure as a trend and a floor, not as a quality score.
    Adding more of that kind of code is the one legitimate reason to lower the
    floor — say so in the commit message, with which path and why it cannot be
    reached offline. An adjustment with no reason attached is the rubber stamp the

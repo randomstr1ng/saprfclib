@@ -370,3 +370,114 @@ def test_a_route_without_a_password_still_builds() -> None:
 
     hops = parse_route_string("/H/router.example.com/S/3299")
     assert build_ni_route(hops, "10.0.0.1", "3300").startswith(b"NI_ROUTE\x00")
+
+
+# --------------------------------------------------------------------------- #
+# Transport accessors and the async transport
+# --------------------------------------------------------------------------- #
+
+
+def test_transport_reports_its_addresses() -> None:
+    srv, port = _listener()
+    try:
+        t = connect_tcp("127.0.0.1", port)
+        try:
+            assert t.remote_address[1] == port
+            assert t.local_address[0] == "127.0.0.1"
+        finally:
+            t.close()
+    finally:
+        srv.close()
+
+
+def test_close_is_safe_on_an_already_broken_socket() -> None:
+    """close() runs on the error path, so it must never raise on its own."""
+    a, b = socket.socketpair()
+    t = Transport(a)
+    b.close()
+    a.close()  # already closed: shutdown() will fail
+    t.close()  # must not raise
+    t.close()  # and must be idempotent
+
+
+@pytest.mark.asyncio
+async def test_async_transport_round_trip_and_byte_counts() -> None:
+
+    srv, port = _listener()
+    accepted: list[socket.socket] = []
+
+    def _accept() -> None:
+        conn, _ = srv.accept()
+        # Echo one NI frame back so recv_message has something to read.
+        header = conn.recv(4)
+        length = int.from_bytes(header, "big")
+        payload = conn.recv(length)
+        conn.sendall(header + payload)
+        accepted.append(conn)
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    try:
+        from saprfclib.transport import connect_tcp_async
+
+        transport = await connect_tcp_async("127.0.0.1", port, connect_timeout=5.0)
+        try:
+            await transport.send_message(b"ping-payload")
+            assert transport.bytes_sent == 4 + len("ping-payload")
+            assert await transport.recv_message() == b"ping-payload"
+            assert transport.bytes_received == 4 + len("ping-payload")
+            # Addresses must be readable on the async transport too.
+            assert transport.remote_address[1] == port
+            assert isinstance(transport.local_address, tuple)
+        finally:
+            await transport.close()
+            await transport.close()  # idempotent
+    finally:
+        thread.join(timeout=3)
+        for c in accepted:
+            c.close()
+        srv.close()
+
+
+@pytest.mark.asyncio
+async def test_async_transport_enforces_the_frame_cap_before_allocating() -> None:
+    """The cap must be checked on the declared length, not after reading it.
+
+    Reading first and checking after is what the cap exists to prevent: a peer
+    can declare 4 GiB and the process allocates it before the check ever runs.
+    """
+
+    from saprfclib.transport import AsyncTransport
+
+    class _Reader:
+        def __init__(self) -> None:
+            self.payload_reads = 0
+
+        async def readexactly(self, n: int) -> bytes:
+            if n == 4:
+                return (AsyncTransport._MAX_FRAME_BYTES + 1).to_bytes(4, "big")
+            self.payload_reads += 1
+            raise AssertionError("payload must never be read for an oversized frame")
+
+    reader = _Reader()
+    transport = AsyncTransport(reader, _FakeAsyncWriter())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="DoS guard"):
+        await transport.recv_message()
+    assert reader.payload_reads == 0
+
+
+class _FakeAsyncWriter:
+    def write(self, data: bytes) -> None:
+        return None
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+    def get_extra_info(self, key: str, default: object = None) -> object:
+        return default

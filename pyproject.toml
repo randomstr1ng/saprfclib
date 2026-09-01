@@ -147,10 +147,13 @@ branch = true
 # against. The margin above the floor is deliberately thin so the question gets
 # asked rather than drifting unnoticed.
 #
-# Much of what is uncovered needs a live SAP system (SNC, WebSocket RFC, the
-# server's registration path), so this will not approach 100 from offline tests
-# alone. See docs for which paths are integration-only.
-fail_under = 76
+# Not all of the remainder is reachable offline. snc.py needs a GSS library and an
+# SNC-configured system; ws.py needs a live WebSocket RFC endpoint. Between them
+# that is roughly 220 statements, so the offline ceiling is meaningfully below
+# 100 and the measured figure should be read with that in mind rather than as a
+# quality score. The number that matters is the trend and the floor, not the
+# absolute.
+fail_under = 76.5
 show_missing = true
 skip_covered = true
 exclude_lines = [

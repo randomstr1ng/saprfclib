@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the codec's refusal branches — the module where a defect corrupts *data*
+  rather than failing. A zero or truncated BCD field, an invalid sign or digit nibble, an
+  out-of-range `INT1`, and a zero-row-size table are each refused rather than
+  interpreted, because every one of them would otherwise hand the caller a plausible
+  wrong number. `codec.py` 92% → 96%.
+- Tests for the transport accessors and the async transport, including that the 128 MiB
+  frame cap is enforced on the *declared* length before any payload is read — checking
+  after reading is exactly what the cap exists to prevent. `transport.py` 80% → 94%.
+
 - Tests for the wRFC message builders, including two security invariants asserted
   together: the password must **not** appear in the frame as plaintext (it is scrambled,
   as on the classic path) and must **still affect** the frame. Checking only the first
