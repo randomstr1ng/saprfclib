@@ -3566,6 +3566,15 @@ class Connection:
             raise CommunicationError(str(exc), original_exception=exc) from exc
         # Extract auth (0x0450 → sys_id, etc.) — raises ValueError on auth failure.
         attrs_ws = _ws_parse_logon_response(logon_resp)
+        if _ws_logon_failure(logon_resp) is not None:
+            # The reply authenticated and reported that the call embedded in the
+            # LOGON failed. Going on to send the invoke anyway is what makes the
+            # work process take a short dump -- so this path used to provoke a
+            # RABAX on the server, catch the resulting WebSocket close, and only
+            # then fall back. Reading the failure here skips the doomed frame
+            # entirely: same outcome for the caller, one fewer entry in ST22 per
+            # connection attempt.
+            return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         if self._transport.drain_queued_close():  # type: ignore[attr-defined]
             # Auth passed and the server then closed the WebSocket. A non-empty
             # ngrfc LOGON body leaves the server silent indefinitely; an empty one

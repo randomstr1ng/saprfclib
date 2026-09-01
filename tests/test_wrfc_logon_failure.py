@@ -75,3 +75,30 @@ def test_a_reply_without_an_exception_yields_none() -> None:
         + struct.pack(">HH", 0xFFFF, 0)
     )
     assert _ws_logon_failure(clean) is None
+
+
+def test_both_logon_paths_check_for_the_embedded_failure() -> None:
+    """The fix was applied to one call site first and needed to be at both.
+
+    _call_bootstrap raises the failure; _ws_direct_logon_call falls back to
+    classic TCP. Different responses, same precondition -- and the direct path is
+    where missing it costs the most, because it would go on to send an invoke
+    into a dead session and provoke an ABAP short dump on the server for every
+    connection attempt.
+
+    Asserted structurally rather than behaviourally: exercising either path needs
+    a live WebSocket endpoint, and a check that silently stops being called is
+    exactly what this is guarding against.
+    """
+    import inspect
+
+    from saprfclib import connection
+
+    for name in ("_call_bootstrap", "_ws_direct_logon_call"):
+        src = inspect.getsource(getattr(connection.Connection, name))
+        if "_ws_parse_logon_response" not in src:
+            continue
+        assert "_ws_logon_failure" in src, (
+            f"{name} parses a wRFC LOGON reply without checking whether it carries "
+            f"an embedded failure"
+        )

@@ -461,6 +461,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The wRFC direct-logon path no longer provokes an ABAP short dump on every connection
+  attempt. It parsed the LOGON reply, missed the embedded failure the same way the
+  bootstrap path did, and went on to send an invoke into a dead session — which is what
+  made the work process dump. It then caught the resulting WebSocket close and fell back
+  to classic TCP, so the caller saw the right outcome while the server collected an ST22
+  entry each time. Reading the failure first skips the doomed frame.
+
 - `partner_rel` and `kernel_rel` were mojibake on the wRFC path. Every other string tag
   in a wRFC logon reply is decoded UTF-16LE; those two used ASCII, which does not fail
   on UTF-16 input — it returns the NULs interleaved, so `kernel_rel` read
