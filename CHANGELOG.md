@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A connection whose negotiated codepage is not the `4103` Unicode wire mode is now
+  refused at handshake, naming the codepage it got and the one it needs. Non-Unicode
+  systems are out of scope — SAP ended support for them with NetWeaver 7.5 — but that
+  alone would not justify a hard refusal. The reason it does is that `unicode_mode` is
+  *derived* as "the wire is UTF-16LE" and *spent* by the codec as a byte-order
+  selector: `_uc_encoding` returns `utf-16-be` whenever it is false. On a genuinely
+  non-Unicode connection that does not fail — it decodes single-byte text as UTF-16BE
+  and returns mojibake in every character field, on a connection that looks healthy
+  throughout. The refusal is scoped to live connections, so offline descriptors built
+  without a negotiated codepage keep working.
+
 - Two stale claims removed. `router.py` said the binary message-server protocol was
   unconfirmed and that the server "accepts the connection and then answers nothing" —
   written before the operation byte at 0x43 was corrected to `0x08`, and contradicted

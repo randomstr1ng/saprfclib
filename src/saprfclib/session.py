@@ -301,6 +301,27 @@ class Session:
 
         codepage = self._codepage or ""
         unicode_mode = codepage == _CODEPAGE_UTF16LE
+        if is_live and codepage and not unicode_mode:
+            # Non-Unicode systems are out of scope: SAP ended support for them
+            # with NetWeaver 7.5, and nothing in this library's non-Unicode paths
+            # has ever been exercised against one.
+            #
+            # Refusing is not merely tidier than proceeding, it is the only safe
+            # option. ``unicode_mode`` is derived here as "the wire codepage is
+            # 4103", but the codec spends it as a BYTE ORDER selector --
+            # ``_uc_encoding`` returns utf-16-be whenever it is false. On a
+            # genuinely non-Unicode connection that decodes single-byte text as
+            # UTF-16BE and yields mojibake, silently, in every character field.
+            # A connection that cannot be decoded correctly must not be handed
+            # back as if it could.
+            raise ValueError(
+                f"server negotiated codepage {codepage!r}, which is not the "
+                f"Unicode wire mode {_CODEPAGE_UTF16LE!r}. Non-Unicode systems "
+                f"are not supported: SAP ended support for them with NetWeaver "
+                f"7.5, and this library's character handling has never been "
+                f"validated against one. Continuing would decode every character "
+                f"field incorrectly rather than fail."
+            )
         dec = _decode_utf16le if (is_live and unicode_mode) else _decode_ascii
         self._attributes = ConnectionAttributes(
             sys_id=dec(tags.get(_TAG_SYS_ID)),

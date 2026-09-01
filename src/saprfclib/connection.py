@@ -1717,9 +1717,19 @@ def _parse_gfi_params_rows(
         # rejected (observed live on kernel 793: RFC_READ_TABLE raised
         # TABLE_NOT_AVAILABLE because QUERY_TABLE never arrived intact).
         if exid in _CHAR_LIKE_EXID and not unicode_mode:
-            # [ASSUMED] Non-Unicode connections are expected to report NUC counts,
-            # which need doubling to reach the uc_* representation the codec uses.
-            # No non-Unicode capture exists to confirm this branch.
+            # Doubling NUC counts to reach the uc_* representation the codec uses.
+            #
+            # This carried an uncertainty label because no non-Unicode capture
+            # exists to confirm it. It is now unreachable on a live connection
+            # instead: the handshake refuses any codepage that is not the 4103
+            # Unicode wire mode, because the codec would decode such a
+            # connection's character fields as UTF-16BE and silently produce
+            # mojibake. Non-Unicode systems are out of scope -- SAP ended support
+            # for them with NetWeaver 7.5.
+            #
+            # The branch stays for offline descriptors built without a negotiated
+            # codepage, where unicode_mode is false by construction rather than
+            # by observation.
             uc_length = intlen_nuc * 2
             uc_offset = offset_nuc * 2
         else:
