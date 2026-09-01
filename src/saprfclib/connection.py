@@ -3006,9 +3006,16 @@ class Connection:
             if self._session.state is SessionState.WS_PENDING:
                 # 2-step lazy LOGON (Track 2):
                 # Step 1: LOGON+RFCPING (empty ngrfc body).
-                # protocol analysis: SDK writes 0x45 EXECUTE for all INVOKE frames; but LOGON frame
-                # ngrfc body behaves differently — server hangs when b"\x45" sent in LOGON
-                # frame (vs b"" which yields expected E=163 close, handled below).
+                # An empty ngrfc body is the one that works. Probed against A4H
+                # kernel 793: with b"" the server answers the LOGON with a
+                # 1118-byte reply in under 100 ms. With b"\x45" -- which makes the
+                # 0x5001 record byte-identical to a working INVOKE -- it sends
+                # nothing at all, indefinitely, and a frame sent afterwards draws
+                # close code 1001.
+                #
+                # An earlier comment here said b"" "yields expected E=163 close".
+                # It does not: there is no close and no error. That number was
+                # never on the wire (see the note at the AbapSystemFailure below).
                 # _ws_direct_logon_call (same LOGON path, proven path) uses b"" too.
                 _ws_pending_path = True
                 auth = self._ws_auth or {}
@@ -3025,14 +3032,26 @@ class Connection:
                 attrs_ws = _ws_parse_logon_response(logon_resp)
                 if close_exc := self._transport.drain_queued_close():  # type: ignore[attr-defined]
                     if attrs_ws and attrs_ws.sys_id:
-                        # Auth (0x0450/sys_id) succeeded; RFCPING failed E=163.
-                        # Server closes after E=163 — complete attrs so
-                        # get_connection_attributes() works, then surface as
-                        # AbapSystemFailure (not transport close).
+                        # Auth succeeded (0x0450/sys_id present) and the server then
+                        # closed the WebSocket. Complete the attributes so
+                        # get_connection_attributes() still works, and report what
+                        # the close actually said.
+                        #
+                        # This used to raise a hardcoded "163: Error when receiving
+                        # data for an RFC." The server never sent that. A probe
+                        # against A4H shows the LOGON succeeding with a 1118-byte
+                        # reply in under 100 ms, so the number was ours, invented at
+                        # the point of failure and indistinguishable afterwards from
+                        # something the server had said. Anyone debugging it would
+                        # search SAP notes for an RFC error 163 that was never
+                        # involved.
                         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                         raise AbapSystemFailure(
-                            message="163: Error when receiving data for an RFC."
-                        )
+                            message=(
+                                f"the server authenticated the wRFC LOGON and then closed "
+                                f"the WebSocket: {close_exc}"
+                            )
+                        ) from close_exc
                     raise close_exc
                 self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                 # Step 2: INVOKE+RFC_GET_FUNCTION_INTERFACE (now in READY state).
@@ -3046,13 +3065,18 @@ class Connection:
                 self._transport.send_message(frame)
                 try:
                     response = self._transport.recv_message()
-                except WebSocketError:
-                    # Server closed after RFCPING (E=163) without processing GFI.
-                    # Auth already completed — attrs in session. Surface as
-                    # AbapSystemFailure so callers see function-level error.
+                except WebSocketError as ws_exc:
+                    # The server closed the WebSocket instead of answering
+                    # RFC_GET_FUNCTION_INTERFACE. Auth already completed, so this is
+                    # a function-level failure rather than a transport one -- but
+                    # report the close the server actually sent rather than a
+                    # constant standing in for it.
                     raise AbapSystemFailure(
-                        message="163: Error when receiving data for an RFC."
-                    ) from None
+                        message=(
+                            f"the server closed the WebSocket without answering "
+                            f"RFC_GET_FUNCTION_INTERFACE: {ws_exc}"
+                        )
+                    ) from ws_exc
             else:
                 # Subsequent bootstrap: connection already established, use invoke format.
                 frame = _build_ws_invoke_message(
@@ -3119,8 +3143,26 @@ class Connection:
                     _err_msg = _err_raw.decode("utf-16-le", errors="replace").rstrip("\x00 ")
                 except Exception:
                     pass
-            _rc_str = str(_rc) if _rc else "163"
-            raise AbapSystemFailure(message=f"{_rc_str}: {_exc_name or _err_msg or 'GFI failed'}")
+            # When the server sends no return code, say so. This previously fell
+            # back to "163", which is the one case where a fabricated code is most
+            # misleading: _rc is 0 precisely when the server reported NO error, so
+            # the library was inventing a specific failure number to describe a
+            # reply that carried none.
+            _detail = _exc_name or _err_msg
+            if _rc:
+                _summary = f"{_rc}: {_detail or 'RFC_GET_FUNCTION_INTERFACE failed'}"
+            elif _detail:
+                _summary = (
+                    f"RFC_GET_FUNCTION_INTERFACE returned no parameter rows and no "
+                    f"return code; the server said: {_detail}"
+                )
+            else:
+                _summary = (
+                    "RFC_GET_FUNCTION_INTERFACE returned no parameter rows, no return "
+                    "code and no message. The wRFC LOGON was accepted, so the "
+                    "connection works and the interface fetch does not."
+                )
+            raise AbapSystemFailure(message=_summary)
 
         # Build FunctionDesc from the parsed rows. Track STRUCTURE params needing
         # a secondary RFC_GET_STRUCTURE_DEFINITION bootstrap (META-04).
@@ -3356,18 +3398,25 @@ class Connection:
                 pos += 2
         raise ValueError("RFCPING response missing return-code TLV 0x0420")
 
-    def _ws_e163_classic_fallback(
+    def _ws_classic_fallback(
         self,
         func_name: str,
         desc: FunctionDesc,
         params: dict[str, Any],
         attrs_ws: ConnectionAttributes,
     ) -> dict[str, Any]:
-        """Classic RFC fallback after wRFC LOGON E=163 (on-premise ICM constraint).
+        """Classic RFC fallback when the wRFC session cannot be completed.
 
-        On-premise ABAP kernels (A4H and similar) reject any non-empty ngrfc body in
-        the wRFC LOGON frame, so LOGON+RFCPING always ends with E=163 and WebSocket
-        close.  This method transparently re-runs the call over a classic TCP RFC
+        On-premise ABAP kernels (A4H and similar) reject a non-empty ngrfc body in
+        the wRFC LOGON frame -- with b"\x45" the server never answers at all -- so
+        the LOGON carries an empty body. That much works: A4H answers it with a
+        1118-byte reply. What does not complete is the interface fetch that
+        follows, and why is still open (issue #14).
+
+        An earlier version of this docstring said LOGON+RFCPING "always ends with
+        E=163 and WebSocket close". A probe disproved both halves: the LOGON
+        succeeds, and no error code 163 is ever sent. This method transparently
+        re-runs the call over a classic TCP RFC
         connection derived from the LOGON response:
 
           1. Extract partner_host (0x0453) and sys_number (0x0452) from attrs_ws.
@@ -3435,8 +3484,9 @@ class Connection:
         Transitions WS_PENDING → READY (via complete_ws_first_call) between step 1 and 2.
         Caller must hold self._lock.  Called only when state is WS_PENDING.
 
-        On-premise A4H ICM constraint: RFCPING LOGON always ends with E=163 and
-        WebSocket close.  In that case _ws_e163_classic_fallback is invoked to re-run
+        On-premise A4H: the LOGON itself succeeds, but the wRFC session cannot be
+        driven to a usable state (issue #14). In that case the classic fallback
+        is invoked to re-run
         the call via a classic TCP RFC connection (transparent to the caller).
         """
         auth = self._ws_auth or {}
@@ -3457,11 +3507,12 @@ class Connection:
         # Extract auth (0x0450 → sys_id, etc.) — raises ValueError on auth failure.
         attrs_ws = _ws_parse_logon_response(logon_resp)
         if self._transport.drain_queued_close():  # type: ignore[attr-defined]
-            # E=163: auth passed but RFCPING closed the WebSocket (on-premise ICM
-            # constraint — any non-empty ngrfc LOGON body causes TCP drop, so empty
-            # body is required, which always yields E=163 from the WP).
+            # Auth passed and the server then closed the WebSocket. The empty
+            # ngrfc LOGON body is required -- a non-empty one leaves the server
+            # silent indefinitely -- but the close that follows is not an E=163
+            # from the work process; that code was this library's own invention.
             # Fall back to classic TCP RFC transparently.
-            return self._ws_e163_classic_fallback(func_name, desc, params, attrs_ws)
+            return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
         # Cache the descriptor now that the attributes are on the session.
         ws_key = self._metadata_cache_key
@@ -3484,8 +3535,8 @@ class Connection:
             raise CommunicationError(str(exc), original_exception=exc) from exc
         except WebSocketError:
             # WS close arrived after step 1 (different TCP segment than LOGON response).
-            # Same E=163 root cause; fall back to classic RFC.
-            return self._ws_e163_classic_fallback(func_name, desc, params, attrs_ws)
+            # Same root cause; fall back to classic RFC.
+            return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         result = _ws_parse_invoke_response(invoke_resp, desc)
         return _convert_date_time_fields(result, desc)
 

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The wRFC "E=163" error was fabricated by this library, and is gone. Three code paths
+  produced it and none read it from the wire: two raised the hardcoded string
+  `"163: Error when receiving data for an RFC."`, and the third used `163` as a
+  *fallback for when the server reported no return code at all* — inventing a specific
+  failure number to describe a reply that carried none. A probe against A4H kernel 793
+  shows the wRFC LOGON succeeding with a 1118-byte reply in under 100 ms, so the
+  premise of issue #14 ("`RFC_GET_FUNCTION_INTERFACE` returns exception 163") was our
+  own message read back. Each site now reports what actually happened — the WebSocket
+  close code and reason, or that no rows, no return code and no message came back.
+  Seven comments asserting the disproven story are corrected, an integration test that
+  required `"163"` in the message no longer pins the fiction, and
+  `_ws_e163_classic_fallback` is renamed. The gap itself is real and still open; the
+  number never was.
+
 - Disabling wRFC TLS verification now writes a log record as well as raising a warning.
   The two channels fail differently: a warning is shown once per call site and vanishes
   under `python -W ignore` or a broad `filterwarnings()`, both of which a long-running
