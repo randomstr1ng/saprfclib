@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Two stale claims removed. `router.py` said the binary message-server protocol was
+  unconfirmed and that the server "accepts the connection and then answers nothing" —
+  written before the operation byte at 0x43 was corrected to `0x08`, and contradicted
+  by four live-reply fixtures in the same tree. `connection.py`'s `connect()` docstring
+  said the SAProuter and message-server wire bytes were unverified, after both had been
+  verified byte-exact. A stale uncertainty label is worse than none: it reads as current
+  fact and steers a reader away from a path that works.
+- Uncertainty labels audited: 14 sites down to 9, all nine now real open questions with
+  a stated way to settle them. Three of the removed were never assumptions at all —
+  comments that mentioned the label to say it had been resolved, or that there was none
+  here. The token has to stay searchable, and meta-mentions bury the real ones.
+- The server-list entry layout is described from what the capture shows rather than
+  from a guess. Bytes 80–124 hold a space-padded **service name** (`tick-port` on the
+  one entry with a real port, `-` on the two placeholders), not the "secondary name /
+  padding" recorded before. Byte 147 reads `0x01` on the real application server and
+  `0x05` on the placeholders — recorded as a correlation from three entries in one
+  capture, which is not an enumeration.
+
 - Responses larger than one gateway frame are now reassembled instead of failing.
   `RFC_READ_TABLE` on `DD03L` past ~2000 rows returned a 28080-byte frame cut inside a
   250-byte `0x0305` record plus a 25593-byte continuation, and `Connection.call` read

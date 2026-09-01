@@ -4291,14 +4291,21 @@ def connect(
     instead — worth doing when a dropped argument would change the result, since the
     server has no way to tell you an argument never arrived.
 
-    The SAProuter and message-server wire bytes are [ASSUMED] (router.py) and
-    gated behind the plan 03-03 blocking human-verify checkpoint. ``passwd``,
+    The SAProuter and message-server wire formats were live-verified after this
+    docstring first called them unverified: the NI_ROUTE payload is byte-exact
+    against a capture (``tests/golden/router/ni_route_payload.bin``), a router
+    that accepts a route answers ``NI_PONG`` and one that refuses answers
+    ``NI_RTERR``, and the message server answers the binary attach and
+    server-list frames as ``MSG_SERVER``. What remains unconfirmed is narrower and
+    sits in ``router.py``: some field boundaries inside a server-list entry, and
+    whether the entry count is carried in the header or only implied by the
+    payload length. ``passwd``,
     ``ws_proxy_pass``, ``snc_lib``, ``snc_partnername`` and ``snc_myname`` are
     never logged or echoed into any log message or exception string (threats
     T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
-    # Imported lazily so the direct-TCP facade has no hard dependency on the
-    # [ASSUMED] alternate-transport layer (router.py, plan 03-03 Task 2).
+    # Imported lazily so the direct-TCP facade carries no hard dependency on the
+    # alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
         open_route,
         open_route_async,

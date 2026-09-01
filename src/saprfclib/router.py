@@ -22,7 +22,8 @@
 #   - parse_route_string is PURE STRING PARSING and is fully verified offline.
 #   - build_ni_route wire format CONFIRMED from live capture 2026-06-27 (TRANS-02).
 #   - parse_sapms_server_list CONFIRMED from live capture 2026-06-27 (TRANS-03).
-#     Per-server entry field semantics annotated [ASSUMED] where purpose is unclear.
+#     Per-server entry fields whose purpose is unclear carry the uncertainty
+#     label at their definition; see the entry layout table below.
 from __future__ import annotations
 
 import socket
@@ -65,7 +66,7 @@ _PASSWORD_MARKER = "P"
 #
 # The NI_ROUTE payload built below is CONFIRMED — live capture 2026-06-27, golden
 # fixture tests/golden/router/ni_route_payload.bin, byte-exact. (An older comment
-# here labelled it [ASSUMED]; that predates the capture and contradicted
+# here called it unconfirmed; that predated the capture and contradicted
 # build_ni_route's own docstring.)
 _NI_ROUTE_MARKER = b"NI_ROUTE"
 
@@ -131,7 +132,7 @@ def parse_route_string(route: str) -> list[RouteHop]:
     Accepts the `/H/host/S/service/H/host2/...` syntax. Each `/H/` starts a new
     hop; a following `/S/` sets that hop's service and `/P/` its password. Raises
     ValueError on empty or malformed input (this is pure string parsing — fully
-    verifiable offline, no [ASSUMED] bytes here).
+    verifiable offline, no wire bytes involved).
     """
     if not route or not route.startswith("/"):
         raise ValueError(
@@ -281,13 +282,26 @@ _SAPMS_ENTRY_SIZE = 160  # wire-captured
 # Per-server entry field offsets (relative to entry start, wire-captured):
 #   [0:40]    instance_name — space-padded ASCII
 #   [40:80]   hostname_string — space-padded dotted IPv4 or hostname
-#   [80:120]  field3 — [ASSUMED] secondary name / padding
-#   [120:135] unknown zeros
+#   [80:124]  space-padded ASCII carrying a SERVICE NAME, not a name or padding.
+#             The captured entries read '-', 'tick-port', '-'; the one non-'-'
+#             value belongs to the only entry with a real port. [ASSUMED] the
+#             internal split: all three entries have exactly 24 leading spaces,
+#             which suggests a 24-byte field followed by a 20-byte one rather
+#             than one 44-byte field, but one capture cannot fix a boundary that
+#             every entry happens to leave blank.
+#   [124:135] zeros, except 0xbb at [124] on the one entry that names a real
+#             server. [ASSUMED] — a single differing byte across three entries is
+#             a correlation, not a field.
 #   [135:137] 0xFFFF marker (wire-captured in all 3 entries)
 #   [137:141] ip_addr_primary (4-byte BE IPv4)
 #   [141:145] ip_addr_secondary (4-byte BE IPv4, duplicate)
 #   [145:147] port (2-byte BE)
-#   [147:160] trailing flags [ASSUMED]
+#   [147:160] [ASSUMED] status or kind. Byte [147] is 0x01 on the entry that
+#             names a real application server (192.168.88.7:3200) and 0x05 on the
+#             two placeholder entries whose port is 0; [148:160] is zero in all
+#             three. Two values from one capture is not an enumeration. A capture
+#             from a system with more than one application server would settle
+#             whether 0x01 means "usable" or something narrower.
 _ENTRY_FFFF_OFFSET = 135  # wire-captured
 _ENTRY_IP_OFFSET = 137  # wire-captured
 _ENTRY_PORT_OFFSET = 145  # wire-captured
@@ -339,8 +353,18 @@ def parse_sapms_server_list(frame: bytes) -> list[tuple[str, int]]:
         raise ValueError(f"SAPMS frame invalid magic: expected '**MESSAGE**', got {magic_str!r}")
 
     # Determine how many complete 160-byte entries fit in the remaining payload.
-    # [ASSUMED] the entry count is inferred from the remaining bytes rather than
-    # read from a count field (no confirmed count field found in the header).
+    # [ASSUMED] no count field. The entry count is derived from the payload length
+    # instead. Searching the 110-byte header of the captured reply for the value 3
+    # finds candidates at byte 70, BE16 at 69 and BE32 at 67 -- which is what
+    # searching a header of that size for a small integer will always find, so
+    # none of them is evidence. A capture from a system returning a different
+    # number of entries would separate a real field from the coincidence.
+    #
+    # Deriving from the length is safe while every entry is the same width, and
+    # the exact-multiple check below is what enforces that: a payload the entries
+    # do not fill exactly is rejected rather than truncated to fit. What it cannot
+    # survive is the server appending anything after the last entry, which is
+    # precisely what a count field would make harmless.
     entries_payload = len(frame) - _SAPMS_HEADER_SIZE
     if entries_payload % _SAPMS_ENTRY_SIZE != 0:
         # Frame size is not an exact multiple — it's truncated or corrupt.
@@ -727,11 +751,26 @@ def _build_sapms_detach_frame() -> bytes:
 # --------------------------------------------------------------------------- #
 #
 # The message server also answers over HTTP, and that interface is documented,
-# line-oriented, and needs no reverse engineering. The binary protocol above is
-# still built from a partial capture: against a live message server on A4H it
-# accepts the connection and then answers nothing, so the [ASSUMED] login frame
-# and opcode pair are wrong. Until a capture fixes them, this is the path that
-# actually resolves a load-balanced logon.
+# line-oriented, and needs no reverse engineering, so it stays the default path
+# for resolving a load-balanced logon.
+#
+# This comment used to say the binary protocol above did not work -- that the
+# server "accepts the connection and then answers nothing", so the login frame
+# and opcode pair were wrong. That was true when written and is not true now, and
+# a stale claim of that kind is worse than no comment: it reads as current fact
+# and steers a reader away from a path that works. The fixtures in
+# tests/golden/router/ are the live replies:
+#
+#   sapms_attach_request/_reply.bin   op 0x08, version 4, errorno 0. The server
+#                                     answers with fromname 'MSG_SERVER'.
+#   sapms_serverlist_request/_reply   op 0x01. 275-byte reply, fromname MSG_SERVER.
+#   sapms_attach_access_denied.bin    errorno -20 on an invalid operation byte --
+#                                     a refusal, which is still an answer.
+#
+# What was actually wrong was the operation byte at 0x43. The sweep that
+# concluded "it must be 3" never tried 0x08, which is what a real client sends,
+# and paired every candidate with a msgtype the server would not accept anyway --
+# so it measured nothing and its conclusion was an artifact of its own design.
 #
 # Captured responses are in tests/golden/router/ms_http_*.txt.
 #
