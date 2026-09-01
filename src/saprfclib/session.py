@@ -206,13 +206,14 @@ class Session:
         # Payload offsets = handshake.md raw offsets − 4 (NI header stripped).
         body = bytearray(_NI_VERSION_LEN)
         struct.pack_into(">H", body, 0, _NI_MSG_TYPE)  # [0-1]   msg_type 0x0203
-        if local_ip:
-            try:
-                body[2:6] = bytes(int(o) for o in local_ip.split("."))
-            except (ValueError, struct.error):
-                body[2:6] = bytes((127, 0, 0, 1))
-        else:
-            body[2:6] = bytes((127, 0, 0, 1))  # [2-5]   client_ip (real socket src)
+        # [2-5] client_ip, a fixed 4-byte field. Falling back to 127.0.0.1 for an
+        # unusable value is fine — the server treats this as informational — but the
+        # fallback has to be reached. It was not, for a value with the wrong number
+        # of octets: bytes(...) succeeds on "1.2.3", the except never fires, and
+        # assigning three bytes to a four-byte slice SHRINKS the bytearray. That
+        # produced a 63-byte NI version request instead of 64, and 65 for a
+        # five-octet value — a wrong-length first frame on every connection.
+        body[2:6] = _ipv4_octets(local_ip)
         body[10:18] = b"python3\x00"  # [10-17] program_name (NUL-term)
         body[_NI_CODEPAGE_OFFSET : _NI_CODEPAGE_OFFSET + 4] = (
             b"1100"  # [20-23] propose codepage 1100
@@ -402,6 +403,26 @@ class Session:
         self._codepage = codepage
         self._attributes = attributes
         self._state = SessionState.READY
+
+
+def _ipv4_octets(local_ip: str | None) -> bytes:
+    """Exactly four bytes for the NI client_ip field, or the loopback default.
+
+    Anything that is not four decimal octets in 0-255 falls back rather than
+    raising: the field is informational and a caller should not fail to connect
+    over it. The contract that matters is the width — the caller assigns this
+    into a fixed slice.
+    """
+    if local_ip:
+        parts = local_ip.split(".")
+        if len(parts) == 4:
+            try:
+                octets = [int(p) for p in parts]
+            except ValueError:
+                octets = []
+            if len(octets) == 4 and all(0 <= o <= 255 for o in octets):
+                return bytes(octets)
+    return bytes((127, 0, 0, 1))
 
 
 def _decode_ascii(value: bytes | None) -> str:

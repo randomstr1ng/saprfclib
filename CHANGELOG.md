@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the client session's truncated-response guards — a short NI version, GW
+  connect or GW done frame must be rejected rather than read past — and for the
+  fixed-width client address field. `session.py` 85% → 89%.
+
 - Tests for the server-session state machine, which was the lowest-covered module at
   60%: the post-registration frame builders, the NI framing guards on inbound gateway
   data (a frame whose declared length disagrees with what arrived must be rejected, not
@@ -68,6 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
 ### Fixed
+
+- **A malformed `local_ip` changed the length of the first frame of every connection.**
+  The NI version request carries the client address in a fixed 4-byte field. The
+  existing guard could not fire for a value with the wrong number of octets —
+  `bytes(...)` succeeds on `"1.2.3"` — and assigning three bytes to a four-byte slice
+  *shrinks* the `bytearray`, producing a 63-byte request instead of 64 (65 for a
+  five-octet value). Now built through a helper that always returns exactly four bytes,
+  falling back to loopback for anything unusable, since the field is informational and
+  should not stop a connection.
 
 - **An over-long gateway host corrupted the post-registration frame, silently.**
   `ServerSession.build_post_reg_a` writes a caller-supplied host into a fixed 224-byte
