@@ -407,9 +407,9 @@ def _build_ws_logon_message(
 
     fname = func_name.upper()
     # call-begin 0x0130: name + '='*(30-len) + 'FT' = 32 chars = 64 B UTF-16LE
-    func_begin_padded = (fname + "=" * (30 - len(fname)) + "FT").encode("utf-16-le")
+    func_begin_padded = _pad_call_name(fname, 30).encode("utf-16-le")
     # call-end 0x0130: name + '='*(38-len) + 'FT' = 40 chars = 80 B UTF-16LE (pcap-verified)
-    func_end_padded = (fname + "=" * (38 - len(fname)) + "FT").encode("utf-16-le")
+    func_end_padded = _pad_call_name(fname, 38).encode("utf-16-le")
     # first 0x0130: CLIENT PROGRAM NAME (verified: writeRfcSessionInfo writes
     # the CPIC layer::ownname here, not the function name).
     # NOTE: changing from func_begin_padded causes RABAX on SAP 7.x — kept for compat.
@@ -1918,6 +1918,25 @@ class _LoopThread:
                 self._loop.close()
             except RuntimeError:  # pragma: no cover - loop already closed
                 pass
+
+
+# An ABAP function module name is at most 30 characters. The wRFC call-name
+# fields pad to a fixed width with '=' and then append "FT", so an over-long name
+# does not truncate — the pad count goes negative, `"=" * -1` yields the empty
+# string, and the field comes out too LONG. A 31-character name produced a
+# 33-character call-begin field where the format requires 32, with nothing
+# raising anywhere.
+_MAX_FUNC_NAME_LEN = 30
+
+
+def _pad_call_name(func_name: str, width: int) -> str:
+    """``NAME`` + ``=`` padding + ``FT``, at exactly ``width`` + 2 characters."""
+    if len(func_name) > width:
+        raise ValueError(
+            f"function module name {func_name!r} is {len(func_name)} characters; "
+            f"ABAP allows at most {_MAX_FUNC_NAME_LEN} and this field pads to {width}"
+        )
+    return func_name + "=" * (width - len(func_name)) + "FT"
 
 
 def _validate_sysnr(sysnr: str | int) -> int:

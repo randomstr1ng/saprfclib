@@ -73,6 +73,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An over-long function name built a malformed wRFC frame.** The call-name fields pad
+  to a fixed width with `=` and append `FT`. An over-long name does not truncate — the
+  pad count goes negative and `"=" * -1` is the empty string — so the field came out
+  *too long*: a 31-character name produced a 33-character call-begin field where the
+  format requires 32, with nothing raising. ABAP caps function module names at 30, so
+  such a name is invalid regardless, but building a malformed frame is the wrong way to
+  report that.
+
+### Added
+
+- Tests for the wRFC (ngrfc V1) value encoders, which were almost entirely uncovered
+  because the only tests reaching them were integration tests needing a live WebSocket
+  endpoint — despite being pure byte-building. Covers the fixed-width contract for CHAR,
+  INT and BCD (marker byte plus exactly the declared width, blank-padded and truncated),
+  the BCD sign nibble, and refusal rather than wrapping when a value will not fit.
+
 - **A crafted inbound frame could burn CPU quadratically on the RFC server.**
   `_extract_5001_params` advanced its scan position only when a parameter value was
   *found*, so a block of declarations with no matching values made every later name
