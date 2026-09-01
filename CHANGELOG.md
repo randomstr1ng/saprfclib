@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-01
+
+A stability and evidence release. No new transport, no new API surface to learn —
+the work went into the paths that were already there and into replacing assumptions
+with captures.
+
+Three themes run through it:
+
+**Failures that were silent are now loud.** A reply that could not be read to its end
+left the connection READY with the remainder still queued, so the *next* call returned
+data belonging to different arguments. A response larger than one gateway frame was
+truncated rather than reassembled. A pool could hand back a connection whose session was
+already dead. Each of those reported nothing at the point it went wrong.
+
+**Facts that were assumed are now sourced.** Uncertainty labels went from 14 to 5, and
+the ones removed were not removed by relabelling: DECFLOAT16/34 settled by capture, tag
+`0x0667` settled by a probe that separated time from bytes, message variables V2–V4
+settled by an exception carrying four distinct values, and the multi-frame continuation
+markers settled by a 22-frame reply. Two labels turned out to be *stale rather than
+uncertain* — they described behaviour that had since been fixed, which is worse than no
+label, because a stale one reads as current fact.
+
+**Several things this library said were wrong.** A free-text tag that no capture had ever
+shown. An error code reported as the server's that was hardcoded here. A GW header field
+documented as a library-name string that is three integers. Those are corrected in place,
+with the evidence recorded next to them.
+
+### Behaviour changes worth knowing
+
+Pre-1.0, so these land without a major bump, but they can surprise:
+
+- **A non-Unicode connection is now refused at handshake** rather than decoding every
+  character field as UTF-16BE and returning mojibake. If you connect to a system that
+  negotiates anything but codepage `4103`, you now get a clear error instead of plausible
+  nonsense. SAP ended support for non-Unicode systems with NetWeaver 7.5.
+- **A connection whose reply could not be read is retired permanently.** It used to return
+  to READY. Any further call on it raises and names the original fault; open a new one.
+- **`AbapApplicationError`'s string carries more.** When the server sends no assembled
+  message text — the common case on kernel 793 — it now includes the message class,
+  number and variables instead of just the exception key. Code matching on the exact
+  string may need updating; the structured fields are unchanged.
+- **`ConnectionMetrics.as_dict()` has four new keys** and `PoolMetrics` is new. Additive,
+  but code asserting an exact key set will see it.
+
 ### Added
 
 - Tests for the metadata bootstrap — `_call_bootstrap` and `_call_struct_bootstrap`,
@@ -881,7 +925,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/randomstr1ng/saprfclib/releases/tag/v0.1.0
