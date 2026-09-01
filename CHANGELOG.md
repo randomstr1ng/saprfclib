@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tag 0x0667 is settled: it is the server-side duration of the answered call, in
+  microseconds, per call and not cumulative. The two golden fixtures had contradicted
+  each other (one read it as microseconds, the other as an `[ASSUMED]` timeout in
+  seconds) and neither could be right from a capture alone, which shows `138.0`
+  without saying what 138.0 counts. A first probe varied rows read, saw the value move
+  400x, and concluded "it tracks the work, so it is a duration" — which does not
+  follow, because rows read moves server time and response size together and a byte
+  counter fit the numbers equally well. `RFC_PING_AND_WAIT` separates them: it sleeps a
+  known interval and returns a constant-size reply. Across 0/1/3-second sleeps the
+  response held at 236 bytes while the value tracked the sleep to 0.1% read as
+  microseconds, each reading bracketed by the sleep below it and the wall clock above,
+  and the third call read its own duration rather than a running total. The `[ASSUMED]`
+  labels are removed and the timeout reading is recorded as disproven.
+
 - A connection whose reply could not be read to its end is now retired instead of
   returned to the pool. Previously the session went back to `READY` with the unread
   remainder still queued on the socket, so the *next* call read the previous reply's
@@ -30,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with silently mis-joined rows, so the failure is left raising until a capture
   settles it. `large_response_probe.py` collects that capture. See
   `docs/protocol/framing.md`.
+
+### Added
+
+- `CallStats.server_duration_s` — the server's own duration for the call, taken from
+  tag 0x0667 of the response. It is the one number that separates server time from
+  network time: a call taking 3 s of wall clock is a different problem depending on
+  whether the server spent 2.99 s of it or 40 ms. `None` when the response carries no
+  such field, which is deliberately distinct from `0.0` — no release rule requiring
+  the tag is established, so absence means unknown, and a fabricated zero would enter
+  a latency series as an impossibly fast call.
 
 ### Added
 

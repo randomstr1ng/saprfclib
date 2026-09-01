@@ -1510,3 +1510,55 @@ def _decode_utf16le(value: bytes | None) -> str:
         except Exception:
             pass
     return value.decode("ascii", errors="replace").rstrip("\x00 ")
+
+
+# Response timing record. 8 bytes, little-endian IEEE-754 double, carrying the
+# server-side duration of the call being answered, in microseconds -- per call,
+# not cumulative.
+#
+# Bytes: golden fixtures rfcping_response.bin / stfc_connection_response.bin.
+# Meaning: behavioural probe against A4H kernel 793. RFC_PING_AND_WAIT sleeps a
+# known interval and returns a constant-size reply, which separates duration from
+# response size -- the pair the earlier rows-read probe could not tell apart.
+# Across 0/1/3-second sleeps the reply held at 236 bytes while the value tracked
+# the sleep to 0.1% read as microseconds, and every reading was bracketed by the
+# sleep below it and the wall clock above. See docs/protocol/framing.md.
+_TAG_SERVER_DURATION = 0x0667
+
+
+def extract_server_duration(tlv: bytes) -> float | None:
+    """Server-side duration of the answered call, in **seconds**, or None.
+
+    ``None`` means the tag was not in this response, and it means exactly that.
+    No release rule has been established that requires the field, so absence is
+    unknown rather than zero -- reporting a missing measurement as 0.0 would put a
+    fabricated number into a metrics series, where it reads as an impossibly fast
+    call rather than as no data.
+
+    Walks the same wire dialect as every other reader here: extended lengths for
+    payloads >= 0xFFFF, and a repeated close tag after each record. Never raises:
+    a malformed tail yields whatever was found before it, because the caller is
+    recording a metric and must not turn a timing detail into a call failure.
+    """
+    pos, n = 0, len(tlv)
+    found: float | None = None
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", tlv, pos)
+        pos += 4
+        if tag == _TAG_TERMINATOR:
+            break
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                break
+            length = struct.unpack_from(">I", tlv, pos)[0]
+            pos += 4
+        if pos + length > n:
+            break
+        if tag == _TAG_SERVER_DURATION and length == 8:
+            # Microseconds on the wire; seconds in the public surface, to match
+            # CallStats.duration_s so the two are directly comparable.
+            found = struct.unpack_from("<d", tlv, pos)[0] / 1_000_000.0
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
+            pos += 2
+    return found

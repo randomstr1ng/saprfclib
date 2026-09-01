@@ -10,7 +10,7 @@
     "GW header bytes 14-75 differ from client: contain session info, client number, codepage",
     "Tag 0x0420 = return code (00000000 = success)",
     "Tag 0x0514 = 16B session token (includes client MAC + session data)",
-    "Tag 0x0667 = 8B float64 LE = 74.0. NOT a timeout: a live probe moved this value by a factor of 400 across three calls on one connection, which a setting does not do. It is per-call and grows with the work; whether it counts microseconds or response bytes is still open. See docs/protocol/framing.md.",
+    "Tag 0x0667 = 8B float64 LE = 74.0 = 74 microseconds of server-side time for this call. Settled by probing RFC_PING_AND_WAIT, which sleeps a known interval and returns a constant-size reply: the value tracked the sleep to 0.1% as microseconds while the response size never moved. The timeout reading recorded here previously is disproven. See docs/protocol/framing.md.",
     "CHAR params are fixed-width 255 chars (510 bytes UTF-16LE), space-padded"
   ],
   "field_annotations": [
@@ -172,7 +172,7 @@
       "name": "tlv_0667_float_field",
       "value": "0667 0008 0000000000805240",
       "type": "variable",
-      "note": "TLV tag=0x0667 len=8; float64 LE = 74.0. Per-call and varies with work (probed live); the timeout reading is disproven. Time-vs-bytes still open [ASSUMED]"
+      "note": "TLV tag=0x0667 len=8; float64 LE = 74.0 = server-side call duration, 74 us. Per call, not cumulative"
     },
     {
       "offset": 1364,

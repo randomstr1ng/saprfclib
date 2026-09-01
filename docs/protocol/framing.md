@@ -287,7 +287,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
 | 0x0513    | analysis          | Function call begin (type B)                                         |
 | 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
-| 0x0667    | capture     | 8-byte float64 LITTLE-endian. Meaning [ASSUMED] — see below          |
+| 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
@@ -331,7 +331,7 @@ NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
     0x0203  ext len=510    result param value (CHAR(255) UTF-16LE, space-padded)
     ...                    (one name/value pair per output param)
     0x0130  len=80         calling program name "SAPLSTFC" (UTF-16LE padded)
-    0x0667  len=8          float64 LE — meaning unconfirmed, see the note below
+    0x0667  len=8          float64 LE = server call duration in microseconds
     0xFFFF  len=0          TLV stream terminator
 ```
 
@@ -367,7 +367,7 @@ APPC header (76B) + RFC marker 00000002 (4B)
     0x0420  len=4          return code uint32 BE (0 = success)
     0x0512  len=0          parameter section start (no parameters follow)
     0x0130  len=80         handling program "SAPLSYSU" (UTF-16LE, padded to 40 chars)
-    0x0667  len=8          float64 LE = 138.0 here — meaning unconfirmed
+    0x0667  len=8          float64 LE = 138.0 here = 138 us of server time
     0xFFFF  len=0          TLV stream terminator
 ```
 
@@ -591,7 +591,7 @@ Server → client (response: COUNTER=2, RESULT=11):
     0x0201  len=14         'COUNTER'    ← CHANGING param (new value)
     0x0203  len=4          02 00 00 00  ← value = 2 (INT4 LE)
     0x0130  len=80         'SAPLMRFC' (program name)
-    0x0667  len=8          float64 LE — meaning unconfirmed, see the note below
+    0x0667  len=8          float64 LE = server call duration in microseconds
     0xFFFF  len=0          terminator
 ```
 
@@ -1019,70 +1019,66 @@ rather than recoverable: nothing in the frame format marks a record boundary tha
 a reader could scan forward to, so once the position in the stream is unknown it
 stays unknown.
 
-### Tag 0x0667 — the bytes are confirmed, the meaning is not
+### Tag 0x0667 — server-side call duration, microseconds
 
-The field is 8 bytes and decodes cleanly as a little-endian IEEE-754 double.
-That much is capture-confirmed. What the number *means* is not, and this table
-previously recorded "server call duration, microseconds" at capture tier — which
-a capture cannot establish. A capture shows `138.0`; it does not say what 138.0
-counts.
+**Settled.** 8 bytes, little-endian IEEE-754 double, carrying the **server-side
+duration of the call that is being answered, in microseconds**. Per call, not
+cumulative. Bytes at capture tier; meaning at behavioural-probe tier (3).
 
-The two golden fixtures disagree with each other:
+Two golden fixtures used to disagree about this — `rfcping_response.json` called
+it a duration in microseconds, `stfc_connection_response.json` an `[ASSUMED]`
+timeout in seconds — and neither could be right on the strength of a capture,
+because a capture shows `138.0` without saying what 138.0 counts.
 
-| Fixture | Value | Recorded as |
-|---------|-------|-------------|
-| `rfcping_response.json` | 138.0 | "call duration ... in microseconds" |
-| `stfc_connection_response.json` | 74.0 | "[ASSUMED] RFC timeout or similar (timeout in seconds?)" |
+#### How it was settled
 
-Three readings fit both numbers and they are far apart:
+The first probe varied rows read and watched the value move by a factor of 400.
+That ruled out a fixed setting, but its verdict — "it tracks the work, so it is a
+duration" — did not follow: rows read moves the server's processing time and the
+size of the response *together*, so a byte counter fit the numbers just as well.
 
-- **microseconds** — RFCPING took 138 µs. Plausible.
-- **milliseconds** — RFCPING took 138 ms. Also plausible.
-- **not a duration at all** — 138 and 74 are settings, e.g. a timeout. Also fits,
-  and would make the field name wrong rather than just its unit.
+`RFC_PING_AND_WAIT` separates them. It sleeps for `SECONDS` and returns a reply of
+constant size, so the clock moves while the response does not. On A4H, kernel 793:
 
-Nothing in `saprfclib` reads this tag, and the metrics in `ConnectionMetrics`
-deliberately measure latency with a local clock instead. Timing a call by a field
-whose unit might be off by a thousand is worse than not timing it: the number
-looks authoritative and is quietly wrong by three orders of magnitude.
+| `SECONDS` | wall | response | `0x0667` |
+|-----------|------|----------|----------|
+| 0 | 182.09 ms | 236 B | 593.0 |
+| 1 | 1036.75 ms | 236 B | 1001468.0 |
+| 3 | 3038.57 ms | 236 B | 3001166.0 |
 
-#### What a live probe settled, and what it did not
+Four independent things fall out of those three rows:
 
-Probed on A4H, kernel 793, with calls of deliberately different cost:
+1. **Not a byte counter.** The response stayed at 236 bytes while the value went
+   from 593 to 3001166. This is the hypothesis the earlier probe could not
+   exclude, and it is now excluded outright.
+2. **Microseconds.** The rise over the 0-second call is 1000875 for a 1-second
+   sleep and 3000573 for a 3-second one — 1.001 s and 3.001 s read as
+   microseconds, matching the independent variable to 0.1%. Read as
+   milliseconds those are 1000 s and 3000 s, which is absurd.
+3. **Per call, not cumulative.** A running total would put the third call at
+   593 + 1001468 + 3000573 ≈ 4002634. It reads 3001166 — its own duration alone.
+4. **It is the server's own measurement, not ours.** Every value is bracketed by
+   the sleep below it and the wall clock above: 1000000 < 1001468 < 1036750, and
+   3000000 < 3001166 < 3038570. A field that included network time would exceed
+   the wall clock; one that measured something other than this call would not
+   track `SECONDS` at all. The ~600 µs floor at `SECONDS=0` is the server-side
+   cost of the call itself.
 
-| call | wall | 0x0667 |
-|------|------|--------|
-| `RFC_PING` | 32.61 ms | 124.0 |
-| `RFC_READ_TABLE T000`, 10 rows | 324.19 ms | 21758.0 |
-| `RFC_READ_TABLE DD03L`, 200 rows | 101.65 ms | 55132.0 |
+The `[ASSUMED]` labels on this tag are removed. The timeout reading is disproven,
+not merely unconfirmed.
 
-**Settled: it is not a fixed setting.** The value moved by a factor of 400 across
-three calls on one connection. A timeout does not do that, so the "timeout in
-seconds" reading in `stfc_connection_response.json` is dead. The field is
-per-call and it grows with the work.
+#### Why this is worth having
 
-**Not settled: whether it counts time or bytes.** Every call above varied the
-same single knob — rows read — and that moves the server's processing time and
-the size of the response *together*. A byte counter fits all three numbers as
-well as a clock does; 55132 is an entirely ordinary size for 200 DD03L rows. The
-first version of this note recorded the probe's own verdict, "it tracks the work,
-so it is a duration", which does not follow and is exactly the inference this
-document exists to prevent.
+It is the one number that separates server time from network time. A call that
+takes 3 s of wall clock is a very different problem depending on whether
+`0x0667` says 2.99 s (the ABAP is slow) or 40 ms (the network or the gateway is).
+`ConnectionMetrics` measures latency with a local clock, which cannot make that
+distinction; the field is what closes the gap.
 
-**One thing the numbers do rule out, conditionally.** *If* it is a duration, it
-cannot be milliseconds: the 200-row read returned 55132, and 55132 ms is 55
-seconds of server time inside a call whose entire wall-clock was 101.65 ms.
-Server time cannot exceed the wall clock of the call containing it. Under the
-duration hypothesis the unit is therefore microseconds — 55.1 ms of server work
-inside 101.65 ms of wall, which is sensible. This says nothing about the
-byte-counter hypothesis, where the unit question does not arise.
-
-**To settle what remains:** vary time and size *independently*. `RFC_PING_AND_WAIT`
-does it in one call — it sleeps for `SECONDS` and returns an `RFC_PING`-sized
-reply, so the clock moves while the response does not. A 3-second sleep reads
-directly as the unit with no ratio estimate: ~3,000,000 means microseconds,
-~3,000 means milliseconds, and a value that stays near 124 means the field counts
-bytes and needs renaming, not re-scaling. `large_response_probe.py` runs this.
+The tag is not guaranteed present in every response — it appears in the RFCPING,
+STFC_CONNECTION and RFC_PING_AND_WAIT replies captured so far, and no rule has
+been established that requires it. Any reader must treat absence as "unknown"
+rather than zero.
 
 ### Exception TLV semantics — the tag set varies by release
 

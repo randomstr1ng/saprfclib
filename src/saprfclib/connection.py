@@ -66,6 +66,7 @@ from saprfclib.invoke import (
     decompress_table_stream,
     dm_table_ids,
     drop_unknown_parameters,
+    extract_server_duration,
     parse_invoke_response,
     raise_for_rfc_error,
     unknown_parameters,
@@ -1972,12 +1973,23 @@ def _validate_sysnr(sysnr: str | int) -> int:
 class CallStats:
     """What one RFC call cost, measured by this client.
 
-    Every field here is measured locally: the clock is ours, the byte counts are
-    what crossed our own socket. Nothing is taken from the server's own reporting,
-    because the one field that looks like it carries that (tag 0x0667) has a
-    documented meaning that does not survive scrutiny — two golden fixtures give
-    it contradictory readings, and neither the unit nor whether it is a duration
-    at all is established. See docs/protocol/framing.md.
+    ``duration_s`` and the byte counts are measured locally: our clock, our socket.
+    ``server_duration_s`` is the server's own figure, read from tag 0x0667 of the
+    response, and it is the one number that separates server time from network
+    time. A call taking 3 s of wall clock is a different problem depending on
+    whether the server spent 2.99 s of that (the ABAP is slow) or 40 ms (the
+    network, the gateway, or a queue is).
+
+    ``server_duration_s`` is ``None`` whenever the field was not in the response,
+    and that is deliberately distinct from ``0.0``. No release rule requiring the
+    tag has been established, so absence means unknown; recording it as zero would
+    put a fabricated number into a metrics series where it would read as an
+    impossibly fast call rather than as missing data. It is also ``None`` on a
+    failed call that never got a parseable response.
+
+    Source for the 0x0667 reading: behavioural probe against A4H kernel 793 --
+    see :func:`saprfclib.invoke.extract_server_duration` and
+    docs/protocol/framing.md.
     """
 
     func_name: str
@@ -1985,6 +1997,7 @@ class CallStats:
     request_bytes: int
     response_bytes: int
     failed: bool = False
+    server_duration_s: float | None = None
 
 
 class ConnectionMetrics:
@@ -4573,6 +4586,9 @@ class AsyncConnection:
         self._transport = transport
         self._session = Session()
         self._lock = asyncio.Lock()
+        # Server-reported duration of the most recent call (tag 0x0667, seconds),
+        # handed to CallStats by call(). None until a response carries one.
+        self._last_server_duration_s: float | None = None
         # Unknown-parameter policy (issue #24) - see Connection.__init__.
         self._strict_params = strict_params
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
@@ -4894,11 +4910,17 @@ class AsyncConnection:
                         getattr(self._transport, "bytes_received", 0) - received_before
                     ),
                     failed=failed,
+                    server_duration_s=self._last_server_duration_s,
                 )
             )
 
     async def _call_instrumented(self, func_name: str, params: dict[str, object]) -> dict[str, Any]:
         """The call itself; :meth:`call` wraps it to time and count."""
+        # Cleared up front, not merely overwritten on success. A call that fails
+        # before reading a response must not inherit the previous call's timing
+        # and report it as its own -- that is a wrong number wearing the shape of
+        # a right one, which is worse in a metrics series than a gap.
+        self._last_server_duration_s = None
         async with self._lock:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
@@ -4930,6 +4952,10 @@ class AsyncConnection:
                     await self._transport.send_message(request)
                     response = await self._transport.recv_message()
                     tlv_response = _strip_gw_header(response)
+                    # Read the server's timing before parsing, so a call that
+                    # raises an ABAP error still reports how long the server spent
+                    # on it -- that is often the interesting case.
+                    self._last_server_duration_s = extract_server_duration(tlv_response)
                     result = parse_invoke_response(tlv_response, desc, dm_names)
                 result = _convert_date_time_fields(result, desc)
                 return result

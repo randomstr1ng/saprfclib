@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 """Per-connection call metrics (#22).
 
-Everything measured here is measured locally — our clock, our socket. Nothing
-comes from the server's own reporting, because the field that appears to carry
-it (tag 0x0667) has no established meaning: two golden fixtures read it
-differently and it is not settled whether it is even a duration.
+duration_s and the byte counts are measured locally — our clock, our socket.
+server_duration_s comes from the server itself, tag 0x0667 of the response, now
+that a behavioural probe has settled what that field counts: the server-side
+duration of the answered call, in microseconds, per call. It is the one number
+that separates server time from network time. See tests/test_server_duration.py
+and docs/protocol/framing.md.
 """
 
 from __future__ import annotations
