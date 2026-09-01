@@ -51,6 +51,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PoolMetrics`, on both `ConnectionPool` and `AsyncConnectionPool` as `.metrics`,
+  plus `pool.stats()` folding in the live gauges (`in_use`, `idle`, `size`,
+  `max_size`). Closes the half of #22 that connection-level metrics could not: was
+  the caller even holding a connection yet? A high `mean_wait_s` with no `timeouts`
+  says the pool is undersized, `timeouts` say badly undersized, and a high
+  `discards` count says connections are dying between uses and that cost is being
+  paid on every acquire.
+  The accounting keeps the awkward cases honest. A connection that fails its health
+  check is a `discard`, never a `hit` — crediting it would report a reuse nobody
+  could use. A failed `open()` is not a `create`, since the reservation is undone
+  and counting it would show a pool steadily opening connections that do not exist.
+  `mean_wait_s` divides by acquires *plus* timeouts, because a caller that waited
+  the full deadline and got nothing waited longest of all, and dropping it would
+  make an exhausted pool look faster than a healthy one.
+
 - `ConnectionMetrics.total_server_duration_s`, `mean_server_duration_s`,
   `server_timed_calls` and `server_time_fraction`. The fraction is the number the
   0x0667 work was for: near 1.0 means latency is the ABAP, near 0.0 means it is the

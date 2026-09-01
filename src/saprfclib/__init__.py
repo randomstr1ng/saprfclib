@@ -54,7 +54,7 @@ from saprfclib.exceptions import (
     WebSocketError,
 )
 from saprfclib.language import language_iso_to_sap, language_sap_to_iso
-from saprfclib.pool import AsyncConnectionPool, ConnectionPool
+from saprfclib.pool import AsyncConnectionPool, ConnectionPool, PoolMetrics
 from saprfclib.server import AsyncRfcServer, RfcServer
 from saprfclib.stores import (
     AsyncTidStore,
@@ -92,6 +92,7 @@ __all__ = [
     "AsyncConnection",
     "CallStats",
     "ConnectionMetrics",
+    "PoolMetrics",
     "AsyncConnectionPool",
     "AsyncRfcServer",
     # Sync server

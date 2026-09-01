@@ -225,7 +225,7 @@ async def test_async_pool_timeout_reports_the_discards_it_made() -> None:
     from collections import deque
 
     from saprfclib.exceptions import PoolTimeoutError
-    from saprfclib.pool import AsyncConnectionPool
+    from saprfclib.pool import AsyncConnectionPool, PoolMetrics
 
     class _DeadConn:
         async def ping(self) -> bool:
@@ -236,6 +236,9 @@ async def test_async_pool_timeout_reports_the_discards_it_made() -> None:
 
     pool = AsyncConnectionPool.__new__(AsyncConnectionPool)
     pool._cond = asyncio.Condition()
+    # The double bypasses __init__, so every field the checkout path touches has
+    # to be set by hand -- including the metrics counters it updates as it goes.
+    pool.metrics = PoolMetrics()
     # One idle connection that fails its health check, and an open() that never
     # completes — so the wait times out after the pool has discarded something.
     pool._idle = deque([_DeadConn()])
