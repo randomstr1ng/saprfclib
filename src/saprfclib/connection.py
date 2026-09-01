@@ -2020,6 +2020,8 @@ class ConnectionMetrics:
         "max_duration_s",
         "request_bytes",
         "response_bytes",
+        "total_server_duration_s",
+        "server_timed_calls",
         "last",
     )
 
@@ -2030,6 +2032,13 @@ class ConnectionMetrics:
         self.max_duration_s = 0.0
         self.request_bytes = 0
         self.response_bytes = 0
+        # Server-reported time, and the count of calls that actually reported it.
+        # Kept separate because the mean must divide by the calls that carried a
+        # measurement, not by every call -- averaging over calls whose field was
+        # absent would silently understate server time by whatever share of the
+        # traffic omits the tag.
+        self.total_server_duration_s = 0.0
+        self.server_timed_calls = 0
         self.last: CallStats | None = None
 
     def record(self, stats: CallStats) -> None:
@@ -2040,12 +2049,43 @@ class ConnectionMetrics:
         self.max_duration_s = max(self.max_duration_s, stats.duration_s)
         self.request_bytes += stats.request_bytes
         self.response_bytes += stats.response_bytes
+        if stats.server_duration_s is not None:
+            self.total_server_duration_s += stats.server_duration_s
+            self.server_timed_calls += 1
         self.last = stats
 
     @property
     def mean_duration_s(self) -> float:
         """Mean call latency, or 0.0 before any call has been made."""
         return self.total_duration_s / self.calls if self.calls else 0.0
+
+    @property
+    def mean_server_duration_s(self) -> float:
+        """Mean server-side time over the calls that reported one, else 0.0.
+
+        Divides by ``server_timed_calls``, not by ``calls``. A response without
+        tag 0x0667 carries no measurement, and folding it in as zero would
+        understate server time by whatever share of the traffic omits the field.
+        """
+        return (
+            self.total_server_duration_s / self.server_timed_calls
+            if self.server_timed_calls
+            else 0.0
+        )
+
+    @property
+    def server_time_fraction(self) -> float:
+        """Share of wall-clock time the server accounts for, over timed calls.
+
+        The number this whole field exists for. Near 1.0 means latency is the
+        ABAP; near 0.0 means it is the network, the gateway, or a queue. 0.0 when
+        nothing reported a server time, which is why ``server_timed_calls``
+        is exposed alongside it -- an unqualified 0.0 would otherwise read as
+        "the server is instant" rather than "nothing was measured".
+        """
+        if not self.server_timed_calls or self.total_duration_s <= 0.0:
+            return 0.0
+        return self.total_server_duration_s / self.total_duration_s
 
     def as_dict(self) -> dict[str, float | int]:
         """A flat mapping, shaped for a metrics exporter."""
@@ -2057,6 +2097,10 @@ class ConnectionMetrics:
             "max_duration_s": self.max_duration_s,
             "request_bytes": self.request_bytes,
             "response_bytes": self.response_bytes,
+            "total_server_duration_s": self.total_server_duration_s,
+            "mean_server_duration_s": self.mean_server_duration_s,
+            "server_timed_calls": self.server_timed_calls,
+            "server_time_fraction": self.server_time_fraction,
         }
 
     def __repr__(self) -> str:

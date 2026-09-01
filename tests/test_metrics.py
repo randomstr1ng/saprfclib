@@ -67,6 +67,8 @@ def test_no_unbounded_sample_list() -> None:
     assert m.calls == 50_000
     assert not hasattr(m, "__dict__"), "__slots__ keeps the footprint fixed"
     assert set(ConnectionMetrics.__slots__) == {
+        "total_server_duration_s",
+        "server_timed_calls",
         "calls",
         "failures",
         "total_duration_s",
@@ -85,6 +87,10 @@ def test_as_dict_is_flat_and_json_ready() -> None:
     m.record(CallStats("A", 0.25, 100, 200))
     d = m.as_dict()
     assert set(d) == {
+        "total_server_duration_s",
+        "mean_server_duration_s",
+        "server_timed_calls",
+        "server_time_fraction",
         "calls",
         "failures",
         "total_duration_s",
@@ -153,3 +159,49 @@ def test_connection_exposes_metrics() -> None:
     core.metrics = ConnectionMetrics()
     conn._async_conn = core
     assert conn.metrics is core.metrics, "must not report a second, empty set of numbers"
+
+
+def test_server_time_averages_over_the_calls_that_reported_one() -> None:
+    """Not over every call. The distinction is the whole point of the None.
+
+    A response without tag 0x0667 carries no measurement. Folding it in as zero
+    would understate server time by whatever share of the traffic omits the
+    field -- and it would do so quietly, since the resulting number is perfectly
+    plausible.
+    """
+    m = ConnectionMetrics()
+    m.record(CallStats("A", 1.0, 1, 1, server_duration_s=0.9))
+    m.record(CallStats("B", 1.0, 1, 1))  # no server figure in this reply
+    m.record(CallStats("C", 1.0, 1, 1, server_duration_s=0.7))
+
+    assert m.calls == 3
+    assert m.server_timed_calls == 2
+    assert m.total_server_duration_s == pytest.approx(1.6)
+    assert m.mean_server_duration_s == pytest.approx(0.8)  # 1.6 / 2, not 1.6 / 3
+
+
+def test_server_time_fraction_separates_slow_abap_from_slow_network() -> None:
+    m = ConnectionMetrics()
+    m.record(CallStats("SLOW_ABAP", 1.0, 1, 1, server_duration_s=0.97))
+    assert m.server_time_fraction == pytest.approx(0.97)
+
+    n = ConnectionMetrics()
+    n.record(CallStats("SLOW_LINK", 1.0, 1, 1, server_duration_s=0.02))
+    assert n.server_time_fraction == pytest.approx(0.02)
+
+
+def test_server_time_fraction_is_zero_when_nothing_was_measured() -> None:
+    """And server_timed_calls is what tells a reader which zero this is.
+
+    An unqualified 0.0 would read as "the server is instant" rather than
+    "no response carried the field".
+    """
+    m = ConnectionMetrics()
+    m.record(CallStats("A", 1.0, 1, 1))
+    assert m.server_time_fraction == 0.0
+    assert m.mean_server_duration_s == 0.0
+    assert m.server_timed_calls == 0
+
+    empty = ConnectionMetrics()
+    assert empty.server_time_fraction == 0.0
+    assert empty.mean_server_duration_s == 0.0

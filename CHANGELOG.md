@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ConnectionMetrics.total_server_duration_s`, `mean_server_duration_s`,
+  `server_timed_calls` and `server_time_fraction`. The fraction is the number the
+  0x0667 work was for: near 1.0 means latency is the ABAP, near 0.0 means it is the
+  network, the gateway or a queue. The mean divides by the calls that actually
+  reported a server time, not by every call — folding an absent measurement in as
+  zero would understate server time by whatever share of the traffic omits the tag,
+  and would do so with a perfectly plausible-looking number. `server_timed_calls` is
+  exposed so a 0.0 fraction can be told apart from "nothing was measured".
+
 - `CallStats.server_duration_s` — the server's own duration for the call, taken from
   tag 0x0667 of the response. It is the one number that separates server time from
   network time: a call taking 3 s of wall clock is a different problem depending on
