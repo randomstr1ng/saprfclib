@@ -43,7 +43,7 @@ import struct
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -69,6 +69,7 @@ from saprfclib.invoke import (
     extract_server_duration,
     parse_invoke_response,
     raise_for_rfc_error,
+    tlv_stream_status,
     unknown_parameters,
 )
 from saprfclib.language import normalize_logon_language
@@ -2066,6 +2067,74 @@ class ConnectionMetrics:
         )
 
 
+# A response too large for one gateway frame arrives as several. The cap is a
+# guard, not a protocol fact: the observed case used two frames, and no rule
+# limiting the count has been established. It exists so a peer that never sends
+# a terminator cannot hold a caller forever.
+_MAX_RESPONSE_FRAMES = 256
+
+
+def _join_response_frames(read_frame: Callable[[], bytes], func_name: str) -> bytes:
+    """Read frames until the TLV stream terminates, and return the joined body.
+
+    Reassembly is driven by the stream's own 0xFFFF terminator rather than by a
+    header flag. Two header fields looked like "more follows" markers -- bytes
+    17-20 and bytes 60-63 -- and both are wrong: they are the same signal, and
+    both also fire on complete terminal replies (a refused logon, an incomplete
+    signon), so a loop trusting either would wait forever on a failed logon for a
+    frame that is never coming. See invoke.tlv_stream_status.
+
+    Only a buffer that parsed at least one record and then ran off the end reads
+    more. A body that is not a TLV stream at all -- a CPIC-layer refusal is
+    EBCDIC, so its first record claims 50629 bytes inside a 97-byte frame --
+    is handed straight to the parser, which reports it properly instead of
+    blocking on a continuation that does not exist.
+    """
+    tlv = _strip_gw_header(read_frame())
+    frames = 1
+    while tlv_stream_status(tlv) == "truncated":
+        if frames >= _MAX_RESPONSE_FRAMES:
+            raise ValueError(
+                f"{func_name}: response still incomplete after {frames} frames "
+                f"({len(tlv)} bytes); refusing to read further"
+            )
+        part = _strip_gw_header(read_frame())
+        if not part:
+            # An 80-byte frame is a bare GW header with no TLV payload. It adds
+            # nothing, so continuing would spin to the cap rather than make
+            # progress; stop and let the parser report what is actually missing.
+            raise ValueError(
+                f"{func_name}: response truncated after {frames} frame(s) and the "
+                f"next frame carried no payload"
+            )
+        tlv += part
+        frames += 1
+    return tlv
+
+
+async def _join_response_frames_async(
+    read_frame: Callable[[], Awaitable[bytes]], func_name: str
+) -> bytes:
+    """Async twin of :func:`_join_response_frames`; same rule, same reasoning."""
+    tlv = _strip_gw_header(await read_frame())
+    frames = 1
+    while tlv_stream_status(tlv) == "truncated":
+        if frames >= _MAX_RESPONSE_FRAMES:
+            raise ValueError(
+                f"{func_name}: response still incomplete after {frames} frames "
+                f"({len(tlv)} bytes); refusing to read further"
+            )
+        part = _strip_gw_header(await read_frame())
+        if not part:
+            raise ValueError(
+                f"{func_name}: response truncated after {frames} frame(s) and the "
+                f"next frame carried no payload"
+            )
+        tlv += part
+        frames += 1
+    return tlv
+
+
 @contextlib.contextmanager
 def _fail_closed(session: Session, func_name: str) -> Iterator[None]:
     """Retire the session if a reply could not be read to its end.
@@ -3406,8 +3475,9 @@ class Connection:
                     request = self._build_invoke_frame(handle, request_tlv)
                     with _fail_closed(self._session, func_name):
                         self._send_invoke_frame(request)
-                        response = self._transport.recv_message()
-                        tlv_response = _strip_gw_header(response)
+                        tlv_response = _join_response_frames(
+                            self._transport.recv_message, func_name
+                        )
                         result = parse_invoke_response(tlv_response, desc, dm_names)
 
                 result = _convert_date_time_fields(result, desc)
@@ -4950,8 +5020,9 @@ class AsyncConnection:
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 with _fail_closed(self._session, func_name):
                     await self._transport.send_message(request)
-                    response = await self._transport.recv_message()
-                    tlv_response = _strip_gw_header(response)
+                    tlv_response = await _join_response_frames_async(
+                        self._transport.recv_message, func_name
+                    )
                     # Read the server's timing before parsing, so a call that
                     # raises an ABAP error still reports how long the server spent
                     # on it -- that is often the interesting case.

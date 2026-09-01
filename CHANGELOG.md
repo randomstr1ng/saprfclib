@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Responses larger than one gateway frame are now reassembled instead of failing.
+  `RFC_READ_TABLE` on `DD03L` past ~2000 rows returned a 28080-byte frame cut inside a
+  250-byte `0x0305` record plus a 25593-byte continuation, and `Connection.call` read
+  only the first. The bodies concatenate directly — no trailer, no preamble, no
+  re-framing. Reassembly is driven by the stream's own `0xFFFF` terminator and
+  deliberately **not** by either header field that looks like a "more follows" marker:
+  bytes 17–20 and 60–63 are the same signal, and both also fire on complete terminal
+  replies (a refused logon, an incomplete signon), so a loop trusting either would hang
+  on a failed logon waiting for a frame that never comes. Fixtures
+  `multiframe_read_table_part1.bin` / `_part2.bin`.
+- Bytes 56–59 of the GW header are the frame's own payload length (BE uint32), exact on
+  all 16 frames checked — the 2 above plus 9 independently captured golden fixtures.
+  The previous mapping of 52–63 as an RFC library name string is disproven; the region
+  is three BE uint32.
+
 - Tag 0x0667 is settled: it is the server-side duration of the answered call, in
   microseconds, per call and not cumulative. The two golden fixtures had contradicted
   each other (one read it as microseconds, the other as an `[ASSUMED]` timeout in
@@ -33,17 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probing a stream it already knows is unreadable. ABAP application errors and
   system failures are excluded: those frames parsed correctly, so the connection
   stays usable rather than forcing a reconnect on every short dump.
-
-### Known issues
-
-- Responses larger than roughly one NI frame fail to parse (`RFC_READ_TABLE` on
-  `DD03L` past ~2000 rows). The parser is still in sync when the data ends, so the
-  response is short rather than corrupt; `Connection.call` reads one frame per
-  invoke. Whether the server continues in a further frame, and how it marks that, is
-  not established — a guessed continuation rule would replace a loud parse error
-  with silently mis-joined rows, so the failure is left raising until a capture
-  settles it. `large_response_probe.py` collects that capture. See
-  `docs/protocol/framing.md`.
 
 ### Added
 

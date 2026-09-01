@@ -1562,3 +1562,73 @@ def extract_server_duration(tlv: bytes) -> float | None:
         if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
             pos += 2
     return found
+
+
+# Multi-frame responses. A reply larger than the gateway's frame size arrives as
+# several NI frames whose TLV bodies concatenate directly, with no per-frame
+# trailer and no re-framing: the second frame simply carries the remaining bytes
+# of the record the first one was cut inside.
+#
+# Confirmed live on A4H kernel 793, RFC_READ_TABLE on DD03L with ROWCOUNT=2000.
+# The reply arrived as a 28080-byte frame (type 0x06cb) that stopped 197 bytes
+# short of a 250-byte 0x0305 record, followed by a 25593-byte frame (type 0x0609)
+# whose body is not a TLV stream at all -- it begins mid-record. Joining the two
+# bodies gives 53513 bytes that walk cleanly to the 0xFFFF terminator with 2
+# bytes trailing.
+#
+# [ASSUMED] the termination rule. Two header fields looked like "more follows"
+# markers and both are wrong. Bytes 17-20 (BE int32) read -1 on the continuing
+# frame and 500 on complete ones, and bytes 60-63 read 0 and 1 -- but the two are
+# the same signal (identical on all 13 frames compared), and both also fire on
+# signon_incomplete_752_response.bin and cpic_logon_error_response.bin, which are
+# complete terminal replies with nothing following them. A loop driven by either
+# would hang on a failed logon waiting for a frame that never comes. So the
+# stream's own 0xFFFF terminator drives reassembly instead, which is confirmed
+# structure rather than an inferred flag. What would settle the header field is a
+# capture of a three-frame response: the middle frame's markers would show
+# whether they mean "more follows" or something else that merely coincides here.
+#
+# Bytes 56-59 (BE uint32) are this frame's own payload length, exact on all 16
+# frames checked -- 9 independently captured golden fixtures plus the 7 probe
+# frames. Not needed for reassembly, since the NI prefix already gives it, but it
+# is a free cross-check that the 80-byte header split is right.
+_TLV_COMPLETE = "complete"
+_TLV_TRUNCATED = "truncated"
+_TLV_NOT_TLV = "not_tlv"
+
+
+def tlv_stream_status(tlv: bytes) -> str:
+    """Classify a TLV buffer: complete, truncated mid-record, or not TLV at all.
+
+    The three-way split matters because only the middle case may read another
+    frame. Treating "not TLV" as "truncated" would make the reader wait on a
+    reply that has already arrived in full:
+
+    - ``complete``  -- the walk reached the 0xFFFF terminator.
+    - ``truncated`` -- at least one record parsed and then a record's length ran
+      past the end of the buffer. This is the multi-frame case: the parser was
+      still in sync when the data stopped.
+    - ``not_tlv``   -- nothing parsed, or the buffer ended without a terminator
+      and without overrunning. A CPIC-layer refusal lands here: its body is
+      EBCDIC, so the very first record claims a 50629-byte length inside a
+      97-byte frame, overrunning on record zero rather than after any.
+    """
+    pos, n = 0, len(tlv)
+    records = 0
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", tlv, pos)
+        pos += 4
+        if tag == _TAG_TERMINATOR:
+            return _TLV_COMPLETE
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                return _TLV_TRUNCATED if records else _TLV_NOT_TLV
+            length = struct.unpack_from(">I", tlv, pos)[0]
+            pos += 4
+        if pos + length > n:
+            return _TLV_TRUNCATED if records else _TLV_NOT_TLV
+        pos += length
+        records += 1
+        if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
+            pos += 2
+    return _TLV_NOT_TLV

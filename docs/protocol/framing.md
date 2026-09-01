@@ -953,71 +953,75 @@ parsed out of the response TLV, and the tags carrying it on a system failure hav
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
 
-### Large responses are truncated — the continuation rule is unknown
+### Multi-frame responses
 
-**Status: open gap. Reproducible, diagnosed, not fixed, and deliberately not guessed.**
+A reply larger than one gateway frame arrives as several NI frames whose TLV
+bodies **concatenate directly** — no per-frame trailer, no length preamble on the
+continuation, no re-framing. The second frame carries the remaining bytes of the
+record the first was cut inside.
 
-On A4H (kernel 793), `RFC_READ_TABLE` on `DD03L` fails once the result grows past
-roughly one frame:
+Captured on A4H, kernel 793, `RFC_READ_TABLE` on `DD03L` with `ROWCOUNT=2000`:
 
-```
-ROWCOUNT=200      ok
-ROWCOUNT=2000     malformed TLV: tag 0x0305 length 250
-                  exceeds remaining payload (197 bytes)
-ROWCOUNT=20000    malformed TLV: tag 0x5f5a length 43660
-                  exceeds remaining payload (25509 bytes)
-```
+| frame | GW type | total | body | walk |
+|-------|---------|-------|------|------|
+| part 1 | `0x06cb` | 28080 | 28000 | consumes 27799, needs 250 more bytes of a `0x0305` record with 197 left |
+| part 2 | `0x0609` | 25593 | 25513 | not a TLV stream — begins mid-record |
 
-The first of those is the informative one. `0x0305` is a valid record —
-SAPCOMPRESS table content — and 250 bytes is the size those chunks actually use
-(`BAPI_USER_GET_DETAIL` joins eight 250-byte `0x0305` records into 2000 bytes).
-So the walker was still **in sync** when the buffer ended. This is a short
-response, not a scrambled one. The second case is what the first turns into
-further along: `0x5f5a` is `"_Z"`, ordinary row text being read as a tag.
+Joined: 53513 bytes, walking cleanly to the `0xFFFF` terminator with 2 trailing.
+Fixtures `multiframe_read_table_part1.bin` / `_part2.bin`.
 
-`Connection.call` issues exactly one `recv_message()` per invoke. Two things
-could produce the above and they need different fixes:
+Before this was understood, `Connection.call` issued one `recv_message()` per
+invoke, so any such reply failed with `malformed TLV: tag 0x0305 length 250
+exceeds remaining payload (197 bytes)` — and left the remainder queued for the
+next call to misread.
 
-1. the server answers in more than one NI frame and we read the first;
-2. the response is one frame and our TLV walker mis-measures it.
+#### What drives reassembly, and what must not
 
-These are distinguished by asking the socket for another frame — if one arrives
-it is (1), if the socket is empty it is (2). `large_response_probe.py` does that
-and saves every frame.
+Two header fields look like "more follows" markers and **both are wrong**:
 
-**What must not happen in the meantime** is a guessed continuation rule. If it is
-(1), the question of how the server marks "more follows" is unanswered: no field
-in the 76-byte GW header is confirmed to carry it, several header bytes in the
-10–75 range are still `[UNKNOWN]`, and whether the bodies simply concatenate or
-each continuation frame repeats framing of its own is exactly the kind of detail
-that a plausible guess gets right for small cases and wrong for large ones. A
-reassembly loop built on a guess would turn a loud parse error into silently
-mis-joined table rows.
+| field | part 1 (continues) | part 2 (last) |
+|-------|--------------------|---------------|
+| bytes 17–20, BE int32 | `-1` | `500` |
+| bytes 60–63, BE uint32 | `0` | `1` |
 
-Until a capture settles it, the failure raises. What has changed is the blast
-radius — see below.
+They are the same signal — identical across all thirteen frames compared — and
+both **also fire on `signon_incomplete_752_response.bin` and
+`cpic_logon_error_response.bin`**, which are complete terminal replies with
+nothing following them. A loop driven by either would hang on a failed logon,
+waiting for a frame the server is never going to send. This is the trap the
+capture set: the marker looks perfect on the one response that motivated it.
 
-#### The consequence that was worse than the failure
+Reassembly is therefore driven by the **stream's own `0xFFFF` terminator**, which
+is confirmed structure rather than an inferred flag. `invoke.tlv_stream_status`
+classifies a buffer three ways, and only the middle one reads another frame:
 
-The truncated read is loud. What followed it was not.
+- **complete** — the walk reached the terminator.
+- **truncated** — at least one record parsed, then a record ran past the end.
+- **not_tlv** — nothing parsed. A CPIC-layer refusal lands here: its body is
+  EBCDIC, so record zero claims 50629 bytes inside a 97-byte frame.
 
-The unread remainder stayed queued on the socket while the session went back to
-`READY`. The next call on that connection would send its own request, read the
-*previous* reply's leftovers, and return a result belonging to different
-arguments — with nothing in the data to indicate the swap.
+**`[ASSUMED]`: the meaning of bytes 17–20 and 60–63.** What would settle them is
+a capture of a *three*-frame response — the middle frame's values would show
+whether they track continuation or something that merely coincides with it here.
 
-`Session.mark_broken` closes that off. Any failure between "request sent" and
-"reply parsed" retires the session permanently: `BROKEN` is terminal, every later
-operation refuses and names the original fault, and the pool discards such a
-connection instead of lending it on. ABAP-level failures are excluded on purpose
-— an application error or system failure means the frame parsed correctly and the
-stream is intact, and retiring on those would have a pooled application
-reconnecting on every short dump.
+#### Confirmed: bytes 56–59 are the frame's own payload length
 
-There is no resynchronisation to attempt, which is why the state is terminal
-rather than recoverable: nothing in the frame format marks a record boundary that
-a reader could scan forward to, so once the position in the stream is unknown it
-stays unknown.
+BE uint32, exact on all 16 frames checked — the 2 above plus 9 independently
+captured golden fixtures, where it equals the body length on every server
+response and reads `0` on client requests. This **disproves** the earlier mapping
+of 52–63 as an RFC library name string; the region is three BE uint32
+(`2` / payload length / the flag above). Not needed for reassembly, since the NI
+prefix already gives the length, but a free cross-check that the 80-byte header
+split is right.
+
+#### One unexplained observation
+
+The capture continued past part 2 with **40 identical 80-byte frames of GW type
+`0x06ce`** — a bare GW header plus RFC marker, zero TLV payload. What produces
+them is not established. They contribute nothing, and the loop stops at the
+terminator before reaching them, but a reader that kept going on an empty frame
+would spin to its cap rather than progress — so an empty continuation is refused
+explicitly rather than skipped.
 
 ### Tag 0x0667 — server-side call duration, microseconds
 

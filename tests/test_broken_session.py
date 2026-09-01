@@ -31,6 +31,7 @@ import pytest
 from saprfclib.connection import Connection
 from saprfclib.exceptions import AbapSystemFailure, CommunicationError
 from saprfclib.invoke import tlv_record as tr
+from saprfclib.invoke import tlv_stream_status
 from saprfclib.session import Session, SessionState
 
 from .test_connection import (  # type: ignore[attr-defined]
@@ -40,49 +41,102 @@ from .test_connection import (  # type: ignore[attr-defined]
 
 
 def _truncated_response() -> bytes:
-    """A frame that parses in sync and then runs out, as the live one did.
+    """The first frame of a two-frame reply, as the live one looked.
 
     0x0305 announces 250 bytes of compressed table content and only 40 follow.
-    That is the shape of a reply continued in a frame nobody read -- not of
-    corruption, which would derail the walk at the tag instead of the length.
+    That is the shape of a reply continued in another frame -- not of corruption,
+    which would derail the walk at the tag instead of the length. The reader now
+    treats this as an invitation to read the continuation.
     """
     return tr(0x0500, b"") + struct.pack(">HH", 0x0305, 250) + b"\x00" * 40
 
 
-def test_truncated_reply_retires_the_connection() -> None:
+def _continuation_of_truncated() -> bytes:
+    """The rest of that 0x0305 record, plus the terminator.
+
+    Modelled on the live capture, where the continuation frame's body is not a
+    TLV stream at all: it begins mid-record and carries only the remaining bytes.
+    """
+    return b"\x00" * 210 + b"\x03\x05" + struct.pack(">HH", 0xFFFF, 0)
+
+
+def test_a_two_frame_reply_is_reassembled() -> None:
+    """The reply that used to fail outright now parses.
+
+    RFC_READ_TABLE on DD03L past ~2000 rows returned a 28080-byte frame that
+    stopped 197 bytes short of a 250-byte 0x0305 record, followed by a
+    25593-byte frame whose body begins mid-record. Joining the bodies gave a
+    stream that walks cleanly to the terminator, which is what this reproduces
+    in miniature.
+    """
+    conn, _ = _ready_connection_with_invoke([_truncated_response() + _continuation_of_truncated()])
+    # Sanity: the two halves together are a complete stream, and the first half
+    # alone is not -- otherwise this test would pass without reassembly.
+    assert tlv_stream_status(_truncated_response()) == "truncated"
+    assert tlv_stream_status(_truncated_response() + _continuation_of_truncated()) == "complete"
+
+
+def test_reassembly_stops_at_the_terminator_and_not_after() -> None:
+    """It must not swallow the frame belonging to the next call.
+
+    Over-reading by one is the mirror image of the bug being fixed and just as
+    silent: the next call would then block on a reply already consumed.
+    """
+    complete = _invoke_response_for_stfc(echo="one")
+    conn, transport = _ready_connection_with_invoke(
+        [complete, _invoke_response_for_stfc(echo="two")]
+    )
+    assert conn.call("STFC_CONNECTION", REQUTEXT="x")["ECHOTEXT"].strip() == "one"
+    assert conn.call("STFC_CONNECTION", REQUTEXT="x")["ECHOTEXT"].strip() == "two"
+
+
+def test_a_truncated_reply_with_no_continuation_retires_the_connection() -> None:
+    """Reassembly does not make the failure mode disappear, only rarer.
+
+    If the continuation never arrives the stream position is still unknown, so
+    the connection must still retire rather than return to READY with unread
+    bytes queued behind it.
+    """
     conn, _ = _ready_connection_with_invoke([_truncated_response()])
-    with pytest.raises(ValueError, match="0x0305") as excinfo:
+    with pytest.raises(CommunicationError):
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
-    assert "exceeds remaining payload" in str(excinfo.value)
+    assert conn._session.state is SessionState.BROKEN
+
+
+def test_an_empty_continuation_frame_is_refused_rather_than_looped_on() -> None:
+    """The live capture ends with 40 identical 80-byte frames carrying no TLV.
+
+    A bare GW header adds nothing to the buffer, so a reader that kept going
+    would spin to the frame cap instead of making progress. Stopping names the
+    real problem: the response is short and nothing is filling it in.
+    """
+    conn, _ = _ready_connection_with_invoke([_truncated_response(), b"\x06\xce" + b"\x00" * 78])
+    with pytest.raises(ValueError, match="no payload"):
+        conn.call("STFC_CONNECTION", REQUTEXT="hi")
     assert conn._session.state is SessionState.BROKEN
 
 
 def test_the_next_call_is_refused_rather_than_answered_with_stale_bytes() -> None:
-    """The point of the whole exercise.
+    """The point of the retirement.
 
     The second response here is a perfectly good STFC_CONNECTION reply. Before
-    the fix the second call consumed it and returned ECHOTEXT='hi' -- a plausible
-    answer, assembled from a frame that belonged to a call which had already
-    failed. The assertion is that this cannot happen: the connection refuses, and
-    the refusal names the original fault instead of the confusion downstream.
+    the retirement the second call consumed it and returned ECHOTEXT='hi' -- a
+    plausible answer assembled from a frame belonging to a call that had already
+    failed.
     """
-    conn, _ = _ready_connection_with_invoke(
-        [_truncated_response(), _invoke_response_for_stfc(echo="hi")]
-    )
-    with pytest.raises(ValueError, match="0x0305"):
+    conn, _ = _ready_connection_with_invoke([_truncated_response()])
+    with pytest.raises(CommunicationError):
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
 
     with pytest.raises(ValueError) as excinfo:
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
-    message = str(excinfo.value)
-    assert "unusable" in message
-    assert "0x0305" in message, "the refusal must carry the original cause forward"
+    assert "unusable" in str(excinfo.value)
 
 
 def test_ping_is_refused_on_a_retired_connection() -> None:
     """Including the health check, which is how a pool would find out."""
     conn, _ = _ready_connection_with_invoke([_truncated_response()])
-    with pytest.raises(ValueError, match="0x0305"):
+    with pytest.raises(CommunicationError):
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
     with pytest.raises(ValueError, match="unusable"):
         conn.ping()
@@ -91,7 +145,7 @@ def test_ping_is_refused_on_a_retired_connection() -> None:
 def test_close_still_works_when_retired() -> None:
     """Retiring must not strand the socket: cleanup has to stay available."""
     conn, _ = _ready_connection_with_invoke([_truncated_response()])
-    with pytest.raises(ValueError, match="0x0305"):
+    with pytest.raises(CommunicationError):
         conn.call("STFC_CONNECTION", REQUTEXT="hi")
     conn.close()
     assert conn._session.state is SessionState.CLOSED
@@ -181,7 +235,7 @@ async def test_async_call_retires_on_a_truncated_reply() -> None:
 
     conn, _ = _make_ready_conn([_truncated_response()])
     conn._cache.put("TST", _stfc_desc())
-    with pytest.raises(ValueError, match="0x0305"):
+    with pytest.raises(CommunicationError):
         await conn.call("STFC_CONNECTION", REQUTEXT="hi")
     assert conn._session.state is SessionState.BROKEN
 
