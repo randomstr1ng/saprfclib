@@ -194,3 +194,108 @@ def test_strings_encode_without_loss(value: str) -> None:
 def test_xstrings_encode_without_loss(value: bytes) -> None:
     encoded = _v1_enc_xstring(value)
     assert isinstance(encoded, (bytes, bytearray))
+
+
+# --------------------------------------------------------------------------- #
+# wRFC message builders
+# --------------------------------------------------------------------------- #
+
+
+def _logon(**overrides: object) -> tuple[bytes, bytes]:
+    from saprfclib.connection import _build_ws_logon_message
+
+    kwargs: dict[str, object] = {
+        "func_name": "RFCPING",
+        "user": "DEVELOPER",
+        "passwd": "s3cr3t-passw0rd",
+        "client": "001",
+        "server_host": "host.example",
+        "server_port": 443,
+        "sysnr": "00",
+    }
+    kwargs.update(overrides)
+    return _build_ws_logon_message(**kwargs)  # type: ignore[arg-type]
+
+
+def test_logon_message_builds_with_a_session_key() -> None:
+    message, key = _logon()
+    assert len(message) > 0
+    assert len(key) > 0
+
+
+def test_the_password_never_appears_in_the_frame_as_plaintext() -> None:
+    """It is scrambled on the wire, as on the classic path.
+
+    Asserted rather than assumed: a refactor that dropped the scrambling would
+    still authenticate successfully against a server, so nothing would fail — the
+    credential would simply start travelling in clear text inside the TLS tunnel,
+    and end up in any capture taken with the TLS keys.
+    """
+    secret = "s3cr3t-passw0rd"
+    message, _ = _logon(passwd=secret)
+    assert secret.encode("ascii") not in message
+    assert secret.encode("utf-16-le") not in message
+    assert secret.upper().encode("utf-16-le") not in message
+
+
+def test_the_password_still_reaches_the_frame() -> None:
+    """The complement of the test above: scrambled, not omitted.
+
+    Checking only that the plaintext is absent would pass just as well if the
+    password were dropped entirely, which would be a far worse bug.
+    """
+    a, _ = _logon(passwd="password-one")
+    b, _ = _logon(passwd="password-two")
+    assert a != b, "the password must affect the frame"
+
+
+def test_the_user_and_client_reach_the_frame() -> None:
+    a, _ = _logon(user="ALICE")
+    b, _ = _logon(user="BOB")
+    assert a != b
+    c, _ = _logon(client="001")
+    d, _ = _logon(client="100")
+    assert c != d
+
+
+def test_an_over_long_function_name_is_refused_by_the_builder() -> None:
+    """The guard has to hold at the entry point, not only in the helper."""
+    with pytest.raises(ValueError, match="characters"):
+        _logon(func_name="F" * 31)
+
+
+def test_invoke_message_builds_for_a_simple_parameter() -> None:
+    from saprfclib.codec import RFCTYPE_CHAR
+    from saprfclib.connection import _build_ws_invoke_message
+    from saprfclib.types import RFC_IMPORT, FieldDesc, FunctionDesc
+
+    desc = FunctionDesc(
+        name="Z_F",
+        parameters=[
+            FieldDesc(
+                name="IV_TEXT",
+                rfctype=RFCTYPE_CHAR,
+                nuc_length=10,
+                nuc_offset=0,
+                uc_length=20,
+                uc_offset=0,
+                decimals=0,
+                direction=RFC_IMPORT,
+            )
+        ],
+    )
+    short = _build_ws_invoke_message("Z_F", desc, {"IV_TEXT": "hi"})
+    long_ = _build_ws_invoke_message("Z_F", desc, {"IV_TEXT": "hello there"})
+    assert len(short) > 0
+
+    # The invoke path is length-prefixed, not blank-padded to the field width, so
+    # the frame size follows the value. That differs from _v1_encode_char_value,
+    # which pads — both forms appear in this module and both are pcap-sourced, so
+    # the difference is recorded rather than "corrected" on a guess.
+    assert b"C\x04\x00h\x00i\x00E" in short, "short value is length-prefixed, unpadded"
+
+    # Truncation at the declared width does happen, and is the half that matters:
+    # uc_length is 20 bytes, so an 11-character value is cut to 10 characters.
+    assert b"\x14\x00" in long_, "over-long value is cut to the declared width"
+    assert "hello ther".encode("utf-16-le") in long_
+    assert "hello there".encode("utf-16-le") not in long_

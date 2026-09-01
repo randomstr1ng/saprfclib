@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the wRFC message builders, including two security invariants asserted
+  together: the password must **not** appear in the frame as plaintext (it is scrambled,
+  as on the classic path) and must **still affect** the frame. Checking only the first
+  would pass equally well if the password were dropped entirely, which would be the
+  worse bug; checking only the second would pass if it travelled in clear.
+
 - Tests for the client session's truncated-response guards — a short NI version, GW
   connect or GW done frame must be rejected rather than read past — and for the
   fixed-width client address field. `session.py` 85% → 89%.

@@ -150,7 +150,7 @@ branch = true
 # Much of what is uncovered needs a live SAP system (SNC, WebSocket RFC, the
 # server's registration path), so this will not approach 100 from offline tests
 # alone. See docs for which paths are integration-only.
-fail_under = 75.5
+fail_under = 76
 show_missing = true
 skip_covered = true
 exclude_lines = [
