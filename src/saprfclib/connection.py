@@ -38,6 +38,7 @@ import datetime
 import logging
 import os
 import random
+import re
 import socket as _socket_module
 import struct
 import threading
@@ -56,6 +57,7 @@ from saprfclib.exceptions import (
     WebSocketError,
 )
 from saprfclib.invoke import (
+    _decode_error_text,
     _extract_name_value_pairs,
     build_bgrfc_confirm_request,
     build_bgrfc_request,
@@ -532,6 +534,52 @@ def _build_ws_logon_message(
     return b"".join(parts), call_key
 
 
+def _ws_logon_failure(logon_resp: bytes) -> AbapSystemFailure | None:
+    """The exception a wRFC LOGON reply carries, or None if it carried none.
+
+    A wRFC LOGON reply is not success-or-error: it can be both at once. The auth
+    tags (0x0450-0x0453) are filled in whether or not the function call embedded
+    in the LOGON succeeded, so a reply that authenticates and then reports
+    CALL_FUNCTION_RECEIVE_ERROR looks, to a reader that only checks for a sys_id,
+    exactly like a clean logon. That is what happened here: the library read the
+    attributes, declared the session READY, sent an invoke into it, and the work
+    process took a short dump.
+
+    Observed on A4H kernel 793 -- the 1118-byte LOGON reply carries:
+
+        0x0450 'A4H'                            auth, filled in
+        0x0418 ';W=SAPLSYSU,E=163,H=3,N=3;S=RFCPING,...'
+        0x0415 '00'   0x0416 'X'   0x0417 '341'
+        0x0403 / 0x0411 'CALL_FUNCTION_RECEIVE_ERROR'
+        0x0402 'Error when receiving data for an RFC.'
+
+    0x0418 is the ABAP call-stack breadcrumb, and ``E=163`` inside it is where the
+    number in issue #14 actually comes from. It had been hardcoded in two places
+    rather than read, which is how a correct value can still be a defect: nothing
+    was consulting the field, so a different code would have been reported as 163.
+    """
+    tags = Session._parse_tlv(logon_resp)
+    key = _decode_error_text(tags.get(0x0403)) or _decode_error_text(tags.get(0x0411))
+    text = _decode_error_text(tags.get(0x0402))
+    if not key and not text:
+        return None
+
+    breadcrumb = _decode_error_text(tags.get(0x0418))
+    match = re.search(r"\bE=(\d+)", breadcrumb) if breadcrumb else None
+    code = match.group(1) if match else None
+
+    parts = [p for p in (code, key, text) if p]
+    return AbapSystemFailure(
+        msg_class=_decode_error_text(tags.get(0x0415)) or None,
+        msg_type=_decode_error_text(tags.get(0x0416)) or None,
+        msg_number=_decode_error_text(tags.get(0x0417)) or None,
+        message=(
+            f"the wRFC LOGON authenticated but the function call embedded in it "
+            f"failed: {': '.join(parts)}"
+        ),
+    )
+
+
 def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
     """Parse wRFC server response TLV stream; return ConnectionAttributes.
 
@@ -552,11 +600,6 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
         except Exception:
             return v.decode("ascii", errors="replace").rstrip("\x00 ")
 
-    def _das(v: bytes | None) -> str:
-        if not v:
-            return ""
-        return v.decode("ascii", errors="replace").rstrip("\x00 ")
-
     sys_id = _d16(tags.get(0x0450))
     if sys_id:
         # Auth succeeded — return attrs regardless of any function-call error in 0x0402.
@@ -569,8 +612,13 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
             client="",
             user="",
             language="",
-            partner_rel=_das(tags.get(0x0012)),
-            kernel_rel=_das(tags.get(0x0013)),
+            # UTF-16LE, like every other string on this wire. These two were
+            # decoded as ASCII, which does not fail on UTF-16 input -- it returns
+            # the NULs interleaved, so kernel_rel read '7\x009\x003' instead of
+            # '793'. A wrong charset that raises is a bug you find; one that
+            # returns a plausible-looking string is one you ship.
+            partner_rel=_d16(tags.get(0x0012)),
+            kernel_rel=_d16(tags.get(0x0013)),
             codepage="4103",
             unicode_mode=True,
         )
@@ -3014,8 +3062,11 @@ class Connection:
                 # close code 1001.
                 #
                 # An earlier comment here said b"" "yields expected E=163 close".
-                # It does not: there is no close and no error. That number was
-                # never on the wire (see the note at the AbapSystemFailure below).
+                # Half right. There is no close -- the server answers -- but the
+                # reply it sends IS the error: CALL_FUNCTION_RECEIVE_ERROR, message
+                # 00/341 type X, with E=163 in the 0x0418 breadcrumb. An empty body
+                # means the embedded RFCPING receives no data, which is precisely
+                # what "error when receiving data for an RFC" describes.
                 # _ws_direct_logon_call (same LOGON path, proven path) uses b"" too.
                 _ws_pending_path = True
                 auth = self._ws_auth or {}
@@ -3030,6 +3081,15 @@ class Connection:
                 logon_resp = self._transport.recv_message()
                 # Auth: extract ConnectionAttributes from 0x0450/0x0452/0x0453.
                 attrs_ws = _ws_parse_logon_response(logon_resp)
+                # ... and then check whether the call embedded in that LOGON
+                # actually ran. The auth tags are filled in either way, so a reply
+                # that authenticated and then failed reads as a clean logon to
+                # anything that only looks for a sys_id. Sending an invoke into
+                # that session is what makes the work process take a short dump.
+                if (logon_failure := _ws_logon_failure(logon_resp)) is not None:
+                    if attrs_ws and attrs_ws.sys_id:
+                        self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
+                    raise logon_failure
                 if close_exc := self._transport.drain_queued_close():  # type: ignore[attr-defined]
                     if attrs_ws and attrs_ws.sys_id:
                         # Auth succeeded (0x0450/sys_id present) and the server then
@@ -3038,13 +3098,12 @@ class Connection:
                         # the close actually said.
                         #
                         # This used to raise a hardcoded "163: Error when receiving
-                        # data for an RFC." The server never sent that. A probe
-                        # against A4H shows the LOGON succeeding with a 1118-byte
-                        # reply in under 100 ms, so the number was ours, invented at
-                        # the point of failure and indistinguishable afterwards from
-                        # something the server had said. Anyone debugging it would
-                        # search SAP notes for an RFC error 163 that was never
-                        # involved.
+                        # data for an RFC." The value was right and the sourcing was
+                        # not: the server does send E=163, inside the 0x0418
+                        # call-stack breadcrumb, and nothing was reading it. A
+                        # hardcoded constant that happens to match is still a defect
+                        # -- it reports 163 for every failure, including the ones
+                        # that are not 163. _ws_logon_failure now parses the field.
                         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                         raise AbapSystemFailure(
                             message=(
@@ -3414,9 +3473,10 @@ class Connection:
         follows, and why is still open (issue #14).
 
         An earlier version of this docstring said LOGON+RFCPING "always ends with
-        E=163 and WebSocket close". A probe disproved both halves: the LOGON
-        succeeds, and no error code 163 is ever sent. This method transparently
-        re-runs the call over a classic TCP RFC
+        E=163 and WebSocket close". A probe corrected the second half only: there
+        is no close, the server answers -- but the answer carries the error, with
+        E=163 in its 0x0418 breadcrumb, and the auth tags filled in alongside it.
+        This method transparently re-runs the call over a classic TCP RFC
         connection derived from the LOGON response:
 
           1. Extract partner_host (0x0453) and sys_number (0x0452) from attrs_ws.
@@ -3507,10 +3567,11 @@ class Connection:
         # Extract auth (0x0450 → sys_id, etc.) — raises ValueError on auth failure.
         attrs_ws = _ws_parse_logon_response(logon_resp)
         if self._transport.drain_queued_close():  # type: ignore[attr-defined]
-            # Auth passed and the server then closed the WebSocket. The empty
-            # ngrfc LOGON body is required -- a non-empty one leaves the server
-            # silent indefinitely -- but the close that follows is not an E=163
-            # from the work process; that code was this library's own invention.
+            # Auth passed and the server then closed the WebSocket. A non-empty
+            # ngrfc LOGON body leaves the server silent indefinitely; an empty one
+            # is answered, but the answer reports CALL_FUNCTION_RECEIVE_ERROR
+            # because the embedded call receives no data. Neither body is right,
+            # and what a correct one looks like is still open (issue #14).
             # Fall back to classic TCP RFC transparently.
             return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")

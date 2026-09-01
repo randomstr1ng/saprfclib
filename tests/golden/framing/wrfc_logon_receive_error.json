@@ -1,0 +1,118 @@
+{
+  "message_type": "WRFC_LOGON_RESPONSE_WITH_EMBEDDED_FAILURE",
+  "capture_source": "live capture 2026-09-01; SAP A4H kernel 793 over WebSocket RFC at /sap/bc/rfc. Reply to a wRFC LOGON carrying an embedded RFCPING with an EMPTY ngrfc body. Sanitised: the 0x0418 breadcrumb's P= hex blob is zeroed and the user name replaced, both length-preserving, so every TLV offset stays valid.",
+  "evidence": "the same 1118-byte reply arrived on three separate connections in one probe run, in 48-1051 ms; a LOGON with ngrfc body b'\\\\x45' instead draws no reply at all for 30 s",
+  "expected_parse": {
+    "raises": "AbapSystemFailure",
+    "msg_class": "00",
+    "msg_type": "X",
+    "msg_number": "341",
+    "exception_key": "CALL_FUNCTION_RECEIVE_ERROR",
+    "error_text": "Error when receiving data for an RFC.",
+    "e_code_from_0x0418": "163"
+  },
+  "notes": [
+    "This reply is BOTH an authentication success and a function-call failure. 0x0450-0x0453 carry the system identity and are filled in regardless of whether the call embedded in the LOGON ran. A reader that checks only for a sys_id sees a clean logon, which is exactly what the library did: it declared the session ready, sent an invoke into it, and the work process took a short dump -- returned as a WebSocket close with reason 'RABAX_STATE:Error when receiving data for an RFC.'",
+    "0x0418 is the ABAP call-stack breadcrumb: ';W=SAPLSYSU,E=163,H=3,N=3;S=RFCPING,P=SAPLSYSU;S=WEBRFCCALL,P=SAPWEBRFC;...'. The E=163 in it is where the number in issue #14 comes from. It was hardcoded in two places and used as a fallback in a third rather than read from here -- a constant that happens to be right is still wrong, because it reports 163 for failures that are not 163.",
+    "The failure itself is honest: an empty ngrfc body means the embedded RFCPING receives no data, and 'Error when receiving data for an RFC' describes that exactly. What a correct LOGON-embedded body looks like is still open -- b'\\\\x45', which makes the 0x5001 record byte-identical to a working INVOKE, leaves the server silent indefinitely.",
+    "0x0416 is 'X' (message type X = short dump / abort) and 0x0417 is '341', the same message number as signon_incomplete_752_response.bin, which is also class 00 type X."
+  ],
+  "field_annotations": [
+    {
+      "offset": 70,
+      "length": 12,
+      "name": "sys_id",
+      "value": "0450 0006",
+      "type": "variable",
+      "note": "tag 0x0450 len=6, 'A4H'"
+    },
+    {
+      "offset": 108,
+      "length": 10,
+      "name": "sys_number",
+      "value": "0452 0004",
+      "type": "variable",
+      "note": "tag 0x0452 len=4, '00'"
+    },
+    {
+      "offset": 118,
+      "length": 26,
+      "name": "partner_host",
+      "value": "0453 0014",
+      "type": "variable",
+      "note": "tag 0x0453 len=20, 'vhcala4hci'"
+    },
+    {
+      "offset": 378,
+      "length": 6,
+      "name": "call_end_marker",
+      "value": "0500 0000",
+      "type": "variable",
+      "note": "tag 0x0500 len=0"
+    },
+    {
+      "offset": 384,
+      "length": 498,
+      "name": "abap_call_stack",
+      "value": "0418 01ec",
+      "type": "variable",
+      "note": "tag 0x0418 len=492, ';W=SAPLSYSU,E=163,H=3,N=3;S=RFCPING,P=SAPLSYSU;S=WEBRFCCALL,P=SAPWEBRFC;D=%_WEBRFC_START,P'"
+    },
+    {
+      "offset": 882,
+      "length": 10,
+      "name": "msg_class",
+      "value": "0415 0004",
+      "type": "variable",
+      "note": "tag 0x0415 len=4, '00'"
+    },
+    {
+      "offset": 892,
+      "length": 8,
+      "name": "msg_type",
+      "value": "0416 0002",
+      "type": "variable",
+      "note": "tag 0x0416 len=2, 'X'"
+    },
+    {
+      "offset": 900,
+      "length": 12,
+      "name": "msg_number",
+      "value": "0417 0006",
+      "type": "variable",
+      "note": "tag 0x0417 len=6, '341'"
+    },
+    {
+      "offset": 912,
+      "length": 60,
+      "name": "msg_v1",
+      "value": "0411 0036",
+      "type": "variable",
+      "note": "tag 0x0411 len=54, 'CALL_FUNCTION_RECEIVE_ERROR'"
+    },
+    {
+      "offset": 972,
+      "length": 60,
+      "name": "exception_key",
+      "value": "0403 0036",
+      "type": "variable",
+      "note": "tag 0x0403 len=54, 'CALL_FUNCTION_RECEIVE_ERROR'"
+    },
+    {
+      "offset": 1032,
+      "length": 80,
+      "name": "error_text",
+      "value": "0402 004a",
+      "type": "variable",
+      "note": "tag 0x0402 len=74, 'Error when receiving data for an RFC.'"
+    },
+    {
+      "offset": 1112,
+      "length": 4,
+      "name": "terminator",
+      "value": "ffff0000",
+      "type": "fixed",
+      "note": "end of stream"
+    }
+  ]
+}

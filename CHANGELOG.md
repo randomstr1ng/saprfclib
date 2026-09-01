@@ -461,20 +461,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The wRFC "E=163" error was fabricated by this library, and is gone. Three code paths
-  produced it and none read it from the wire: two raised the hardcoded string
-  `"163: Error when receiving data for an RFC."`, and the third used `163` as a
-  *fallback for when the server reported no return code at all* — inventing a specific
-  failure number to describe a reply that carried none. A probe against A4H kernel 793
-  shows the wRFC LOGON succeeding with a 1118-byte reply in under 100 ms, so the
-  premise of issue #14 ("`RFC_GET_FUNCTION_INTERFACE` returns exception 163") was our
-  own message read back. Each site now reports what actually happened — the WebSocket
-  close code and reason, or that no rows, no return code and no message came back.
-  Seven comments asserting the disproven story are corrected, an integration test that
-  required `"163"` in the message no longer pins the fiction, and
-  `_ws_e163_classic_fallback` is renamed. The gap itself is real and still open; the
-  number never was.
+- `partner_rel` and `kernel_rel` were mojibake on the wRFC path. Every other string tag
+  in a wRFC logon reply is decoded UTF-16LE; those two used ASCII, which does not fail
+  on UTF-16 input — it returns the NULs interleaved, so `kernel_rel` read
+  `'7\x009\x003'` instead of `'793'`. A wrong charset that raises is a bug you find;
+  one that returns a plausible-looking string is one you ship. Found by an assertion in
+  a test written for something else.
 
+- The wRFC LOGON reply was being read as a success when it carries the failure. Its auth
+  tags (`0x0450`–`0x0453`) are filled in whether or not the function call embedded in the
+  LOGON ran, so a reply that authenticates and then reports
+  `CALL_FUNCTION_RECEIVE_ERROR` looked, to a reader checking only for a sys_id, exactly
+  like a clean logon. The library declared the session ready, sent an invoke into it, and
+  the work process took a short dump — surfacing as a WebSocket close with
+  `RABAX_STATE:Error when receiving data for an RFC.` `_ws_logon_failure` now inspects the
+  reply and raises the real exception, with the message class, type and number the server
+  sent (`00`/`X`/`341`).
+- The `163` in issue #14 is now read from the wire instead of hardcoded. It comes from the
+  `0x0418` ABAP call-stack breadcrumb — `;W=SAPLSYSU,E=163,H=3,N=3;S=RFCPING,...` — which
+  nothing was parsing. Two sites raised the constant `"163: Error when receiving data for
+  an RFC."` instead, and a third used `163` as the fallback for when the server reported
+  no return code at all. A hardcoded value that happens to be correct is still a defect:
+  it reports 163 for every failure, including the ones that are not 163. Fixture
+  `wrfc_logon_receive_error.bin`.
 - Disabling wRFC TLS verification now writes a log record as well as raising a warning.
   The two channels fail differently: a warning is shown once per call site and vanishes
   under `python -W ignore` or a broad `filterwarnings()`, both of which a long-running
