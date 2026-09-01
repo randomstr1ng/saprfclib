@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the metadata bootstrap — `_call_bootstrap` and `_call_struct_bootstrap`,
+  which run before any first call to a function module and were the largest untested
+  block in the tree. The reason was structural rather than accidental: nearly every
+  other test pre-populates the descriptor cache so `call()` skips the bootstrap, which
+  left the path that runs in production against every unseen function module with no
+  cover at all. Driven from the captured GFI replies rather than a stub, so the column
+  layout, the EXID mapping and the compressed-table path are exercised as they arrive.
+  Pins the two halves of the degradation contract: a DDIC layout that cannot be fetched
+  warns and names both the type and the parameter, and the parameter it belongs to then
+  refuses to encode rather than putting a well-formed meaningless record on the wire.
+  `connection.py` 63% → 66%.
+
 - `PoolMetrics`, on both `ConnectionPool` and `AsyncConnectionPool` as `.metrics`,
   plus `pool.stats()` folding in the live gauges (`in_use`, `idle`, `size`,
   `max_size`). Closes the half of #22 that connection-level metrics could not: was

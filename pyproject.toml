@@ -153,7 +153,7 @@ branch = true
 # 100 and the measured figure should be read with that in mind rather than as a
 # quality score. The number that matters is the trend and the floor, not the
 # absolute.
-fail_under = 76.5
+fail_under = 77.5
 show_missing = true
 skip_covered = true
 exclude_lines = [
