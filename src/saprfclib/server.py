@@ -350,23 +350,67 @@ def _extract_trfc_params_from_5001(raw_5001: bytes) -> tuple[str, str]:
     return tid, arfcfnam
 
 
-def _gwserv_port(gwserv: str) -> int:
-    """Resolve SAP gateway service name to TCP port.
+# Gateway ports, per SAP's "TCP/IP Ports of All SAP Products":
+#   Gateway          sapgw<NN>    3300   range 3300-3399   33<NN>
+#   Gateway secured  sapgw<NN>s   4800   range 4800-4899   48<NN>
+# <NN> is the application server's instance number, so it is 00-99.
+_GW_PORT_BASE = 3300
+_GW_SNC_PORT_BASE = 4800
+_MAX_INSTANCE = 99
 
-    sapgwNN → 3300+NN; numeric string → int; else socket lookup.
+
+def _instance_from_service(name: str, prefix: str) -> int:
+    """Parse the instance number out of a ``sapgw00``-style service name.
+
+    Raises rather than falling back. A gateway service name whose instance cannot
+    be read is a configuration mistake, and answering it with a plausible default
+    connects the server to the wrong gateway — which does not fail visibly, it
+    registers somewhere nobody is looking for it.
+    """
+    suffix = name.strip()[len(prefix) :]
+    if not suffix.isdigit():
+        raise ValueError(
+            f"cannot read an instance number from service name {name!r}: "
+            f"expected {prefix}NN with NN a two-digit instance, e.g. {prefix}00"
+        )
+    instance = int(suffix)
+    if not 0 <= instance <= _MAX_INSTANCE:
+        raise ValueError(
+            f"instance {instance} in service name {name!r} is outside 0-{_MAX_INSTANCE}; "
+            f"the documented gateway range is {_GW_PORT_BASE}-{_GW_PORT_BASE + 99}"
+        )
+    return instance
+
+
+def _gwserv_port(gwserv: str) -> int:
+    """Resolve a SAP gateway service name to a TCP port.
+
+    ``sapgwNN`` becomes 3300+NN; a numeric string is taken as the port; anything
+    else is looked up in /etc/services.
+
+    Every unreadable form raises. This used to answer ``sapgwfoo``, a bare
+    ``sapgw`` and anything else it could not parse with 3300, and to compute
+    ``sapgw999`` as 4299 and ``sapgw-5`` as 3295 — ports that are not gateways at
+    all. A server that registers against the wrong gateway does not report an
+    error; it simply never receives the calls it is waiting for.
     """
     s = gwserv.strip().lower()
     if s.startswith("sapgw"):
-        try:
-            return 3300 + int(s[5:])
-        except ValueError:
-            return 3300
-    try:
-        return int(s)
-    except ValueError:
-        import socket as _sock
+        return _GW_PORT_BASE + _instance_from_service(s, "sapgw")
+    if s.isdigit():
+        port = int(s)
+        if not 0 < port <= 65535:
+            raise ValueError(f"gateway port {port} is outside 1-65535")
+        return port
+    import socket as _sock
 
+    try:
         return _sock.getservbyname(s, "tcp")
+    except OSError:
+        raise ValueError(
+            f"gateway service {gwserv!r} is neither a sapgwNN name, a port number, "
+            f"nor an entry in /etc/services"
+        ) from None
 
 
 def _dispatcher_svc_8(gwserv: str) -> bytes:
@@ -379,15 +423,30 @@ def _dispatcher_svc_8(gwserv: str) -> bytes:
     """
     s = gwserv.strip().lower()
     if s.startswith("sapgw"):
-        suffix = gwserv.strip()[5:]  # "00" from "sapgw00"
+        instance = _instance_from_service(s, "sapgw")
+    elif s.isdigit():
+        port = int(s)
+        # Both documented gateway ranges map to an instance: 33<NN> plain and
+        # 48<NN> SNC-secured. Taking port-3300 unconditionally turned the SNC
+        # gateway 4800 into instance 1500 and produced "sapdp150" — a truncated
+        # name for a dispatcher that does not exist.
+        if _GW_PORT_BASE <= port <= _GW_PORT_BASE + _MAX_INSTANCE:
+            instance = port - _GW_PORT_BASE
+        elif _GW_SNC_PORT_BASE <= port <= _GW_SNC_PORT_BASE + _MAX_INSTANCE:
+            instance = port - _GW_SNC_PORT_BASE
+        else:
+            raise ValueError(
+                f"gateway port {port} is in neither documented range "
+                f"({_GW_PORT_BASE}-{_GW_PORT_BASE + 99} plain, "
+                f"{_GW_SNC_PORT_BASE}-{_GW_SNC_PORT_BASE + 99} SNC), so the dispatcher "
+                f"service name cannot be derived. Pass gwserv as a sapgwNN name."
+            )
     else:
-        try:
-            port = int(s)
-            sysnr = port - 3300  # 3300 = sapgw00, 3301 = sapgw01, ...
-            suffix = f"{sysnr:02d}"
-        except ValueError:
-            suffix = "00"
-    return f"sapdp{suffix}".ljust(8).encode("ascii")[:8]
+        raise ValueError(
+            f"cannot derive a dispatcher service name from gwserv {gwserv!r}: "
+            f"expected sapgwNN or a gateway port number"
+        )
+    return f"sapdp{instance:02d}".ljust(8).encode("ascii")[:8]
 
 
 class RfcServer:

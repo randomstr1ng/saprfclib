@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests for the server paths that had none: gateway service/port resolution, the
+  dispatcher-name derivation, bounds safety in the inbound `0x5001` scanner, and the
+  TID validation guards on inbound transactional frames. `server.py` coverage rose from
+  55% to 62%; the coverage floor is raised to match.
+
 - **Coverage is measured and gated.** CI now runs with `--cov` and a floor in
   `pyproject.toml`, so coverage cannot quietly fall — deleting tests or adding a large
   untested branch fails the build instead of passing silently. There was previously no
@@ -48,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
 ### Fixed
+
+- **The gateway service name could resolve to the wrong port, silently.** `_gwserv_port`
+  answered `sapgwfoo`, a bare `sapgw`, and anything else it could not parse with **3300**,
+  computed `sapgw999` as **4299** and `sapgw-5` as **3295** — ports that are not gateways
+  at all. A server that registers against the wrong gateway reports no error; it simply
+  never receives the calls it is waiting for, which looks like the caller's problem. Each
+  unreadable form now raises, and the instance is range-checked against the documented
+  `sapgw<NN>` = `33<NN>`, 3300–3399.
+- `_dispatcher_svc_8` mishandled the SNC gateway. It computed the instance as
+  `port - 3300` unconditionally, so the documented SNC gateway port 4800 became instance
+  1500 and produced `sapdp150` — a truncated name for a dispatcher that does not exist.
+  Both documented ranges (`33<NN>` and `48<NN>`) now map correctly, and a port in neither
+  raises instead of guessing.
 
 - Corrected the recorded meaning of TLV tag `0x0667`. `docs/protocol/framing.md` gave it
   as "server call duration, float64 LE, microseconds" at **capture** tier, but a capture
