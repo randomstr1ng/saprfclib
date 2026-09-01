@@ -104,3 +104,81 @@ def test_reassembly_through_the_connection_read_path() -> None:
     joined = _join_response_frames(lambda: next(frames), "RFC_READ_TABLE")
     assert len(joined) == 53513
     assert tlv_stream_status(joined) == "complete"
+
+
+# --------------------------------------------------------------------------- #
+# The 22-frame capture: what the header markers actually track
+# --------------------------------------------------------------------------- #
+
+MIDDLE = GOLDEN / "multiframe_middle_frame.bin"
+FINAL = GOLDEN / "multiframe_final_frame.bin"
+
+
+def test_the_markers_do_track_continuation_within_a_response() -> None:
+    """Settled by a 22-frame reply, which two frames could not have settled.
+
+    With two frames, "this frame continues the response" and "this frame does
+    not end the stream" are the same statement, so the two-frame capture could
+    not tell a real marker from a coincidence. A 591337-byte reply on A4H kernel
+    793 arrived as 22 frames: all twenty-one continuing frames read -1/0 and the
+    last read 500/1. Twenty-one agreeing observations is not a coincidence.
+    """
+    for raw, cont in ((MIDDLE.read_bytes(), True), (FINAL.read_bytes(), False)):
+        assert struct.unpack_from(">i", raw, 17)[0] == (-1 if cont else 500)
+        assert struct.unpack_from(">I", raw, 60)[0] == (0 if cont else 1)
+        assert struct.unpack_from(">I", raw, 56)[0] == len(raw) - 80
+
+
+def test_the_gateway_chunks_at_28000_payload_bytes() -> None:
+    """Which is why a DD03L read tipped over into several frames near 2000 rows."""
+    assert len(MIDDLE.read_bytes()) - 80 == 28000
+
+
+def test_the_markers_are_still_not_the_loop_condition() -> None:
+    """Confirmed does not mean usable for this.
+
+    Both fields read the continuing value on two complete terminal replies. A
+    reader keyed on them would wait forever on a refused logon, so the terminator
+    stays in charge. This is the assertion that stops a future reader from
+    "simplifying" the loop onto the marker now that it is confirmed.
+    """
+    for name in ("signon_incomplete_752_response.bin", "cpic_logon_error_response.bin"):
+        raw = (GOLDEN / name).read_bytes()
+        assert struct.unpack_from(">i", raw, 17)[0] == -1
+        assert struct.unpack_from(">I", raw, 60)[0] == 0
+    # signon_incomplete is nonetheless a complete stream that parses on its own.
+    assert tlv_stream_status((GOLDEN / "signon_incomplete_752_response.bin").read_bytes()[80:]) == (
+        "complete"
+    )
+
+
+def test_a_frame_claiming_to_be_final_on_a_short_stream_is_refused() -> None:
+    """The direction the marker IS good for.
+
+    Reading on here would consume whatever arrives next -- which is the reply to
+    the following call. Failing now names the inconsistency instead of turning it
+    into a swapped result later.
+    """
+    from saprfclib.connection import _join_response_frames
+
+    truncated_but_final = bytearray(PART1.read_bytes())
+    struct.pack_into(">I", truncated_but_final, 60, 1)  # claim to be the last
+
+    frames = iter([bytes(truncated_but_final), PART2.read_bytes()])
+    with pytest.raises(ValueError, match="reports itself as the last"):
+        _join_response_frames(lambda: next(frames), "RFC_READ_TABLE")
+
+
+def test_a_frame_with_no_gw_header_gets_no_opinion() -> None:
+    """Raw-TLV transports and offline doubles have no header to ask.
+
+    None must not collapse into either answer: read as "final" it would refuse
+    every mock reassembly, read as "not final" it would assert something the
+    frame never said.
+    """
+    from saprfclib.connection import _frame_reports_itself_final
+
+    assert _frame_reports_itself_final(b"\x05\x00\x00\x00") is None
+    assert _frame_reports_itself_final(b"") is None
+    assert _frame_reports_itself_final(MIDDLE.read_bytes()) is False
+    assert _frame_reports_itself_final(FINAL.read_bytes()) is True

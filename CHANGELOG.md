@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The multi-frame continuation markers are settled by a 22-frame capture. Bytes 17–20
+  (BE int32) read `-1` on a continuing frame and `500` on the last; bytes 60–63 (BE
+  uint32) read `0` and `1`. All twenty-one continuing frames of a 591337-byte reply
+  agreed. A two-frame capture could not have shown this — with two frames "continues
+  the response" and "does not end the stream" are the same statement.
+  They remain **not** the reassembly condition, which has not changed: both read the
+  continuing value on two complete terminal replies (a refused logon, an incomplete
+  signon), so a loop keyed on them would wait forever on a failed logon. The `0xFFFF`
+  terminator still drives reassembly. The marker is now used in the one direction it is
+  safe in — a frame that reports itself final while the stream is still short is
+  refused, because reading on would consume the next call's reply.
+- Recorded that the gateway chunks at exactly 28000 payload bytes per frame, which is
+  why a `DD03L` read crosses into several frames at around 2000 rows.
+
 - A connection whose negotiated codepage is not the `4103` Unicode wire mode is now
   refused at handshake, naming the codepage it got and the one it needs. Non-Unicode
   systems are out of scope — SAP ended support for them with NetWeaver 7.5 — but that

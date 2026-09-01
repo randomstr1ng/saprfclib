@@ -1576,17 +1576,28 @@ def extract_server_duration(tlv: bytes) -> float | None:
 # bodies gives 53513 bytes that walk cleanly to the 0xFFFF terminator with 2
 # bytes trailing.
 #
-# [ASSUMED] the termination rule. Two header fields looked like "more follows"
-# markers and both are wrong. Bytes 17-20 (BE int32) read -1 on the continuing
-# frame and 500 on complete ones, and bytes 60-63 read 0 and 1 -- but the two are
-# the same signal (identical on all 13 frames compared), and both also fire on
-# signon_incomplete_752_response.bin and cpic_logon_error_response.bin, which are
-# complete terminal replies with nothing following them. A loop driven by either
-# would hang on a failed logon waiting for a frame that never comes. So the
-# stream's own 0xFFFF terminator drives reassembly instead, which is confirmed
-# structure rather than an inferred flag. What would settle the header field is a
-# capture of a three-frame response: the middle frame's markers would show
-# whether they mean "more follows" or something else that merely coincides here.
+# The termination rule. Two header fields do track continuation, and neither can
+# drive the loop.
+#
+# Bytes 17-20 (BE int32) read -1 on a frame that continues and 500 on the one
+# that ends the response; bytes 60-63 (BE uint32) read 0 and 1. That is now
+# confirmed rather than inferred: a 591337-byte reply on A4H kernel 793 arrived
+# as 22 frames, and all twenty-one continuing frames read -1/0 while the last
+# read 500/1. The gateway chunks at exactly 28000 payload bytes per frame, which
+# is why a DD03L read tipped over into multiple frames at around 2000 rows.
+#
+# They still cannot be the loop condition, because the same values appear on
+# signon_incomplete_752_response.bin and cpic_logon_error_response.bin -- both
+# complete terminal replies with nothing following them. Whatever the field
+# means, it is broader than "another frame follows"; a reader keyed on it would
+# wait forever on a refused logon. So the stream's own 0xFFFF terminator drives
+# reassembly, which is confirmed structure and answers exactly the question being
+# asked.
+#
+# The confirmed direction is the useful one: a frame that reports itself final
+# while the stream is still short is a real inconsistency, and reading on would
+# consume the next call's reply. connection._frame_reports_itself_final uses it
+# as that check and nothing else.
 #
 # Bytes 56-59 (BE uint32) are this frame's own payload length, exact on all 16
 # frames checked -- 9 independently captured golden fixtures plus the 7 probe

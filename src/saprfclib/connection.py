@@ -2128,6 +2128,30 @@ class ConnectionMetrics:
 _MAX_RESPONSE_FRAMES = 256
 
 
+def _frame_reports_itself_final(raw: bytes) -> bool | None:
+    """Does this frame's GW header say it completes the response?
+
+    Bytes 60-63, BE uint32: 1 on the frame that ends a response, 0 on one that
+    continues. Confirmed across a 22-frame reply on A4H kernel 793 -- twenty-one
+    continuing frames all read 0, the last read 1 -- and again on a separate
+    two-frame capture.
+
+    Returns None when the frame carries no GW header to ask, which is the case
+    for raw-TLV transports and offline doubles. A caller must treat None as "no
+    opinion" rather than as either answer.
+
+    This is deliberately NOT what drives reassembly. The same field reads 0 on
+    signon_incomplete_752_response.bin and cpic_logon_error_response.bin, which
+    are complete terminal replies with nothing following, so a loop keyed on it
+    would wait forever on a refused logon. It is useful in the other direction:
+    a frame that claims to be final while the stream is still short is a genuine
+    inconsistency, and reading on would consume the next call's reply.
+    """
+    if len(raw) >= 64 and raw[:1] == b"\x06":
+        return bool(struct.unpack_from(">I", raw, 60)[0] == 1)
+    return None
+
+
 def _join_response_frames(read_frame: Callable[[], bytes], func_name: str) -> bytes:
     """Read frames until the TLV stream terminates, and return the joined body.
 
@@ -2144,15 +2168,25 @@ def _join_response_frames(read_frame: Callable[[], bytes], func_name: str) -> by
     is handed straight to the parser, which reports it properly instead of
     blocking on a continuation that does not exist.
     """
-    tlv = _strip_gw_header(read_frame())
+    raw = read_frame()
+    tlv = _strip_gw_header(raw)
     frames = 1
     while tlv_stream_status(tlv) == "truncated":
+        if _frame_reports_itself_final(raw) is True:
+            # The server says this frame ends the response and the stream says
+            # it does not. Reading on would consume the next call's reply, so
+            # the mismatch is reported here instead of becoming a swap later.
+            raise ValueError(
+                f"{func_name}: frame {frames} reports itself as the last of the "
+                f"response, but the TLV stream is still short at {len(tlv)} bytes"
+            )
         if frames >= _MAX_RESPONSE_FRAMES:
             raise ValueError(
                 f"{func_name}: response still incomplete after {frames} frames "
                 f"({len(tlv)} bytes); refusing to read further"
             )
-        part = _strip_gw_header(read_frame())
+        raw = read_frame()
+        part = _strip_gw_header(raw)
         if not part:
             # An 80-byte frame is a bare GW header with no TLV payload. It adds
             # nothing, so continuing would spin to the cap rather than make
@@ -2170,15 +2204,22 @@ async def _join_response_frames_async(
     read_frame: Callable[[], Awaitable[bytes]], func_name: str
 ) -> bytes:
     """Async twin of :func:`_join_response_frames`; same rule, same reasoning."""
-    tlv = _strip_gw_header(await read_frame())
+    raw = await read_frame()
+    tlv = _strip_gw_header(raw)
     frames = 1
     while tlv_stream_status(tlv) == "truncated":
+        if _frame_reports_itself_final(raw) is True:
+            raise ValueError(
+                f"{func_name}: frame {frames} reports itself as the last of the "
+                f"response, but the TLV stream is still short at {len(tlv)} bytes"
+            )
         if frames >= _MAX_RESPONSE_FRAMES:
             raise ValueError(
                 f"{func_name}: response still incomplete after {frames} frames "
                 f"({len(tlv)} bytes); refusing to read further"
             )
-        part = _strip_gw_header(await read_frame())
+        raw = await read_frame()
+        part = _strip_gw_header(raw)
         if not part:
             raise ValueError(
                 f"{func_name}: response truncated after {frames} frame(s) and the "

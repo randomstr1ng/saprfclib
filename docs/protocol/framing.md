@@ -977,32 +977,46 @@ next call to misread.
 
 #### What drives reassembly, and what must not
 
-Two header fields look like "more follows" markers and **both are wrong**:
+Two header fields **do** track continuation, and neither can drive the loop.
 
-| field | part 1 (continues) | part 2 (last) |
-|-------|--------------------|---------------|
+| field | continuing frame | last frame |
+|-------|------------------|------------|
 | bytes 17–20, BE int32 | `-1` | `500` |
 | bytes 60–63, BE uint32 | `0` | `1` |
 
-They are the same signal — identical across all thirteen frames compared — and
-both **also fire on `signon_incomplete_752_response.bin` and
-`cpic_logon_error_response.bin`**, which are complete terminal replies with
-nothing following them. A loop driven by either would hang on a failed logon,
-waiting for a frame the server is never going to send. This is the trap the
-capture set: the marker looks perfect on the one response that motivated it.
+Confirmed by a 591337-byte reply on A4H kernel 793 that arrived as **22 frames**:
+all twenty-one continuing frames read `-1`/`0`, the last read `500`/`1`. A
+two-frame capture could not have established this — with two frames, "continues
+the response" and "does not end the stream" are the same statement, so a real
+marker and a coincidence look identical. Twenty-one agreeing observations are not
+a coincidence.
 
-Reassembly is therefore driven by the **stream's own `0xFFFF` terminator**, which
-is confirmed structure rather than an inferred flag. `invoke.tlv_stream_status`
-classifies a buffer three ways, and only the middle one reads another frame:
+**They are still not the reassembly condition.** Both read the *continuing* value
+on `signon_incomplete_752_response.bin` and `cpic_logon_error_response.bin` —
+complete terminal replies with nothing following them. Whatever the field means,
+it is broader than "another frame follows", and a loop keyed on it would wait
+forever on a refused logon.
+
+So reassembly is driven by the stream's own `0xFFFF` terminator, which is
+confirmed structure and answers exactly the question being asked.
+`invoke.tlv_stream_status` classifies a buffer three ways, and only the middle one
+reads another frame:
 
 - **complete** — the walk reached the terminator.
 - **truncated** — at least one record parsed, then a record ran past the end.
 - **not_tlv** — nothing parsed. A CPIC-layer refusal lands here: its body is
   EBCDIC, so record zero claims 50629 bytes inside a 97-byte frame.
 
-**`[ASSUMED]`: the meaning of bytes 17–20 and 60–63.** What would settle them is
-a capture of a *three*-frame response — the middle frame's values would show
-whether they track continuation or something that merely coincides with it here.
+The marker is used in the one direction it is safe in. A frame that reports itself
+final while the stream is still short is a genuine inconsistency, and reading on
+would consume the next call's reply — so `_frame_reports_itself_final` refuses
+there and nowhere else.
+
+#### The gateway chunks at 28000 payload bytes
+
+Every continuing frame in the 22-frame reply carried exactly 28000 bytes of
+payload (28080 with the header). That is why a `DD03L` read crosses into several
+frames at around 2000 rows, and why 20000 rows needed 22 of them.
 
 #### Confirmed: bytes 56–59 are the frame's own payload length
 
