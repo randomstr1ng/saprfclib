@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import socket
 import ssl
 import threading
@@ -132,6 +133,9 @@ def _open_proxy_tunnel(
 
 
 # --------------------------------------------------------------------------- #
+_logger = logging.getLogger(__name__)
+
+
 # D-16 step 3: verifying TLS context                                           #
 # --------------------------------------------------------------------------- #
 def _make_ssl_context(
@@ -158,12 +162,19 @@ def _make_ssl_context(
     if client_cert:
         ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
     if not verify:
-        warnings.warn(
+        _message = (
             "saprfclib wRFC: TLS certificate verification is DISABLED (verify=False). "
             "The server identity is NOT authenticated; this is insecure and must "
-            "only be used for local testing.",
-            stacklevel=2,
+            "only be used for local testing."
         )
+        warnings.warn(_message, stacklevel=2)
+        # Logged as well as warned, because the two channels fail differently. A
+        # warning is shown once per call site and disappears entirely under
+        # `python -W ignore` or a broad filterwarnings() -- both of which a
+        # long-running service is likely to have set for unrelated reasons. The
+        # log record survives that, so the one process where this matters most
+        # still leaves a trace that its RFC traffic was unauthenticated.
+        _logger.warning("%s", _message)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         # Lower OpenSSL security level so on-premise servers with weak RSA keys

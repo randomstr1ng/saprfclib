@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Disabling wRFC TLS verification now writes a log record as well as raising a warning.
+  The two channels fail differently: a warning is shown once per call site and vanishes
+  under `python -W ignore` or a broad `filterwarnings()`, both of which a long-running
+  service is likely to have set for unrelated reasons. The log record survives that, so
+  the process where it matters most still leaves a trace that its RFC traffic was
+  unauthenticated. The defaults themselves were already correct — `connect`,
+  `connect_ws` and `_make_ssl_context` all verify unless told otherwise — and are now
+  asserted rather than assumed, along with the resulting context actually being
+  `CERT_REQUIRED` with hostname checking and a TLS 1.2 floor.
+
 - Message variables V2–V4 are confirmed at `0x0412`–`0x0414`, following V1 at `0x0411`.
   Previously inferred from `0x0411` alone, because no capture carried more than one
   variable. A purpose-built RFM raising `MESSAGE e398(00)` with four **distinct** values
