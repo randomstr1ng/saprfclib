@@ -7,134 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- The wRFC "E=163" error was fabricated by this library, and is gone. Three code paths
-  produced it and none read it from the wire: two raised the hardcoded string
-  `"163: Error when receiving data for an RFC."`, and the third used `163` as a
-  *fallback for when the server reported no return code at all* — inventing a specific
-  failure number to describe a reply that carried none. A probe against A4H kernel 793
-  shows the wRFC LOGON succeeding with a 1118-byte reply in under 100 ms, so the
-  premise of issue #14 ("`RFC_GET_FUNCTION_INTERFACE` returns exception 163") was our
-  own message read back. Each site now reports what actually happened — the WebSocket
-  close code and reason, or that no rows, no return code and no message came back.
-  Seven comments asserting the disproven story are corrected, an integration test that
-  required `"163"` in the message no longer pins the fiction, and
-  `_ws_e163_classic_fallback` is renamed. The gap itself is real and still open; the
-  number never was.
-
-- Disabling wRFC TLS verification now writes a log record as well as raising a warning.
-  The two channels fail differently: a warning is shown once per call site and vanishes
-  under `python -W ignore` or a broad `filterwarnings()`, both of which a long-running
-  service is likely to have set for unrelated reasons. The log record survives that, so
-  the process where it matters most still leaves a trace that its RFC traffic was
-  unauthenticated. The defaults themselves were already correct — `connect`,
-  `connect_ws` and `_make_ssl_context` all verify unless told otherwise — and are now
-  asserted rather than assumed, along with the resulting context actually being
-  `CERT_REQUIRED` with hostname checking and a TLS 1.2 floor.
-
-- Message variables V2–V4 are confirmed at `0x0412`–`0x0414`, following V1 at `0x0411`.
-  Previously inferred from `0x0411` alone, because no capture carried more than one
-  variable. A purpose-built RFM raising `MESSAGE e398(00)` with four **distinct** values
-  put each in its own tag — four copies of one string would have parsed identically with
-  the tags in any order.
-- The free-text tag `0x040B` is removed. It had never appeared in any capture and was
-  nonetheless tried *first* when resolving an exception's message, ahead of `0x0402`
-  which is captured and confirmed on kernel 752. The same probe aimed at it directly: a
-  reply carrying a genuine four-variable message is exactly what would populate a
-  free-text tag, and it is absent. One untested guess outranking one confirmed fact is
-  the wrong way round.
-- `AbapApplicationError`'s diagnostic string now carries the message class, number and
-  variables when the server sends no assembled text. Kernel 793 sends none for a classic
-  exception — `0x0402` is absent too, and the sentence is the client's to build from
-  `T100`, which this library does not do. The error reported a bare `FOUR_VARIABLES`
-  while holding `ALPHA1`, `BRAVO2`, `CHARLIE3` and `DELTA4` unread on the object. On this
-  kernel that was the common case, not an edge case. A server-supplied message still
-  wins, so the 752 shape is unchanged.
-
-- The multi-frame continuation markers are settled by a 22-frame capture. Bytes 17–20
-  (BE int32) read `-1` on a continuing frame and `500` on the last; bytes 60–63 (BE
-  uint32) read `0` and `1`. All twenty-one continuing frames of a 591337-byte reply
-  agreed. A two-frame capture could not have shown this — with two frames "continues
-  the response" and "does not end the stream" are the same statement.
-  They remain **not** the reassembly condition, which has not changed: both read the
-  continuing value on two complete terminal replies (a refused logon, an incomplete
-  signon), so a loop keyed on them would wait forever on a failed logon. The `0xFFFF`
-  terminator still drives reassembly. The marker is now used in the one direction it is
-  safe in — a frame that reports itself final while the stream is still short is
-  refused, because reading on would consume the next call's reply.
-- Recorded that the gateway chunks at exactly 28000 payload bytes per frame, which is
-  why a `DD03L` read crosses into several frames at around 2000 rows.
-
-- A connection whose negotiated codepage is not the `4103` Unicode wire mode is now
-  refused at handshake, naming the codepage it got and the one it needs. Non-Unicode
-  systems are out of scope — SAP ended support for them with NetWeaver 7.5 — but that
-  alone would not justify a hard refusal. The reason it does is that `unicode_mode` is
-  *derived* as "the wire is UTF-16LE" and *spent* by the codec as a byte-order
-  selector: `_uc_encoding` returns `utf-16-be` whenever it is false. On a genuinely
-  non-Unicode connection that does not fail — it decodes single-byte text as UTF-16BE
-  and returns mojibake in every character field, on a connection that looks healthy
-  throughout. The refusal is scoped to live connections, so offline descriptors built
-  without a negotiated codepage keep working.
-
-- Two stale claims removed. `router.py` said the binary message-server protocol was
-  unconfirmed and that the server "accepts the connection and then answers nothing" —
-  written before the operation byte at 0x43 was corrected to `0x08`, and contradicted
-  by four live-reply fixtures in the same tree. `connection.py`'s `connect()` docstring
-  said the SAProuter and message-server wire bytes were unverified, after both had been
-  verified byte-exact. A stale uncertainty label is worse than none: it reads as current
-  fact and steers a reader away from a path that works.
-- Uncertainty labels audited: 14 sites down to 9, all nine now real open questions with
-  a stated way to settle them. Three of the removed were never assumptions at all —
-  comments that mentioned the label to say it had been resolved, or that there was none
-  here. The token has to stay searchable, and meta-mentions bury the real ones.
-- The server-list entry layout is described from what the capture shows rather than
-  from a guess. Bytes 80–124 hold a space-padded **service name** (`tick-port` on the
-  one entry with a real port, `-` on the two placeholders), not the "secondary name /
-  padding" recorded before. Byte 147 reads `0x01` on the real application server and
-  `0x05` on the placeholders — recorded as a correlation from three entries in one
-  capture, which is not an enumeration.
-
-- Responses larger than one gateway frame are now reassembled instead of failing.
-  `RFC_READ_TABLE` on `DD03L` past ~2000 rows returned a 28080-byte frame cut inside a
-  250-byte `0x0305` record plus a 25593-byte continuation, and `Connection.call` read
-  only the first. The bodies concatenate directly — no trailer, no preamble, no
-  re-framing. Reassembly is driven by the stream's own `0xFFFF` terminator and
-  deliberately **not** by either header field that looks like a "more follows" marker:
-  bytes 17–20 and 60–63 are the same signal, and both also fire on complete terminal
-  replies (a refused logon, an incomplete signon), so a loop trusting either would hang
-  on a failed logon waiting for a frame that never comes. Fixtures
-  `multiframe_read_table_part1.bin` / `_part2.bin`.
-- Bytes 56–59 of the GW header are the frame's own payload length (BE uint32), exact on
-  all 16 frames checked — the 2 above plus 9 independently captured golden fixtures.
-  The previous mapping of 52–63 as an RFC library name string is disproven; the region
-  is three BE uint32.
-
-- Tag 0x0667 is settled: it is the server-side duration of the answered call, in
-  microseconds, per call and not cumulative. The two golden fixtures had contradicted
-  each other (one read it as microseconds, the other as an `[ASSUMED]` timeout in
-  seconds) and neither could be right from a capture alone, which shows `138.0`
-  without saying what 138.0 counts. A first probe varied rows read, saw the value move
-  400x, and concluded "it tracks the work, so it is a duration" — which does not
-  follow, because rows read moves server time and response size together and a byte
-  counter fit the numbers equally well. `RFC_PING_AND_WAIT` separates them: it sleeps a
-  known interval and returns a constant-size reply. Across 0/1/3-second sleeps the
-  response held at 236 bytes while the value tracked the sleep to 0.1% read as
-  microseconds, each reading bracketed by the sleep below it and the wall clock above,
-  and the third call read its own duration rather than a running total. The `[ASSUMED]`
-  labels are removed and the timeout reading is recorded as disproven.
-
-- A connection whose reply could not be read to its end is now retired instead of
-  returned to the pool. Previously the session went back to `READY` with the unread
-  remainder still queued on the socket, so the *next* call read the previous reply's
-  leftovers and returned a result belonging to different arguments — a silent
-  mismatch set up by a failure that had already been reported. `BROKEN` is terminal
-  (there is no record boundary to resynchronise to), every later operation refuses
-  and names the original fault, and the pool discards such a connection without
-  probing a stream it already knows is unreadable. ABAP application errors and
-  system failures are excluded: those frames parsed correctly, so the connection
-  stays usable rather than forcing a reconnect on every short dump.
-
 ### Added
 
 - Tests for the metadata bootstrap — `_call_bootstrap` and `_call_struct_bootstrap`,
@@ -181,7 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tag is established, so absence means unknown, and a fabricated zero would enter
   a latency series as an impossibly fast call.
 
-### Added
 
 - Tests for the codec's refusal branches — the module where a defect corrupts *data*
   rather than failing. A zero or truncated BCD field, an invalid sign or digit nibble, an
@@ -260,17 +131,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a readable RFC message". It now reports the message, e.g.
   `the connection failed below the RFC layer: FREE 1 00024error during logon`.
 
-### Fixed
-
-- **An over-long function name built a malformed wRFC frame.** The call-name fields pad
-  to a fixed width with `=` and append `FT`. An over-long name does not truncate — the
-  pad count goes negative and `"=" * -1` is the empty string — so the field came out
-  *too long*: a 31-character name produced a 33-character call-begin field where the
-  format requires 32, with nothing raising. ABAP caps function module names at 30, so
-  such a name is invalid regardless, but building a malformed frame is the wrong way to
-  report that.
-
-### Added
 
 - Tests for the wRFC (ngrfc V1) value encoders, which were almost entirely uncovered
   because the only tests reaching them were integration tests needing a live WebSocket
@@ -300,7 +160,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the frame by a byte; it also computed gateway port 3400, which is not a gateway. The
   value is now validated where it is used and at `connect()`, before a socket is opened.
 
-### Added
 
 - `tests/test_fixed_width_fields.py`, covering the whole defect class rather than the
   individual instances. Four bugs of this exact shape were found in one session, from
@@ -422,73 +281,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured record reads `PORT=3200` for a server whose gateway is 3300 — so the system
   number derives from the dispatcher formula and the caller adds 3300 (or 4800 for SNC).
 
-### Corrected
-
-Three claims committed earlier today were wrong, each in a way that read as a finding:
-
-- **"The byte at `0x43` must be 3."** It is the *operation* byte and 3 is not one of
-  its values. That came from a sweep of 0, 1, 2 and 4 that never tried 8 — the value a
-  real client sends — and every candidate in it was paired with a `msgtype` the server
-  would not accept regardless, so the sweep measured nothing at all.
-- **"Return code −20 means the server's ACL refused the attach."** No ACL is configured
-  on the test system. −20 was the server rejecting an invalid operation byte.
-  Attributing it to `ms/acl_info` was a guess phrased as a diagnosis.
-- **The original `msg_type=0x02` / `direction=0x08` at `0x42`/`0x43` were correct** and
-  were replaced with a wrong constant taken from a legacy code path. The real defects
-  were the frame length (114 against the correct 110 — enough on its own for the server
-  to close the connection without replying) and the name-field layout.
-
-- Message-server and gateway ports are now sourced from SAP's *TCP/IP Ports of All SAP
-  Products*, not from observation alone. The documentation corrected an incomplete
-  conclusion: the `36<NN>` message-server formula applies **only** to systems installed
-  before SAP NetWeaver 7.0 with a central instance. On an SCS/ASCS layout — every modern
-  install — the port is `rdisp/msserv`, anywhere in 0–65535, with a documented default
-  of **9310**. There is no formula to apply, which is a stronger reason for having no
-  default than the one previously recorded. Each plausible constant is wrong for a
-  different layout: 3600 for a legacy central instance, 9310 for a default SCS, 3601 on
-  the system used for testing.
-- The gateway derivation `(4800 if snc else 3300) + sysnr` is confirmed twice over:
-  documented as `sapgw<NN>` = `33<NN>` and `sapgw<NN>s` = `48<NN>`, and independently
-  reported as `RFC 3300` / `RFCS 4800` by the message server's own service list. Note
-  `<NN>` there is the application server's instance number, unlike the message server's.
-- Reading `sapms<SID>` from `/etc/services` is confirmed as the intended client-side
-  mechanism rather than a convenience: the same table states "You can reassign service
-  names to an arbitrary value after installation in /etc/services".
-- The message-server HTTP interface is documented as `81<NN>` and **"Not active by
-  default"**, which is why its absence is reported as a configuration fact rather than
-  an error.
-
-- **The binary message-server frame layout is now confirmed, and it was wrong.**
-  Validated against a live A4H message server by sending candidate frames and
-  recording which drew a reply, which drew a specific error, and which were dropped.
-  The attach frame is **110 bytes**, not the 114 the builder produced — the server
-  closes the connection on the old frame without replying at all. `0x0e` is the start
-  of a 40-byte `toname`, not a one-byte "sender type", and `0x44` holds the 40-byte
-  `fromname`, not a 10-byte "opcode name". Both fields are space-padded, which is why
-  the mistake survived beside a partial capture: the bytes looked plausible.
-- Two constants are now evidenced rather than assumed: version `4` at `0x0c` (sending
-  5 is answered with −12 *"invalid client version"*, which is what proves the field's
-  meaning) and the byte at `0x43`, which must be `3` — 0, 1, 2 and 4 each get the
-  connection dropped.
-- Message-server return codes are decoded, from a **signed** byte at `0x0d`. Read
-  unsigned, `0xec` is 236 rather than −20, turning *"access denied"* into a number.
-- `MessageServerClient.resolve` no longer runs an invented protocol. It sent a 2-byte
-  length-prefixed group name — a shape created to satisfy `MockTransport` and
-  uninterpretable by any message server. Its test passed because the stub and the test
-  agreed on a protocol that does not exist. It now delegates to the real SAPMS
-  exchange, and reports the server's own return code instead of waiting.
-- Both message-server builders carried their own NI length prefix while handing the
-  result to a transport seam that adds one, and read the reply magic at offset 4 of a
-  payload whose prefix had already been stripped. The two errors cancelled out under
-  `MockTransport` and could not have worked on a socket.
-- **No numeric default for the message-server port.** The previous commit replaced a
-  hardcoded 3600 with 3601, which is the same mistake with a different number: 3600 is
-  right for a single-instance system and 3601 for an ASCS split, and nothing observable
-  from the client distinguishes them. The instance number now comes from the
-  `sapms<SID>` entry in `/etc/services`, and when that is absent the caller is asked for
-  `msserv` rather than sent somewhere plausible.
-
-### Added
 
 - `CLAUDE.md` gains **"Nothing ships unvalidated — including defaults"**. The evidence
   tiers governed wire values; this governs commits, and names the things that do not
@@ -667,6 +459,209 @@ Three claims committed earlier today were wrong, each in a way that read as a fi
   holds, or an out-of-range exponent, raises `ValueError`; truncating to fit is the
   corruption this type exists to prevent.
 
+### Fixed
+
+- The wRFC "E=163" error was fabricated by this library, and is gone. Three code paths
+  produced it and none read it from the wire: two raised the hardcoded string
+  `"163: Error when receiving data for an RFC."`, and the third used `163` as a
+  *fallback for when the server reported no return code at all* — inventing a specific
+  failure number to describe a reply that carried none. A probe against A4H kernel 793
+  shows the wRFC LOGON succeeding with a 1118-byte reply in under 100 ms, so the
+  premise of issue #14 ("`RFC_GET_FUNCTION_INTERFACE` returns exception 163") was our
+  own message read back. Each site now reports what actually happened — the WebSocket
+  close code and reason, or that no rows, no return code and no message came back.
+  Seven comments asserting the disproven story are corrected, an integration test that
+  required `"163"` in the message no longer pins the fiction, and
+  `_ws_e163_classic_fallback` is renamed. The gap itself is real and still open; the
+  number never was.
+
+- Disabling wRFC TLS verification now writes a log record as well as raising a warning.
+  The two channels fail differently: a warning is shown once per call site and vanishes
+  under `python -W ignore` or a broad `filterwarnings()`, both of which a long-running
+  service is likely to have set for unrelated reasons. The log record survives that, so
+  the process where it matters most still leaves a trace that its RFC traffic was
+  unauthenticated. The defaults themselves were already correct — `connect`,
+  `connect_ws` and `_make_ssl_context` all verify unless told otherwise — and are now
+  asserted rather than assumed, along with the resulting context actually being
+  `CERT_REQUIRED` with hostname checking and a TLS 1.2 floor.
+
+- Message variables V2–V4 are confirmed at `0x0412`–`0x0414`, following V1 at `0x0411`.
+  Previously inferred from `0x0411` alone, because no capture carried more than one
+  variable. A purpose-built RFM raising `MESSAGE e398(00)` with four **distinct** values
+  put each in its own tag — four copies of one string would have parsed identically with
+  the tags in any order.
+- The free-text tag `0x040B` is removed. It had never appeared in any capture and was
+  nonetheless tried *first* when resolving an exception's message, ahead of `0x0402`
+  which is captured and confirmed on kernel 752. The same probe aimed at it directly: a
+  reply carrying a genuine four-variable message is exactly what would populate a
+  free-text tag, and it is absent. One untested guess outranking one confirmed fact is
+  the wrong way round.
+- `AbapApplicationError`'s diagnostic string now carries the message class, number and
+  variables when the server sends no assembled text. Kernel 793 sends none for a classic
+  exception — `0x0402` is absent too, and the sentence is the client's to build from
+  `T100`, which this library does not do. The error reported a bare `FOUR_VARIABLES`
+  while holding `ALPHA1`, `BRAVO2`, `CHARLIE3` and `DELTA4` unread on the object. On this
+  kernel that was the common case, not an edge case. A server-supplied message still
+  wins, so the 752 shape is unchanged.
+
+- The multi-frame continuation markers are settled by a 22-frame capture. Bytes 17–20
+  (BE int32) read `-1` on a continuing frame and `500` on the last; bytes 60–63 (BE
+  uint32) read `0` and `1`. All twenty-one continuing frames of a 591337-byte reply
+  agreed. A two-frame capture could not have shown this — with two frames "continues
+  the response" and "does not end the stream" are the same statement.
+  They remain **not** the reassembly condition, which has not changed: both read the
+  continuing value on two complete terminal replies (a refused logon, an incomplete
+  signon), so a loop keyed on them would wait forever on a failed logon. The `0xFFFF`
+  terminator still drives reassembly. The marker is now used in the one direction it is
+  safe in — a frame that reports itself final while the stream is still short is
+  refused, because reading on would consume the next call's reply.
+- Recorded that the gateway chunks at exactly 28000 payload bytes per frame, which is
+  why a `DD03L` read crosses into several frames at around 2000 rows.
+
+- A connection whose negotiated codepage is not the `4103` Unicode wire mode is now
+  refused at handshake, naming the codepage it got and the one it needs. Non-Unicode
+  systems are out of scope — SAP ended support for them with NetWeaver 7.5 — but that
+  alone would not justify a hard refusal. The reason it does is that `unicode_mode` is
+  *derived* as "the wire is UTF-16LE" and *spent* by the codec as a byte-order
+  selector: `_uc_encoding` returns `utf-16-be` whenever it is false. On a genuinely
+  non-Unicode connection that does not fail — it decodes single-byte text as UTF-16BE
+  and returns mojibake in every character field, on a connection that looks healthy
+  throughout. The refusal is scoped to live connections, so offline descriptors built
+  without a negotiated codepage keep working.
+
+- Two stale claims removed. `router.py` said the binary message-server protocol was
+  unconfirmed and that the server "accepts the connection and then answers nothing" —
+  written before the operation byte at 0x43 was corrected to `0x08`, and contradicted
+  by four live-reply fixtures in the same tree. `connection.py`'s `connect()` docstring
+  said the SAProuter and message-server wire bytes were unverified, after both had been
+  verified byte-exact. A stale uncertainty label is worse than none: it reads as current
+  fact and steers a reader away from a path that works.
+- Uncertainty labels audited: 14 sites down to 9, all nine now real open questions with
+  a stated way to settle them. Three of the removed were never assumptions at all —
+  comments that mentioned the label to say it had been resolved, or that there was none
+  here. The token has to stay searchable, and meta-mentions bury the real ones.
+- The server-list entry layout is described from what the capture shows rather than
+  from a guess. Bytes 80–124 hold a space-padded **service name** (`tick-port` on the
+  one entry with a real port, `-` on the two placeholders), not the "secondary name /
+  padding" recorded before. Byte 147 reads `0x01` on the real application server and
+  `0x05` on the placeholders — recorded as a correlation from three entries in one
+  capture, which is not an enumeration.
+
+- Responses larger than one gateway frame are now reassembled instead of failing.
+  `RFC_READ_TABLE` on `DD03L` past ~2000 rows returned a 28080-byte frame cut inside a
+  250-byte `0x0305` record plus a 25593-byte continuation, and `Connection.call` read
+  only the first. The bodies concatenate directly — no trailer, no preamble, no
+  re-framing. Reassembly is driven by the stream's own `0xFFFF` terminator and
+  deliberately **not** by either header field that looks like a "more follows" marker:
+  bytes 17–20 and 60–63 are the same signal, and both also fire on complete terminal
+  replies (a refused logon, an incomplete signon), so a loop trusting either would hang
+  on a failed logon waiting for a frame that never comes. Fixtures
+  `multiframe_read_table_part1.bin` / `_part2.bin`.
+- Bytes 56–59 of the GW header are the frame's own payload length (BE uint32), exact on
+  all 16 frames checked — the 2 above plus 9 independently captured golden fixtures.
+  The previous mapping of 52–63 as an RFC library name string is disproven; the region
+  is three BE uint32.
+
+- Tag 0x0667 is settled: it is the server-side duration of the answered call, in
+  microseconds, per call and not cumulative. The two golden fixtures had contradicted
+  each other (one read it as microseconds, the other as an `[ASSUMED]` timeout in
+  seconds) and neither could be right from a capture alone, which shows `138.0`
+  without saying what 138.0 counts. A first probe varied rows read, saw the value move
+  400x, and concluded "it tracks the work, so it is a duration" — which does not
+  follow, because rows read moves server time and response size together and a byte
+  counter fit the numbers equally well. `RFC_PING_AND_WAIT` separates them: it sleeps a
+  known interval and returns a constant-size reply. Across 0/1/3-second sleeps the
+  response held at 236 bytes while the value tracked the sleep to 0.1% read as
+  microseconds, each reading bracketed by the sleep below it and the wall clock above,
+  and the third call read its own duration rather than a running total. The `[ASSUMED]`
+  labels are removed and the timeout reading is recorded as disproven.
+
+- A connection whose reply could not be read to its end is now retired instead of
+  returned to the pool. Previously the session went back to `READY` with the unread
+  remainder still queued on the socket, so the *next* call read the previous reply's
+  leftovers and returned a result belonging to different arguments — a silent
+  mismatch set up by a failure that had already been reported. `BROKEN` is terminal
+  (there is no record boundary to resynchronise to), every later operation refuses
+  and names the original fault, and the pool discards such a connection without
+  probing a stream it already knows is unreadable. ABAP application errors and
+  system failures are excluded: those frames parsed correctly, so the connection
+  stays usable rather than forcing a reconnect on every short dump.
+
+
+- **An over-long function name built a malformed wRFC frame.** The call-name fields pad
+  to a fixed width with `=` and append `FT`. An over-long name does not truncate — the
+  pad count goes negative and `"=" * -1` is the empty string — so the field came out
+  *too long*: a 31-character name produced a 33-character call-begin field where the
+  format requires 32, with nothing raising. ABAP caps function module names at 30, so
+  such a name is invalid regardless, but building a malformed frame is the wrong way to
+  report that.
+
+### Corrected
+
+Three claims committed earlier today were wrong, each in a way that read as a finding:
+
+- **"The byte at `0x43` must be 3."** It is the *operation* byte and 3 is not one of
+  its values. That came from a sweep of 0, 1, 2 and 4 that never tried 8 — the value a
+  real client sends — and every candidate in it was paired with a `msgtype` the server
+  would not accept regardless, so the sweep measured nothing at all.
+- **"Return code −20 means the server's ACL refused the attach."** No ACL is configured
+  on the test system. −20 was the server rejecting an invalid operation byte.
+  Attributing it to `ms/acl_info` was a guess phrased as a diagnosis.
+- **The original `msg_type=0x02` / `direction=0x08` at `0x42`/`0x43` were correct** and
+  were replaced with a wrong constant taken from a legacy code path. The real defects
+  were the frame length (114 against the correct 110 — enough on its own for the server
+  to close the connection without replying) and the name-field layout.
+
+- Message-server and gateway ports are now sourced from SAP's *TCP/IP Ports of All SAP
+  Products*, not from observation alone. The documentation corrected an incomplete
+  conclusion: the `36<NN>` message-server formula applies **only** to systems installed
+  before SAP NetWeaver 7.0 with a central instance. On an SCS/ASCS layout — every modern
+  install — the port is `rdisp/msserv`, anywhere in 0–65535, with a documented default
+  of **9310**. There is no formula to apply, which is a stronger reason for having no
+  default than the one previously recorded. Each plausible constant is wrong for a
+  different layout: 3600 for a legacy central instance, 9310 for a default SCS, 3601 on
+  the system used for testing.
+- The gateway derivation `(4800 if snc else 3300) + sysnr` is confirmed twice over:
+  documented as `sapgw<NN>` = `33<NN>` and `sapgw<NN>s` = `48<NN>`, and independently
+  reported as `RFC 3300` / `RFCS 4800` by the message server's own service list. Note
+  `<NN>` there is the application server's instance number, unlike the message server's.
+- Reading `sapms<SID>` from `/etc/services` is confirmed as the intended client-side
+  mechanism rather than a convenience: the same table states "You can reassign service
+  names to an arbitrary value after installation in /etc/services".
+- The message-server HTTP interface is documented as `81<NN>` and **"Not active by
+  default"**, which is why its absence is reported as a configuration fact rather than
+  an error.
+
+- **The binary message-server frame layout is now confirmed, and it was wrong.**
+  Validated against a live A4H message server by sending candidate frames and
+  recording which drew a reply, which drew a specific error, and which were dropped.
+  The attach frame is **110 bytes**, not the 114 the builder produced — the server
+  closes the connection on the old frame without replying at all. `0x0e` is the start
+  of a 40-byte `toname`, not a one-byte "sender type", and `0x44` holds the 40-byte
+  `fromname`, not a 10-byte "opcode name". Both fields are space-padded, which is why
+  the mistake survived beside a partial capture: the bytes looked plausible.
+- Two constants are now evidenced rather than assumed: version `4` at `0x0c` (sending
+  5 is answered with −12 *"invalid client version"*, which is what proves the field's
+  meaning) and the byte at `0x43`, which must be `3` — 0, 1, 2 and 4 each get the
+  connection dropped.
+- Message-server return codes are decoded, from a **signed** byte at `0x0d`. Read
+  unsigned, `0xec` is 236 rather than −20, turning *"access denied"* into a number.
+- `MessageServerClient.resolve` no longer runs an invented protocol. It sent a 2-byte
+  length-prefixed group name — a shape created to satisfy `MockTransport` and
+  uninterpretable by any message server. Its test passed because the stub and the test
+  agreed on a protocol that does not exist. It now delegates to the real SAPMS
+  exchange, and reports the server's own return code instead of waiting.
+- Both message-server builders carried their own NI length prefix while handing the
+  result to a transport seam that adds one, and read the reply magic at offset 4 of a
+  payload whose prefix had already been stripped. The two errors cancelled out under
+  `MockTransport` and could not have worked on a socket.
+- **No numeric default for the message-server port.** The previous commit replaced a
+  hardcoded 3600 with 3601, which is the same mistake with a different number: 3600 is
+  right for a single-instance system and 3601 for an ASCS split, and nothing observable
+  from the client distinguishes them. The instance number now comes from the
+  `sapms<SID>` entry in `/etc/services`, and when that is absent the caller is asked for
+  `msserv` rather than sent somewhere plausible.
+
 ### Documentation
 
 - Corrected the worked DECFLOAT16 example in `docs/protocol/serialization.md`. It read
@@ -692,6 +687,7 @@ Three claims committed earlier today were wrong, each in a way that read as a fi
   each. `0x040B` has never been observed and is now known to be redundant with the
   confirmed `0x0402`; it is kept only because removing an untested fallback is no
   better evidenced than keeping it.
+
 
 ## [0.1.2] - 2026-08-28
 
