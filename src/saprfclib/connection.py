@@ -39,6 +39,7 @@ import logging
 import os
 import random
 import re
+import socket
 import socket as _socket_module
 import struct
 import threading
@@ -201,8 +202,14 @@ _DEFAULT_LANG = "E"  # tags 0x0115/0x0011: logon language when the caller gives 
 _TLV_REL = b"754"  # tags 0x0012/0x0013/0x000B: SAP release
 
 # wRFC-specific static TLV values (pcap-verified frames 108/169; different from NI/TCP)
-_WS_TLV_CAPS = bytes.fromhex("0501010504010003")  # 0x0101: wRFC caps
-_WS_TLV_CP = b"\x04\x01\x00\x03\x01\x03\x02\x00\x00\x00\x23"  # 0x0106: wRFC codepage
+# 0x0101/0x0106 as sent by a reference client whose LOGON this server accepts.
+# Replayed verbatim these are accepted; the previous values were never seen to
+# work against an on-premise system. Opaque -- their internal structure is not
+# established, only that these bytes are what a working LOGON carries.
+# Release this client reports as its own in 0x0012/0x0013/0x000b.
+_WS_OWN_RELEASE = "754"
+_WS_TLV_CAPS = bytes.fromhex("0301010101010000")  # 0x0101: wRFC caps
+_WS_TLV_CP = bytes.fromhex("04010003000a0200000023")  # 0x0106: wRFC codepage
 # 0x5001 header: 14-byte prefix present in every wRFC invoke 0x5001 TLV.
 # Layout ( ctor + setHeader + flush):
 #   [0]     0x24 '$'  — stream-start marker written by flush(1)
@@ -363,15 +370,29 @@ def _scramble_password(passwd: str, *, seed: int | None = None) -> bytes:
 
 
 def _scramble_password_ws(passwd: str, *, seed: int | None = None) -> bytes:
-    """0x0117 for wRFC: seed(4B LE) + scramble(passwd.encode('utf-16-le'), seed).
+    """0x0117 for wRFC: seed(4B LE) + scramble(passwd, seed), SINGLE-BYTE.
 
-    wRFC uses UTF-16LE password encoding (pcap-confirmed: 13-char → 26-byte body
-    = 30 bytes total with 4-byte seed). Never logs the plaintext (T-07-CRED).
+    The password is encoded one byte per character, like every other string in a
+    wRFC request. This read UTF-16LE and produced a field twice the right width,
+    which the server answered with "Name or password is incorrect" -- an error
+    about the credential rather than about the encoding, and one that says nothing
+    about which of the two is wrong.
+
+    Confirmed against a reference client's accepted LOGON: its 0x0117 is 17 bytes,
+    a 4-byte seed and a 13-byte body. Thirteen is odd, so the body cannot be
+    UTF-16 at all, and descrambling it with this same cipher yields 13 printable
+    characters. Substituting a UTF-16 field into an otherwise byte-identical frame
+    is the only change that turns an accepted LOGON into a rejected one.
+
+    Never logs the plaintext (T-07-CRED).
     """
     if seed is None:
         seed = int.from_bytes(os.urandom(4), "little")
     seed &= 0xFFFFFFFF
-    body = bytearray(passwd.encode("utf-16-le"))
+    # latin-1 maps each code point below 256 to one byte and raises above it,
+    # rather than silently substituting -- a password this cannot represent must
+    # fail loudly here, not authenticate as something else.
+    body = bytearray(passwd.encode("latin-1"))
     _ab_scramble(body, seed)
     return struct.pack("<I", seed) + bytes(body)
 
@@ -379,7 +400,6 @@ def _scramble_password_ws(passwd: str, *, seed: int | None = None) -> bytes:
 def _build_ws_logon_message(
     *,
     func_name: str,
-    ngrfc_body: bytes = b"",
     user: str,
     passwd: str,
     client: str,
@@ -392,146 +412,88 @@ def _build_ws_logon_message(
     seed: int | None = None,
     prog_name: str = "PYTHON",
 ) -> tuple[bytes, bytes]:
-    """Build wRFC LOGON TLV message embedding ``func_name`` as the session-open call.
+    """Build the wRFC LOGON frame, in the shape a server actually accepts.
 
-    ``func_name`` is the RFC function executed on the server as part of the LOGON
-    handshake (e.g. ``"RFC_GET_FUNCTION_INTERFACE"``).  ``ngrfc_body`` is the V1
-    fast-serializer body appended to the 14-byte _WS_5001_HDR (empty → server runs
-    ``func_name`` with no import parameters, like RFCPING).
+    Returns ``(msg_bytes, session_token)``. The token is 16 bytes generated here
+    and echoed back in the reply, so a caller can correlate the session.
 
-    Returns ``(msg_bytes, call_key)`` where ``call_key = b"\\x01" + 36-byte session key``
-    must be reused in all subsequent invoke frames (0x0136).
+    This was rewritten after a reference client was observed opening a session
+    against a system where this library could not. Replaying that client's frame
+    byte-for-byte from this library's own transport is accepted, which localises
+    the entire fault to the frame: the HTTP upgrade, the WebSocket layer and the
+    TLS are all fine. Substituting one field at a time then showed which records
+    the server inspects.
 
-    Structure (pcap frames 108/169):
-      session header → call begin → session logon → call end → terminator.
-    All string TLVs are UTF-16LE (wRFC wire convention). Password never logged (T-07-CRED).
+    What the previous shape got wrong:
+
+    * **It wrapped the call in a 0x5001 ngrfc record.** A working LOGON has none.
+      The function to run is named in 0x0102 and the record set ends. The server
+      was being told to receive RFC data that was not there, and answered
+      CALL_FUNCTION_RECEIVE_ERROR -- which describes exactly that. Removing the
+      record is necessary but not sufficient: on its own it produces silence
+      rather than an error, because the rest of the frame is wrong too.
+    * **It encoded every string UTF-16LE.** A wRFC request is single-byte; only
+      the response is UTF-16LE. The reply carries 0x0016 = "1100", a single-byte
+      codepage, while the session's negotiated codepage is 4103 -- the LOGON is
+      exchanged in 1100 and the session moves to 4103 afterwards.
+    * **It sent twenty-three records a working client does not**, including
+      0x0420, 0x0503 and 0x0512, which are response markers appearing in a
+      request.
+
+    Fields confirmed free, by substitution into an otherwise accepted frame:
+    0x0130 (client program name) and 0x0102 (function name). 0x0514 is optional --
+    omitting it is accepted, and the reply then omits it too. 0x0117 is not free:
+    a wrongly encoded password is answered with "Name or password is incorrect".
+
+    [ASSUMED] that this is the only accepted shape. The previous one cited a
+    capture not in this tree, possibly from the BTP ABAP Environment, and there is
+    no BTP system here to check whether it needs the other dialect. What is
+    established is that this shape works on-premise and the previous one did not.
     """
-    try:
-        hostname = _socket_module.gethostname()
-    except Exception:
-        hostname = "saprfclib"
-    hostname_u16 = hostname.encode("utf-16-le")
-
     fname = func_name.upper()
-    # call-begin 0x0130: name + '='*(30-len) + 'FT' = 32 chars = 64 B UTF-16LE
-    func_begin_padded = _pad_call_name(fname, 30).encode("utf-16-le")
-    # call-end 0x0130: name + '='*(38-len) + 'FT' = 40 chars = 80 B UTF-16LE (pcap-verified)
-    func_end_padded = _pad_call_name(fname, 38).encode("utf-16-le")
-    # first 0x0130: CLIENT PROGRAM NAME (verified: writeRfcSessionInfo writes
-    # the CPIC layer::ownname here, not the function name).
-    # NOTE: changing from func_begin_padded causes RABAX on SAP 7.x — kept for compat.
-    prog_name.encode("utf-16-le")
+    # The old builder padded the name to a fixed width and rejected anything
+    # longer as a side effect of that. This shape sends it unpadded, so the check
+    # has to be made deliberately: a function module name cannot exceed 30
+    # characters whatever the framing, and one silently truncated on the wire
+    # would invoke a different function than the caller asked for.
+    if len(fname) > _MAX_FUNC_NAME_LEN:
+        raise ValueError(
+            f"function name {func_name!r} is {len(fname)} characters; "
+            f"the maximum is {_MAX_FUNC_NAME_LEN}"
+        )
 
-    conn_id_raw = os.urandom(36)  # 36 random binary bytes (0x0140)
-    # 0x0136 session key: b"\x01" + 32B session_id + 4B BE counter.
-    # LOGON frame uses counter=1; subsequent invoke frames must increment the counter.
-    # Pcap-verified: frame 226 (LOGON) counter=\x00\x00\x00\x01,
-    #                frame 229 (first invoke) counter=\x00\x00\x00\x02.
-    call_id_raw = os.urandom(32) + b"\x00\x00\x00\x01"  # 36 bytes; counter=1 for LOGON
-    # 0x0122 date/time: UTF-16LE encoded timestamp string (pcap-verified: 28B = 14 chars)
-    dt_u16 = datetime.datetime.now().strftime("%Y%m%d%H%M%S").encode("utf-16-le")
+    # Single-byte throughout: this is a request. latin-1 raises rather than
+    # substituting, so a value that cannot be represented fails here instead of
+    # reaching the server as something else.
+    def _b(text: str) -> bytes:
+        return text.encode("latin-1")
 
-    # SAP release strings (pcap-verified): 0x0012/0x0013 padded to 4 chars = 8B; 0x000b NOT padded = 3 chars = 6B
-    _rel_padded_u16 = "757 ".encode("utf-16-le")  # tags 0x0012, 0x0013: 8B
-    _rel_u16 = "757".encode("utf-16-le")  # tag  0x000b: 6B (no trailing space)
-
-    # 0x0127 connection attributes: dash-separated key-value ASCII string (pcap-verified format)
-    # Field 2 = client source port; field 5 = server IP; field 6 = gateway name;
-    # field 7 = client IP; fields 9-14 = misc params; field 15 = conn-id hex (no dashes);
-    # field 16 = SID (unknown before logon — leave blank); field 17/18 = server/client IP.
-    conn_id_hex = conn_id_raw.hex()[:32]  # 32 hex chars, no dashes
-    gw_name = f"sapgw{sysnr}"
-    # Null terminator required: SAP TH aborts session if 0x0127 value is not null-terminated.
-    conn_attrs = (
-        f"1-5-2-{local_port}-3-0-4-1-5-{server_host}"
-        f"-6-{gw_name}-7-{local_ip}"
-        f"-17-{server_host}-18-{local_ip}"
-        f"-9-{lang.upper()}-10-0-11-0-12-0-13-0-14-1"
-        f"-16--15-{conn_id_hex}-8-X13\x00"
-    ).encode("ascii")
-
-    user_u16 = user.upper().encode("utf-16-le")
-    client_u16 = client.encode("utf-16-le")
-    lang_u16 = lang.upper().encode("utf-16-le")
-    func_u16 = fname.encode("utf-16-le")
-    sysnr_u16 = sysnr.encode("utf-16-le")  # "00" → 4 bytes
+    session_token = os.urandom(16)
     pw_tlv = _scramble_password_ws(passwd, seed=seed)
 
-    parts: list[bytes] = []
-
-    # session header (pcap-verified static TLVs)
-    parts += [
+    parts: list[bytes] = [
         _tlv_ext(0x0101, _WS_TLV_CAPS),
         _tlv_ext(0x0103, _TLV_VER),
         _tlv_ext(0x0106, _WS_TLV_CP),
-        _tlv_ext(0x0160, b"\x60\x41"),
-        _tlv_ext(0x0161, b"\x00"),
-    ]
-
-    # 0x0007: client IP padded to 15 chars (30B UTF-16LE) — pcap-verified
-    local_ip_padded_u16 = local_ip.ljust(15).encode("utf-16-le")
-    # 0x0008: "hostname_SID_sysnr" in UTF-16LE — SID unknown pre-logon, use placeholder
-    host_sid_sysnr_u16 = f"{hostname}___{sysnr}".encode("utf-16-le")
-
-    # call begin — all strings UTF-16LE per pcap
-    parts += [
-        _tlv_ext(0x0127, conn_attrs),
-        _tlv_ext(0x0007, local_ip_padded_u16),
-        _tlv_ext(0x0020, local_ip.encode("utf-16-le")),
-        _tlv_ext(0x0021, str(server_port).encode("utf-16-le")),
-        _tlv_ext(0x0018, local_ip.encode("utf-16-le")),
-        _tlv_ext(0x0008, host_sid_sysnr_u16),
-        _tlv_ext(0x0011, lang_u16),
-        _tlv_ext(0x0013, _rel_padded_u16),
-        _tlv_ext(0x0012, _rel_padded_u16),
-        _tlv_ext(0x0006, server_host.encode("utf-16-le")),
-        _tlv_ext(0x0130, func_begin_padded),
-    ]
-
-    # session logon — all strings UTF-16LE; password scrambled (T-07-CRED)
-    parts += [
-        _tlv_ext(0x0111, user_u16),
-        _tlv_ext(0x0114, client_u16),
+        _tlv_ext(0x0514, session_token),
+        _tlv_ext(0x0114, _b(client)),
+        _tlv_ext(0x0111, _b(user)),
         _tlv_ext(0x0117, pw_tlv),
-        _tlv_ext(0x0003, b""),  # SID unknown pre-logon
-        _tlv_ext(0x0135, "saprfclib".encode("utf-16-le")),  # system description
-        _tlv_ext(0x0010, sysnr_u16),
-        _tlv_ext(0x0002, hostname_u16),
-        _tlv_ext(0x000C, "python3".encode("utf-16-le")),
-        _tlv_ext(0x0122, dt_u16),  # UTF-16LE timestamp (28B)
-        _tlv_ext(0x0123, b""),
-        _tlv_ext(0x000E, client_u16),
-        _tlv_ext(0x0119, user_u16),
-        _tlv_ext(0x0140, conn_id_raw),  # 36 random binary bytes
-        _tlv_ext(0x0114, client_u16),
-        _tlv_ext(0x0115, lang_u16),
-        _tlv_ext(0x0009, user_u16),
-        _tlv_ext(0x0134, client_u16),
+        _tlv_ext(0x0115, _b(lang.upper())),
         _tlv_ext(0x0501, b"\x01"),
-    ]
-
-    # call end
-    parts += [
-        _tlv_ext(0x0136, b"\x01" + call_id_raw),  # 37 bytes: marker + 36 random
+        _tlv_ext(0x0007, _b(local_ip)),
+        _tlv_ext(0x0011, _b(lang.upper())),
+        _tlv_ext(0x0012, _b(_WS_OWN_RELEASE)),
+        _tlv_ext(0x0013, _b(_WS_OWN_RELEASE)),
+        _tlv_ext(0x0008, _b(socket.gethostname()[:32])),
+        _tlv_ext(0x0006, _b("<unknown>")),
+        _tlv_ext(0x0130, _b(prog_name)),
         _tlv_ext(0x0502, b""),
-        _tlv_ext(0x000B, _rel_u16),  # 6B: "757" (not padded)
-        _tlv_ext(0x0102, func_u16),
-        _tlv_ext(0x000B, _rel_u16),
-        _tlv_ext(0x0130, func_end_padded),  # 80 bytes (40-char padded)
-        _tlv_ext(0x0503, b""),
-        _tlv_ext(0x0420, b"\x00\x00\x00\x00"),
-        _tlv_ext(0x0512, b""),
-        _tlv_ext(
-            0x5001, _WS_5001_HDR + ngrfc_body
-        ),  # V1 HDR + optional body (empty for no-param funcs)
-        # 0x0104 NOT sent in LOGON: content is environment-specific (IPs from pcap
-        # differ from this client's env) and wrong-environment values cause the
-        # server to hang for the full WP time limit.  0x0104 is invoke-only (HEAD).
-        _TAG_TERMINATOR.to_bytes(2, "big") + b"\x00\x00",
+        _tlv_ext(0x000B, _b(_WS_OWN_RELEASE)),
+        _tlv_ext(0x0102, _b(fname)),
+        struct.pack(">HH", 0xFFFF, 0) + struct.pack(">H", 0xFFFF),
     ]
-
-    call_key = b"\x01" + call_id_raw
-    return b"".join(parts), call_key
+    return b"".join(parts), session_token
 
 
 def _ws_logon_failure(logon_resp: bytes) -> AbapSystemFailure | None:
@@ -3072,7 +3034,6 @@ class Connection:
                 auth = self._ws_auth or {}
                 logon_msg, call_key = _build_ws_logon_message(
                     func_name="RFCPING",
-                    ngrfc_body=b"",  # Empty body; LOGON ngrfc format differs from INVOKE.
                     **auth,
                 )
                 self._ws_call_key = call_key
@@ -3554,7 +3515,6 @@ class Connection:
         # Step 1: LOGON + RFCPING (no ngrfc body, proven path, no Q-marker ambiguity).
         logon_msg, call_key = _build_ws_logon_message(
             func_name="RFCPING",
-            ngrfc_body=b"",
             **auth,
         )
         self._ws_call_key = call_key
