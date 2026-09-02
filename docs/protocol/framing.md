@@ -111,38 +111,68 @@ APPC (Advanced Program-to-Program Communications) transport layer that CPI-C use
 
 ```
 Offset  Length  Notes
-  0      2      GW message type: 06=data CB=RFC_DATA
+  0      2      GW message type: 06=data CB=RFC_DATA (06CE and 0609 also observed)
   2      2      Protocol version: 02 00
   4      4      Max NI message size BE uint32 (FF FF 00 00 in client frames)
-  8      2      [UNKNOWN] zeros / CPIC internal
+  8      2      zero in all 85 frames observed
  10      1      Sub-protocol version (0x01 in registration response)
- 11      5      [UNKNOWN] zeros / CPIC internal
- 16      4      CPIC flags word BE uint32 (0xC0000000 in registration response)
-                  bit 0 of byte[16]: when set, 4 bytes at [0x45] carry a conversation
-                  handle
- 20      1      [UNKNOWN]
- 21      1      Frame sub-type (0x06 in registration response; echoed back by the peer)
- 22      2      [UNKNOWN] zeros
+ 11      2      zero in all 85 frames observed
+ 13      1      FRAME SEQUENCE NUMBER within one response, 1-based. 0 on client
+                  requests and on empty 06CE frames. Confirmed: a 22-frame reply
+                  numbered its frames 1..22 consecutively with no exceptions.
+ 14      2      zero in all 85 frames observed
+ 16      1      1 on server responses, 0 on client requests (all 85 frames)
+ 17      4      BE int32. 500 on a frame that completes the response, -1 on one
+                  that does not. See "multi-frame responses" below: this tracks
+                  continuation but must NOT drive reassembly, because it also
+                  reads -1 on complete terminal replies.
+ 21      1      Frame sub-type (0x06 in registration response; echoed by the peer)
+ 22      2      zero in all 85 frames observed
  24      4      CPIC handle/sequence (0x00000175 = 373 in registration response)
- 28      2      [UNKNOWN] zeros
- 30      1      [UNKNOWN] (0x01 in registration response)
- 31      1      [UNKNOWN] (continuation of above field or padding)
- 32      1      [UNKNOWN]
- 33      1      [UNKNOWN]
+ 28      2      zero in all 85 frames observed
+ 30      2      BE uint16 POSITION MARKER, consistent across 76 frames:
+                  0x0108  this frame does not complete the response — the first
+                          frame of a multi-frame reply, and also a single-frame
+                          reply that does not complete the exchange (a refused
+                          logon, an incomplete signon)
+                  0x0100  a middle frame of a multi-frame reply
+                  0x050C  this frame completes the response (including every
+                          single-frame reply, and client requests)
+ 32      2      zero in all 85 frames observed
  34      1      CPIC rc-valid flags (bit 0x10: rc fields at [32]/[36] are valid;
                   0x05 in registration response → bit clear = no error info)
- 35      1      [UNKNOWN]
+ 35      1      0x12 on exactly the two captured refusals — cpic_logon_error_response
+                  and signon_incomplete_752_response — and 0 on the other 83
+                  frames. [ASSUMED] that it marks a refused exchange: two frames
+                  is a correlation with an independently identified category, not
+                  an enumeration.
  36      4      CPIC return code BE int32 (0 = success)
  40      4      Additional CPIC status BE int32
- 44      8      GW connection handle: 8-byte ASCII decimal (e.g. "75568442")
-                  assigned by the gateway
- 52     12      RFC library name + version (e.g. "NWRFC   10.20.30", null-padded)
+ 44      8      GW connection handle: 4 ASCII digits + 4 binary bytes
+ 52      4      BE uint32, always 2 on responses and 0 on requests
+ 56      4      BE uint32: THIS FRAME'S OWN PAYLOAD LENGTH. Exact on all 16 frames
+                  cross-checked, and 0 on client requests.
+ 60      4      BE uint32: 1 when this frame completes the response, 0 otherwise
  64      8      SAP GW service / dispatcher name (e.g. "sapdp00 ", null-padded)
  72      4      Trailing bytes (0x49 0x01 0x00 0x00 in registration response)
 ```
 
-*Source: `tests/golden/framing/gw_connect_response.bin` golden fixture, cross-checked against
-the reference client's observed behaviour on the same exchange.*
+*Sources: `gw_connect_response.bin` for the registration-response values, plus a
+differential analysis over 85 GW-framed captures — every golden fixture, a
+2-frame `RFC_READ_TABLE` reply and a 22-frame one.*
+
+**Corrections to an earlier version of this table.** Three entries were wrong, and
+each was wrong in a way that looked plausible:
+
+- **52–63 was recorded as "RFC library name + version, null-padded".** It is three
+  BE uint32. The 12 bytes are readable as a padded string, which is why the
+  reading survived; nothing in a single capture contradicts it.
+- **16 was a 4-byte word and 20 was a separate unknown byte.** The boundary is one
+  later: 16 is a single flag byte, and 17–20 is the BE int32 above. Splitting it
+  at 16 makes the int32 read as 0x01000001 / 0x01FFFFFF, which looks like a flags
+  word and is not one.
+- **30 and 31 were two separate unknown bytes.** They are one BE uint16, and the
+  three values it takes are the position marker documented above.
 
 **Key observation from capture:**
 - All client→server RFC data frames share an **identical** 76-byte APPC header within a session
@@ -282,7 +312,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0421    | analysis          | Auth / call context                                                   |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
 | 0x0502    | capture+analysis  | Call-start marker (empty on call frames)                             |
-| 0x0503    | capture     | Response flag 2 (empty record) [UNKNOWN]                             |
+| 0x0503    | capture     | Success marker (empty record) — present iff 0x0417 is absent         |
 | 0x0504    | analysis          | Function call begin (type A)                                         |
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
 | 0x0513    | analysis          | Function call begin (type B)                                         |
@@ -321,7 +351,7 @@ NI header (4B) + APPC header (76B) + RFC marker ffff0004 (4B)
 NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
 └── TLV stream:
     0x0500  len=0          call-end / response-start marker
-    0x0503  len=0          response flag [UNKNOWN]
+    0x0503  len=0          success marker — a result follows
     0x0514  len=16         session token (16B binary)
     0x0420  len=4          return code uint32 BE (0=success)
     0x0512  len=0          parameter section start
@@ -362,7 +392,7 @@ Response (server → client), 236 B total
 APPC header (76B) + RFC marker 00000002 (4B)
 └── TLV stream:
     0x0500  len=0          response-start marker
-    0x0503  len=0          response flag [UNKNOWN]
+    0x0503  len=0          success marker — a result follows
     0x0514  len=16         session token (16B binary)
     0x0420  len=4          return code uint32 BE (0 = success)
     0x0512  len=0          parameter section start (no parameters follow)
@@ -1136,6 +1166,27 @@ class, number and variables via a `T100` lookup, which this library does not mak
 `AbapApplicationError.message` is therefore `None` on this path, and the
 exception's diagnostic string carries the class, number and variables instead of
 dropping them. On this kernel that is the common case, not an edge case.
+
+### Tag 0x0503 — the success marker
+
+An empty record, and its presence is the signal. Across all ten RFC-layer replies
+in `tests/golden/`, `0x0503` is present **exactly when `0x0417` is absent**:
+
+| | `0x0503` | `0x0417` | `0x0420` |
+|---|---|---|---|
+| successful replies (7) | present | absent | present |
+| exception replies (3) | absent | present | absent |
+
+So the two are complementary markers for the same question — whether a result or
+an exception follows — and `0x0420` (the return code) tracks the success side.
+This was recorded as "response flag 2, meaning unknown"; the meaning falls out of
+comparing the corpus rather than any one frame, which is why a single capture
+never settled it.
+
+Reading either marker alone is enough to classify a reply. `parse_invoke_response`
+keys on `0x0417`, which is the more conservative choice: a reply carrying neither
+marker is then treated as a result and fails on the missing data, rather than
+being reported as an exception with nothing to say.
 
 ### Exception TLV semantics — the tag set varies by release
 
