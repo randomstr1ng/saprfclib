@@ -2310,6 +2310,12 @@ class Connection:
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
         self._ws_call_key: bytes = b"\x01" + b"\x00" * 36  # set by _ws_begin / _ws_handshake
+        # 16 bytes proposed by this client in the LOGON's 0x0514 and echoed in the
+        # reply. Distinct from _ws_call_key, which is the 37-byte 0x0136 value the
+        # invoke frames carry -- an accepted LOGON has no 0x0136 at all, so the two
+        # are not the same thing and assigning one to the other silently truncates
+        # every invoke key from 37 bytes to 20.
+        self._ws_session_token: bytes = b""
         self._ws_auth: dict[str, Any] | None = None  # stored by _ws_begin for deferred LOGON
         self._ws_invoke_counter: int = 2  # next invoke counter; LOGON uses 1, invokes start at 2
         # Async delegation (set by connect() for classic TCP paths, D-07).
@@ -3016,27 +3022,17 @@ class Connection:
             if self._session.state is SessionState.WS_PENDING:
                 # 2-step lazy LOGON (Track 2):
                 # Step 1: LOGON+RFCPING (empty ngrfc body).
-                # An empty ngrfc body is the one that works. Probed against A4H
-                # kernel 793: with b"" the server answers the LOGON with a
-                # 1118-byte reply in under 100 ms. With b"\x45" -- which makes the
-                # 0x5001 record byte-identical to a working INVOKE -- it sends
-                # nothing at all, indefinitely, and a frame sent afterwards draws
-                # close code 1001.
-                #
-                # An earlier comment here said b"" "yields expected E=163 close".
-                # Half right. There is no close -- the server answers -- but the
-                # reply it sends IS the error: CALL_FUNCTION_RECEIVE_ERROR, message
-                # 00/341 type X, with E=163 in the 0x0418 breadcrumb. An empty body
-                # means the embedded RFCPING receives no data, which is precisely
-                # what "error when receiving data for an RFC" describes.
-                # _ws_direct_logon_call (same LOGON path, proven path) uses b"" too.
+                # The LOGON frame is built to the shape a server accepts: no
+                # 0x5001 record, single-byte strings, and the function to run
+                # named in 0x0102. See _build_ws_logon_message for how that was
+                # established and what the previous shape got wrong.
                 _ws_pending_path = True
                 auth = self._ws_auth or {}
-                logon_msg, call_key = _build_ws_logon_message(
+                logon_msg, session_token = _build_ws_logon_message(
                     func_name="RFCPING",
                     **auth,
                 )
-                self._ws_call_key = call_key
+                self._ws_session_token = session_token
                 self._ws_invoke_counter = 2  # LOGON uses counter=1, invokes start at 2
                 self._transport.send_message(logon_msg)
                 logon_resp = self._transport.recv_message()
@@ -3513,11 +3509,11 @@ class Connection:
         auth = self._ws_auth or {}
 
         # Step 1: LOGON + RFCPING (no ngrfc body, proven path, no Q-marker ambiguity).
-        logon_msg, call_key = _build_ws_logon_message(
+        logon_msg, session_token = _build_ws_logon_message(
             func_name="RFCPING",
             **auth,
         )
-        self._ws_call_key = call_key
+        self._ws_session_token = session_token
         self._ws_invoke_counter = 2
         try:
             self._transport.send_message(logon_msg)
