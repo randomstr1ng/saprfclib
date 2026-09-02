@@ -267,6 +267,76 @@ The response (frame 15) is not yet extracted as a standalone fixture — add as 
 
 ---
 
+## WebSocket RFC — the LOGON frame
+
+**Status: the shape below is what a working client sends. saprfclib does not yet
+send it, which is issue #14.**
+
+A reference SDK client (NW RFC 7.50 PL18) opening a wRFC session against A4H
+kernel 793 sends a **238-byte** LOGON frame containing nineteen records:
+
+```
+0101  8   0301010101010000        capability bits
+0103  4   00000e0b
+0106  11  04010003000a0200000023
+0514  16  session token
+0114  3   "001"                   client
+0111  9   "Developer"             user
+0117  17  password material
+0115  1   "E"                     language
+0501  1   01
+0007  9   "127.0.1.1"             client IP
+0011  1   "E"
+0012  3   "754"                   own release
+0013  3   "754"
+0008  5   "titan"                 client hostname
+0006  9   "<unknown>"
+0130  8   "startrfc"              CLIENT PROGRAM NAME
+0502  0                           request marker
+000b  3   "754"
+0102  7   "RFCPING"               FUNCTION NAME
+ffff  0                           terminator
+```
+
+### Three things that are not what this library assumed
+
+**There is no `0x5001` ngrfc record.** The function to run is named in `0x0102`
+and the record set ends. saprfclib wraps a `0x5001` record around an ngrfc body
+and always has; the server then tries to receive RFC data from it and answers
+`CALL_FUNCTION_RECEIVE_ERROR` — which describes exactly that. Two values were
+tried in that record, an empty body and `b"\x45"`, and both failed because the
+record should not be there at all.
+
+**The request is single-byte; the response is UTF-16LE.** The wire is asymmetric.
+`"001"` occupies 3 bytes going out and `"A4H"` occupies 6 coming back. The reply
+carries `0x0016 = "1100"`, a single-byte codepage, while the session's negotiated
+partner codepage is `4103` — so the LOGON is exchanged in 1100 and the session
+moves to 4103 after it. saprfclib encodes the LOGON as UTF-16LE throughout, which
+is why its frame is roughly twice the size for the same strings.
+
+**`0x0130` is the client program name**, `"startrfc"` — 8 bytes, unpadded.
+saprfclib puts an 80-byte padded function name there.
+
+### What is not established
+
+Whether this is the only valid shape. The existing builder's comments cite a
+capture described as pcap-verified, which is not in this tree and may be from the
+BTP ABAP Environment rather than an on-premise system; the two may legitimately
+differ. What is established is that the shape above works against A4H and the one
+saprfclib sends does not.
+
+The `0x0117` password material is 17 bytes here against the 6 this library
+produces, so the schemes differ — but authentication is not the failure. The
+current LOGON already authenticates: its reply carries `0x0450 'A4H'` and the
+full attribute set, and only the embedded call fails. Credentials also travel in
+the HTTP `Authorization` header of the upgrade request, which may be what
+actually satisfies the server.
+
+*Source: reference-client trace against the authors' own system, decoded in
+`parse_sdk_trace.py`. The trace establishes what to send; a capture of this
+library sending it, and the server accepting it, is what will confirm it.*
+
+
 ## Password scrambling (0x0117)
 
 !!! danger "This is obfuscation, not encryption"
