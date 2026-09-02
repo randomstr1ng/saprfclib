@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documented what a working wRFC LOGON frame contains (#14). A reference SDK client
+  opens a session against A4H that this library cannot, and its frame is 238 bytes to our
+  ~1040. Three differences, none of them the credentials:
+  - **There is no `0x5001` ngrfc record.** The function is named in `0x0102` and the
+    record set ends. We wrap a `0x5001` record around a body the server then tries to
+    read RFC data from, which is exactly what `CALL_FUNCTION_RECEIVE_ERROR` describes.
+    Both values tried in that record failed because the record should not be there.
+  - **The request is single-byte and the response is UTF-16LE.** `"001"` is 3 bytes going
+    out and `"A4H"` is 6 coming back. The reply carries `0x0016 = "1100"`, a single-byte
+    codepage, while the session's partner codepage is `4103` — the LOGON is exchanged in
+    1100 and the session moves to 4103 after it.
+  - `0x0130` is the client program name, unpadded; we send an 80-byte padded function
+    name.
+  Not yet changed in code: the existing builder cites a capture that is not in this tree
+  and may be from BTP rather than on-premise, so the two shapes may both be valid for
+  their own targets. `wrfc_logon_shape_probe.py` changes one thing at a time to find out
+  which difference actually matters before anything is rewritten.
+
 - The GW header table is corrected and most of its unknown fields resolved, by comparing
   85 captured frames rather than reading any one of them more closely. Unknown entries go
   from 14 to 4.
