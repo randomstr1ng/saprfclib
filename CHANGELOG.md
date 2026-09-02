@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The GW header table is corrected and most of its unknown fields resolved, by comparing
+  85 captured frames rather than reading any one of them more closely. Unknown entries go
+  from 14 to 4.
+  - **Byte 13 is a frame sequence number**, 1-based within a response, 0 on requests. It
+    sat inside five bytes recorded as "zeros / CPIC internal"; four of them are zero and
+    the middle one counts — a 22-frame reply numbered its frames 1..22 with no exceptions.
+  - **Bytes 30–31 are one BE uint16 position marker**, not two unknown bytes: `0x0108`
+    does not complete the response, `0x0100` is a middle frame, `0x050C` completes it. It
+    agrees with the independent flag at byte 60 on every frame.
+  - **Bytes 52–63 are three BE uint32**, not the "RFC library name + version" the table
+    claimed. Twelve bytes read as a padded string, which is why the wrong reading survived.
+  - **The field boundary at 16 was one byte early.** Byte 16 is a single flag; 17–20 is the
+    BE int32. Split at 16 the int32 reads `0x01000001`/`0x01FFFFFF`, which looks like a
+    flags word and is not one.
+  - Bytes 8, 11–12, 14–15, 22, 28 and 32–33 are zero in all 85 frames — "always zero in
+    everything captured" is a different and more useful claim than "unknown".
+- **Tag `0x0503` is the success marker.** Across all ten RFC-layer replies it is present
+  exactly when the exception marker `0x0417` is absent. Recorded as "response flag 2,
+  meaning unknown"; the meaning comes out of comparing the corpus, which is why no single
+  capture ever settled it.
+
+
 ## [0.1.3] - 2026-09-01
 
 A stability and evidence release. No new transport, no new API surface to learn —
