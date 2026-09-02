@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The wRFC LOGON frame is rebuilt to a shape the server accepts (#14).** Replaying a
+  reference client's LOGON from this library's own transport was accepted, which
+  localised the entire fault to the frame — the HTTP upgrade, the WebSocket layer and the
+  TLS were never at issue. Substituting one field at a time into that accepted frame then
+  showed which records the server inspects: the program name `0x0130` and function name
+  `0x0102` are free, `0x0514` is optional (omitting it is accepted and the reply omits it
+  too, so the client proposes the token rather than the server issuing it), and `0x0117`
+  is not — a wrongly encoded password is answered "Name or password is incorrect".
+  Three things were wrong:
+  - **A `0x5001` ngrfc record was sent and should not exist.** It tells the server to
+    receive RFC data for the call; there is none, so it answered
+    `CALL_FUNCTION_RECEIVE_ERROR` — which is that sentence read literally. Both values
+    previously tried in that record failed for the same reason. Removing it alone is
+    necessary and not sufficient: on its own it produces silence rather than an error.
+  - **Every string was UTF-16LE.** A wRFC request is single-byte; only the response is
+    UTF-16LE. This is most of why the frame was ~1040 bytes against a working 238.
+  - **Twenty-three records were sent that a working client does not**, including
+    `0x0420`, `0x0503` and `0x0512` — response markers appearing in a request.
+- The wRFC password field `0x0117` is single-byte, not UTF-16LE. An accepted frame's is
+  17 bytes for a 13-character password: a 4-byte seed and a 13-byte body. Thirteen is
+  odd, so the body cannot be UTF-16 at all. `latin-1` is used so a password that cannot
+  be represented raises rather than substituting a character and authenticating as
+  something else.
+
 - Documented what a working wRFC LOGON frame contains (#14). A reference SDK client
   opens a session against A4H that this library cannot, and its frame is 238 bytes to our
   ~1040. Three differences, none of them the credentials:
