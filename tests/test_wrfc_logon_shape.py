@@ -185,3 +185,33 @@ def test_a_password_that_cannot_be_encoded_fails_loudly() -> None:
     """
     with pytest.raises(UnicodeEncodeError):
         _scramble_password_ws("pass中word", seed=1)
+
+
+def test_the_session_token_is_not_the_invoke_key() -> None:
+    """Two different 0x0136-shaped things that must not be conflated.
+
+    The LOGON returns a 16-byte token for 0x0514. The invoke frames carry a
+    37-byte key at 0x0136 -- b"\\x01" + 32-byte session id + 4-byte counter --
+    and _next_ws_invoke_key builds it by slicing [:33] off the stored value.
+    Storing the 16-byte token there does not raise: the slice simply yields all
+    16 bytes and every invoke key comes out 20 bytes instead of 37. An accepted
+    LOGON carries no 0x0136 at all, so the two are not the same value and never
+    were.
+    """
+    from saprfclib.connection import Connection
+    from tests.test_connection import MockTransport
+
+    conn = Connection(MockTransport([]))
+    _msg, token = _build_ws_logon_message(
+        func_name="RFCPING",
+        user="U",
+        passwd="p",
+        client="001",
+        lang="E",
+        server_host="example.invalid",
+        server_port=443,
+    )
+    conn._ws_session_token = token
+    assert len(conn._ws_session_token) == 16
+    assert len(conn._ws_call_key) == 37, "the invoke key must stay 37 bytes"
+    assert len(conn._next_ws_invoke_key()) == 37
