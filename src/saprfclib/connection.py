@@ -1328,7 +1328,7 @@ def _build_ws_invoke_frame(
         0102  UTF-16LE  function name
         0512            marker
         0205  UTF-16LE  one per EXPORTING parameter (declarations)
-        0201  UTF-16LE  parameter name      \ one pair per
+        0201  UTF-16LE  parameter name      | one pair per
         0203  UTF-16LE  parameter value     | IMPORTING parameter
         ffff            terminator
 
@@ -2369,6 +2369,10 @@ class Connection:
         # are not the same thing and assigning one to the other silently truncates
         # every invoke key from 37 bytes to 20.
         self._ws_session_token: bytes = b""
+        # Server-reported duration of the most recent call (tag 0x0667, seconds).
+        # The async core has its own; this one serves the wRFC and SNC paths,
+        # which do not delegate.
+        self._last_server_duration_s: float | None = None
         self._ws_auth: dict[str, Any] | None = None  # stored by _ws_begin for deferred LOGON
         self._ws_invoke_counter: int = 2  # next invoke counter; LOGON uses 1, invokes start at 2
         # Async delegation (set by connect() for classic TCP paths, D-07).
@@ -3652,6 +3656,17 @@ class Connection:
             if not ws_pending:
                 self._session._require_state(SessionState.READY)
                 self._session.mark_in_call()
+            # Metrics were recorded only on the async core, which classic TCP
+            # delegates to. The wRFC and SNC paths run here instead, so a
+            # ConnectionMetrics on either reported zero calls however many were
+            # made -- a metric that is quietly absent is worse than one that is
+            # obviously missing, because a dashboard showing nothing looks like
+            # an idle connection rather than a broken counter.
+            _started = time.perf_counter()
+            self._last_server_duration_s = None
+            _sent_before = getattr(self._transport, "bytes_sent", 0)
+            _received_before = getattr(self._transport, "bytes_received", 0)
+            _failed = True
             try:
                 # WS_PENDING fast-path: if the target function is in _WRFC_BUILTIN_DESCS,
                 # embed it directly in the LOGON frame (pcap-verified pattern, frame 108).
@@ -3659,7 +3674,11 @@ class Connection:
                 if ws_pending:
                     builtin = _WRFC_BUILTIN_DESCS.get(func_name.upper())
                     if builtin is not None:
-                        return self._ws_direct_logon_call(func_name.upper(), builtin, dict(params))
+                        _direct = self._ws_direct_logon_call(
+                            func_name.upper(), builtin, dict(params)
+                        )
+                        _failed = False
+                        return _direct
 
                 # Fetch FunctionDesc (cache or bootstrap round-trip, D-21).
                 # In WS_PENDING, _call_bootstrap sends LOGON+RFC_GET_FUNCTION_INTERFACE
@@ -3677,6 +3696,7 @@ class Connection:
                     with _fail_closed(self._session, func_name):
                         self._transport.send_message(frame)
                         response = self._transport.recv_message()
+                        self._last_server_duration_s = extract_server_duration(response)
                         result = parse_invoke_response(response, desc)
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
@@ -3696,13 +3716,29 @@ class Connection:
                         tlv_response = _join_response_frames(
                             self._transport.recv_message, func_name
                         )
+                        self._last_server_duration_s = extract_server_duration(tlv_response)
                         result = parse_invoke_response(tlv_response, desc, dm_names)
 
                 result = _convert_date_time_fields(result, desc)
+                _failed = False
                 return result
             except (OSError, EOFError) as exc:
                 raise CommunicationError(str(exc), original_exception=exc) from exc
             finally:
+                # Recorded on the failure path too: a view that counts only
+                # successes hides exactly the trend worth alerting on.
+                self.metrics.record(
+                    CallStats(
+                        func_name=func_name,
+                        duration_s=time.perf_counter() - _started,
+                        request_bytes=getattr(self._transport, "bytes_sent", 0) - _sent_before,
+                        response_bytes=(
+                            getattr(self._transport, "bytes_received", 0) - _received_before
+                        ),
+                        failed=_failed,
+                        server_duration_s=self._last_server_duration_s,
+                    )
+                )
                 # Only flip IN_CALL → READY; skip if state is WS_PENDING (auth failed
                 # before mark_in_call was ever called) or READY (post-exception cleanup).
                 if self._session.state is SessionState.IN_CALL:
