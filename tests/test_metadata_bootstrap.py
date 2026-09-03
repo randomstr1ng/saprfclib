@@ -134,3 +134,47 @@ def test_struct_layouts_are_cached_across_parameters() -> None:
     conn._call_bootstrap("BAPI_USER_GET_DETAIL")
     assert attempted, "structure parameters must trigger a layout lookup"
     assert len(attempted) == len(set(attempted)), "each DDIC type looked up once"
+
+
+def test_a_parameterless_interface_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    """RFC_PING has no parameters; an empty descriptor is correct for it.
+
+    The warning fired on the row count alone, so it cried wolf on every
+    parameterless function -- announcing that "the descriptor will be empty and
+    calls will reject all arguments" about a fetch that had worked perfectly. A
+    warning that fires on correct behaviour trains its reader to ignore it, which
+    costs the one time it matters.
+    """
+    import struct
+
+    from saprfclib.connection import _metadata_reply_succeeded
+    from saprfclib.invoke import tlv_record as tr
+
+    success = (
+        tr(0x0500, b"")
+        + tr(0x0503, b"")
+        + tr(0x0420, struct.pack(">I", 0))
+        + struct.pack(">HH", 0xFFFF, 0)
+    )
+    assert _metadata_reply_succeeded(success) is True
+
+
+def test_a_reply_that_did_not_succeed_still_warns() -> None:
+    """The complement: silencing the warning must not silence the real case."""
+    import struct
+
+    from saprfclib.connection import _metadata_reply_succeeded
+    from saprfclib.invoke import tlv_record as tr
+
+    # An exception marker means the fetch failed, however many rows came back.
+    exception = (
+        tr(0x0500, b"") + tr(0x0417, "001".encode("utf-16-le")) + struct.pack(">HH", 0xFFFF, 0)
+    )
+    assert _metadata_reply_succeeded(exception) is False
+
+    # A non-zero return code, likewise.
+    bad_rc = tr(0x0500, b"") + tr(0x0420, struct.pack(">I", 3)) + struct.pack(">HH", 0xFFFF, 0)
+    assert _metadata_reply_succeeded(bad_rc) is False
+
+    # And a reply carrying neither marker is not evidence of success.
+    assert _metadata_reply_succeeded(tr(0x0500, b"")) is False
