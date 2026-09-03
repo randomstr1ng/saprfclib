@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- DECFLOAT works over wRFC (#19). That issue asked for `DECF16`/`DECF34` support in the
+  wRFC ngrfc Q-markers; those Q-markers no longer exist, because the wRFC invoke turned
+  out to be a classic invoke TLV stream and the same codec now carries these types on
+  both transports. Verified by calling one function module over classic TCP and over
+  WebSocket and comparing all nine returned values — identical, in both directions. The
+  gap closed by the encoder becoming unnecessary rather than by being written.
+
 - The empty-descriptor warning no longer fires on parameterless functions. It keyed on
   the row count alone, so `RFC_PING` — which has no parameters — produced "the descriptor
   will be empty and calls will reject all arguments" after a fetch that had worked
