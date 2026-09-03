@@ -1210,24 +1210,50 @@ capture sends them single-byte. The two are not distinguishable by "are all byte
 width is detected per value from the interleaved-NUL pattern rather than assumed from the
 connection's Unicode flag.
 
-Two `[ASSUMED]` labels remain in `invoke.py`, both waiting on a capture that happens
-to contain the field. Neither affects correctness of the data an RFC call returns —
-they can only make an error message less complete than it could be.
+Both of the `[ASSUMED]` labels this section used to list are now settled, by a
+purpose-built function module raising one message with four distinct variables.
 
-| Tag | Assumed to be | Why it is unconfirmed |
-|-----|---------------|-----------------------|
-| `0x0412`–`0x0414` | Message variables V2–V4 | Only V1 (`0x0411`) has ever appeared. The three are inferred from V1 being `0x0411` and the numbering running consecutively. A capture of a `MESSAGE ... WITH` raising four variables would settle it. |
-| `0x040B` | Free-text exception message | Never observed in any capture. It predates the 7.52 work; `0x0402` is now the *confirmed* free-text tag, and the reader tries `0x040B` first only because removing an untested fallback is a change with no evidence behind it either. If a capture shows `0x040B` is something else, it should be dropped rather than relabelled. |
+| Tag | Was assumed to be | Outcome |
+|-----|-------------------|---------|
+| `0x0412`–`0x0414` | Message variables V2–V4 | **Confirmed.** `ALPHA1`, `BRAVO2`, `CHARLIE3`, `DELTA4` each landed in its own tag, in order. The values were distinct on purpose — four copies of one string would have parsed identically with the tags in any order. Fixture `exception_msg_variables_response.bin`. |
+| `0x040B` | Free-text exception message | **Disproven and removed.** A reply carrying a genuine four-variable message is exactly what would populate a free-text tag, and `0x040B` is absent from it. So is `0x0402`: kernel 793 sends no assembled text for a classic exception at all, leaving the client to build the sentence from class, number and variables. |
 
-Also captured but not parsed: the grammar of the `0x0418` call-stack breadcrumb.
+The `0x0418` call-stack breadcrumb is now parsed, though only for the `E=<n>` code
+inside it — that is where the number in issue #14 came from, and it had been
+hardcoded in three places rather than read. The rest of its grammar is still
+unparsed.
 
-### Binary TABLE descriptor layout (0x0302 / 0x0330) — PARTIALLY CONFIRMED
+### Binary TABLE descriptor layout (0x0302 / 0x0330) — CONFIRMED
 
-Captures confirm `0x0330` (4 bytes, purpose unknown), `0x0302` (8 bytes, containing row count
-and row width) and `0x0304` (fixed-width UTF-16LE row data). The exact byte positions of row
-count and row width inside the 8-byte `0x0302` value are inferred from pattern-matching across
-captures, not independently confirmed. Consequence: a wrong inference would produce a wrong row
-count or misaligned rows on binary TABLE parsing — visible immediately rather than silently.
+`0x0302` is 8 bytes: `[BE uint32 row width][BE uint32 row count]`. The order was
+previously inferred by pattern-matching and is now confirmed independently, from
+a single reply carrying two tables with different counts:
+
+| table | `0x0330` | `0x0302` | `0x0303` records that followed |
+|-------|----------|----------|-------------------------------|
+| `PARAMS` | `00000001` | `00000194 00000003` → 404, 3 | 3 |
+| `RESUMABLE_EXCEPTIONS` | `00000002` | `0000003e 00000000` → 62, 0 | 0 |
+
+Counts of 3 and 0 against 3 and 0 records settle which uint32 is which — a single
+table could not, since either reading fits one number. The widths match what the
+same reply declares for those fields (`uc-len 404` and `uc-len 62`), and `0x0330`
+is a per-table sequential id rather than an opaque four bytes.
+
+**The declared width is not always the transmitted record length.** In that same
+reply each `0x0303` record is **402** bytes where the width says 404. It matters
+because the two forms are read differently and only one of them may use the
+width:
+
+* uncompressed `0x0303` — each record is one row, so row boundaries come from
+  the records. Splitting the concatenated bytes by the declared width instead
+  would drift two bytes per row.
+* compressed `0x0305` — there are no per-row boundaries, so the width is the row
+  stride and is correct there: a 44-row `BAPI_USER_GET_DETAIL` interface
+  decompresses to exactly 17776 bytes, which is 44 × 404.
+
+`saprfclib` treats `0x0302` as informational when reading and takes rows from the
+records, so it is right in both cases; the note is here because the obvious
+simplification is wrong.
 
 ### Unsupplied optional CHANGING parameters — UNCONFIRMED
 

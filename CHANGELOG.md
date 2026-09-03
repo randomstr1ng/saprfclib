@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Three stale or unresolved entries in the protocol docs corrected.
+  - The table of remaining `[ASSUMED]` exception tags still listed `0x0412`–`0x0414` as
+    unconfirmed and `0x040B` as a tag worth trying, after the first were confirmed by
+    capture and the second was disproven and deleted. It also said `0x0418` was unparsed;
+    its `E=<n>` code is read now.
+  - `0x0302` is upgraded from "inferred by pattern-matching" to confirmed: one reply
+    carrying two tables with counts of 3 and 0, against 3 and 0 records, settles which
+    uint32 is width and which is count — a single table cannot, since either reading fits
+    one pair of numbers. `0x0330` is a per-table sequential id, not opaque bytes.
+  - Recorded that the declared row width is **not** the transmitted record length: the
+    same reply has 402-byte records under a declared 404. It is the right stride for the
+    compressed form (a 44-row interface decompresses to exactly 44 × 404) and the wrong
+    one for the uncompressed, where record boundaries are the rows. Splitting by width
+    everywhere would drift two bytes per row — misaligned strings rather than an error.
+- The last `[UNKNOWN]` marker is gone. `0x0501` is `0x01` in every LOGON captured and
+  absent from every other frame type — still unexplained, but "constant in all N
+  observations" is a different and more useful claim than "unknown".
+
 - DECFLOAT works over wRFC (#19). That issue asked for `DECF16`/`DECF34` support in the
   wRFC ngrfc Q-markers; those Q-markers no longer exist, because the wRFC invoke turned
   out to be a classic invoke TLV stream and the same codec now carries these types on
