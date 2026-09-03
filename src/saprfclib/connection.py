@@ -779,6 +779,24 @@ def _sap_lz4_frame(data: bytes) -> bytes:
     return b"\x34" + struct.pack("<II", len(data), len(block)) + block
 
 
+def _metadata_reply_succeeded(response: bytes) -> bool:
+    """Did a metadata reply report success, independently of how many rows it had?
+
+    An interface with no parameters is legal -- RFC_PING has none -- so an empty
+    PARAMS table proves nothing on its own. The reply says whether it worked:
+    0x0503 marks a result, 0x0417 marks an exception, and 0x0420 carries the
+    return code. Asking those separates "this function takes no arguments" from
+    "we could not read the answer", which a row count cannot.
+    """
+    tags = Session._parse_tlv(response)
+    if 0x0417 in tags:
+        return False
+    rc_raw = tags.get(0x0420)
+    if rc_raw is not None and len(rc_raw) == 4 and struct.unpack(">I", rc_raw)[0]:
+        return False
+    return 0x0503 in tags or 0x0420 in tags
+
+
 def _build_ws_invoke_frame(
     func_name: str,
     desc: FunctionDesc,
@@ -2549,14 +2567,15 @@ class Connection:
         raise_for_rfc_error(_strip_gw_header(response))
 
         rows = _parse_gfi_params_rows(response, unicode_mode=unicode_mode)
-        if not rows:
-            # A function module with no parameters at all is legal but rare, and it
-            # is indistinguishable here from a metadata response we failed to read.
-            # Either way the descriptor will be empty and every call will reject the
-            # caller's arguments, so say so rather than returning it silently.
+        if not rows and not _metadata_reply_succeeded(response):
+            # An empty PARAMS table is only worth reporting when the reply did not
+            # say it succeeded. A function module with no parameters is legal --
+            # RFC_PING has none -- so warning on the row count alone cried wolf on
+            # every parameterless function while saying its descriptor was broken.
             _logger.warning(
-                "no parameter rows parsed from the %s metadata response (%d bytes); "
-                "the descriptor will be empty and calls will reject all arguments",
+                "no parameter rows parsed from the %s metadata response (%d bytes), "
+                "and the reply carries no success marker; the descriptor will be "
+                "empty and calls will reject all arguments",
                 func_name.upper(),
                 len(response),
             )
@@ -4416,14 +4435,15 @@ class AsyncConnection:
         raise_for_rfc_error(_strip_gw_header(response))
 
         rows = _parse_gfi_params_rows(response, unicode_mode=unicode_mode)
-        if not rows:
-            # A function module with no parameters at all is legal but rare, and it
-            # is indistinguishable here from a metadata response we failed to read.
-            # Either way the descriptor will be empty and every call will reject the
-            # caller's arguments, so say so rather than returning it silently.
+        if not rows and not _metadata_reply_succeeded(response):
+            # An empty PARAMS table is only worth reporting when the reply did not
+            # say it succeeded. A function module with no parameters is legal --
+            # RFC_PING has none -- so warning on the row count alone cried wolf on
+            # every parameterless function while saying its descriptor was broken.
             _logger.warning(
-                "no parameter rows parsed from the %s metadata response (%d bytes); "
-                "the descriptor will be empty and calls will reject all arguments",
+                "no parameter rows parsed from the %s metadata response (%d bytes), "
+                "and the reply carries no success marker; the descriptor will be "
+                "empty and calls will reject all arguments",
                 func_name.upper(),
                 len(response),
             )

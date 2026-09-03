@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The empty-descriptor warning no longer fires on parameterless functions. It keyed on
+  the row count alone, so `RFC_PING` — which has no parameters — produced "the descriptor
+  will be empty and calls will reject all arguments" after a fetch that had worked
+  perfectly. A warning that fires on correct behaviour trains its reader to ignore it,
+  which costs the one time it matters. It now also checks whether the reply reported
+  success (`0x0503`/`0x0420`, and `0x0417` for an exception), which separates "this
+  function takes no arguments" from "we could not read the answer".
+
 - A parameterless function could not be called over wRFC. The bootstrap raised
   `AbapSystemFailure` whenever the metadata reply held no parameter rows — but `RFC_PING`
   has no parameters, so its interface legitimately has none, and the error reported
