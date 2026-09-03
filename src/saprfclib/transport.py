@@ -33,6 +33,7 @@ import struct
 from typing import cast
 
 from saprfclib.exceptions import SapRfcError
+from saprfclib.trace import RfcTrace
 
 __all__ = [
     "Transport",
@@ -208,19 +209,25 @@ class Transport:
     # above this before allocating or reading the payload.
     _MAX_FRAME_BYTES = 128 * 1024 * 1024
 
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(self, sock: socket.socket, *, trace: RfcTrace | None = None) -> None:
         self._sock = sock
         # Cumulative wire bytes, including the 4-byte NI length prefix, so the
         # figure matches what a packet capture would show rather than the
         # payload the RFC layer sees.
         self.bytes_sent = 0
         self.bytes_received = 0
+        # Optional trace writer. Attached at the transport rather than higher up
+        # so what lands in the file is what crossed the socket, not what some
+        # layer intended to send.
+        self.trace = trace
 
     def send_message(self, payload: bytes) -> None:
         """Send one NI-framed message (4-byte BE length prefix + payload)."""
         frame = build_ni_frame(payload)
         self._sock.sendall(frame)
         self.bytes_sent += len(frame)
+        if self.trace is not None:
+            self.trace.frame("Writing", payload)
 
     def recv_message(self) -> bytes:
         """Receive one NI-framed message; loop until complete (short-read guard).
@@ -236,6 +243,8 @@ class Transport:
             )
         payload = _recv_exactly(self._sock, length)
         self.bytes_received += _NI_HEADER_SIZE + len(payload)
+        if self.trace is not None:
+            self.trace.frame("Read", payload)
         raise_for_ni_error(payload)
         return payload
 
@@ -317,11 +326,14 @@ class AsyncTransport:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        *,
+        trace: RfcTrace | None = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self.bytes_sent = 0
         self.bytes_received = 0
+        self.trace = trace
 
     async def send_message(self, payload: bytes) -> None:
         """Send one NI-framed message (4-byte BE length prefix + payload).
@@ -331,6 +343,8 @@ class AsyncTransport:
         frame = _NI_HEADER.pack(len(payload)) + payload
         self._writer.write(frame)
         self.bytes_sent += len(frame)
+        if self.trace is not None:
+            self.trace.frame("Writing", payload)
         await self._writer.drain()
 
     async def recv_message(self) -> bytes:
@@ -350,6 +364,8 @@ class AsyncTransport:
             )
         payload = await self._reader.readexactly(length)
         self.bytes_received += _NI_HEADER_SIZE + len(payload)
+        if self.trace is not None:
+            self.trace.frame("Read", payload)
         raise_for_ni_error(payload)
         return payload
 
