@@ -237,6 +237,20 @@ Pre-1.0, so these land without a major bump, but they can surprise:
 
 ### Added
 
+- `RfcTrace` writes RFC trace files in the SAP SDK's format (#21), attachable to a
+  `Transport` or `AsyncTransport`. The point is diffability: comparing an SDK trace
+  against this library's traffic is what identified every defect behind #14, and doing it
+  then meant parsing the SDK's output by hand because there was nothing on this side to
+  compare with. The hook sits at the transport, so what lands in the file is what crossed
+  the socket rather than what some layer intended to send.
+  **Credentials are redacted, which the SDK's own traces are not.** A level-4 SDK trace
+  dumps the LOGON frame verbatim, and that frame carries tag `0x0117` — the password
+  scrambled with a seed travelling beside it, which is obfuscation rather than
+  encryption. An SDK trace is therefore a file the password can be recovered from; the
+  capture scripts written during #14 scrub them for that reason. `0x0117` values are
+  zeroed before anything is written, at unchanged length so every offset still lines up
+  with the real frame, and the file's own header says it has been redacted.
+
 - Tests for the metadata bootstrap — `_call_bootstrap` and `_call_struct_bootstrap`,
   which run before any first call to a function module and were the largest untested
   block in the tree. The reason was structural rather than accidental: nearly every

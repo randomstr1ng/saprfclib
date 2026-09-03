@@ -67,6 +67,7 @@ from saprfclib.stores import (
     UnitState,
     UnitStore,
 )
+from saprfclib.trace import RfcTrace
 from saprfclib.types import (
     RFC_CHANGING,
     RFC_EXPORT,
@@ -92,6 +93,8 @@ __all__ = [
     "AsyncConnection",
     "CallStats",
     "ConnectionMetrics",
+    "RfcTrace",
+    "RfcTrace",
     "PoolMetrics",
     "AsyncConnectionPool",
     "AsyncRfcServer",
