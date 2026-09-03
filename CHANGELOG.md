@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The wRFC LOGON sent a two-byte language code where the wire carries one. `connect()`
+  accepts a two-character ISO code and the builder used `lang.upper()`, so `"EN"` went
+  out as two bytes, the frame came to 240 against a working 238, and the server rejected
+  the logon without indicating which field was wrong. The classic logon path already
+  normalised this through `_encode_logon_language`; only the wRFC builder did not — a
+  helper in the same module is no protection if the new code does not call it. The frame
+  now matches a reference capture field for field, with only the session token and
+  password seed differing, as those are random per connection.
+- `_build_ws_logon_message` no longer accepts `server_host`, `server_port`, `sysnr` or
+  `local_port`, none of which appear in an accepted frame. They survived the rewrite
+  because both call sites splatted the stored auth dict wholesale, which is exactly how a
+  parameter comes to be accepted and ignored; the call sites now pass their arguments
+  explicitly.
+
 - `connect(read_timeout=...)` now reaches the WebSocket transport. It was accepted and
   silently dropped on that path: the value went to `socket.create_connection` as the
   *connect* budget and nothing applied it afterwards, so a caller who asked for a bounded

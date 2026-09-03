@@ -209,9 +209,6 @@ def _logon(**overrides: object) -> tuple[bytes, bytes]:
         "user": "DEVELOPER",
         "passwd": "s3cr3t-passw0rd",
         "client": "001",
-        "server_host": "host.example",
-        "server_port": 443,
-        "sysnr": "00",
     }
     kwargs.update(overrides)
     return _build_ws_logon_message(**kwargs)  # type: ignore[arg-type]
