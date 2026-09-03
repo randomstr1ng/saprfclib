@@ -88,6 +88,7 @@ from saprfclib.metadata import (
 )
 from saprfclib.session import ConnectionAttributes, Session, SessionState
 from saprfclib.stores import TidStore, UnitState, UnitStore
+from saprfclib.trace import RfcTrace
 from saprfclib.transport import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_READ_TIMEOUT,
@@ -3824,6 +3825,7 @@ def connect(
     ws_proxy_user: str | None = None,
     ws_proxy_pass: str | None = None,
     ws_tls_verify: bool = True,
+    trace: RfcTrace | None = None,
     snc_lib: str | None = None,
     snc_partnername: str | None = None,
     snc_myname: str | None = None,
@@ -3873,6 +3875,14 @@ def connect(
     superset of kwargs across differing SAP releases. Set True to raise ValueError
     instead — worth doing when a dropped argument would change the result, since the
     server has no way to tell you an argument never arrived.
+
+    ``trace`` attaches an :class:`~saprfclib.trace.RfcTrace`, which writes an
+    SDK-format trace file of every frame. It is a parameter rather than an
+    environment variable on purpose: the SDK reads ``RFC_TRACE`` from the
+    environment, but a process that starts writing traffic to disk because of a
+    variable it inherited is a surprise, and the file — though credential-redacted
+    — still contains everything else that crossed the wire. Turning it on should
+    be visible at the call site.
 
     The SAProuter and message-server wire formats were live-verified after this
     docstring first called them unverified: the NI_ROUTE payload is byte-exact
@@ -3970,6 +3980,7 @@ def connect(
             timeout=timeout,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
+            trace=trace,
         )
 
         # Step 1: NI version exchange on the plain inner transport.
@@ -4042,6 +4053,7 @@ def connect(
                 timeout=_timeout,
                 connect_timeout=_connect_timeout,
                 read_timeout=_read_timeout,
+                trace=trace,
             )
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
             if _saprouter is not None:

@@ -164,3 +164,65 @@ def test_a_transport_without_a_trace_is_unaffected() -> None:
     finally:
         a.close()
         b.close()
+
+
+def test_connect_accepts_a_trace_and_hands_it_to_the_transport(tmp_path: Path) -> None:
+    """The writer is useless if a caller cannot turn it on.
+
+    #21 asked for three things: the format, a writer, and a way to enable it.
+    The first two can be built and tested in isolation, which is exactly how the
+    third came to be missing -- everything passed while the feature was
+    unreachable from the public API.
+    """
+    import saprfclib
+    from saprfclib import connection as connection_mod
+
+    # connection.py imports connect_tcp into its own namespace, so patching the
+    # transport module would leave the real one in place and the spy would never
+    # be called -- an empty capture that looks exactly like the failure it is
+    # meant to detect.
+    captured: dict[str, object] = {}
+    real = connection_mod.connect_tcp
+
+    def spy(host: str, port: int, **kw: object) -> object:
+        captured.update(kw)
+        raise OSError("probe stops here; the argument has been observed")
+
+    connection_mod.connect_tcp = spy  # type: ignore[assignment]
+    try:
+        trace = RfcTrace(str(tmp_path / "rfc_connect.trc"))
+        try:
+            saprfclib.connect(
+                ashost="example.invalid",
+                sysnr=0,
+                client="001",
+                user="U",
+                passwd="p",
+                trace=trace,
+            )
+        except Exception:
+            pass  # the connection is not the point; the argument is
+        finally:
+            trace.close()
+    finally:
+        connection_mod.connect_tcp = real  # type: ignore[assignment]
+
+    assert captured.get("trace") is not None, (
+        "connect(trace=...) did not reach the transport, so tracing cannot be "
+        "switched on by a caller"
+    )
+
+
+def test_no_environment_variable_switches_tracing_on() -> None:
+    """Deliberately unlike the SDK, which reads RFC_TRACE from the environment.
+
+    A process that starts writing traffic to disk because of a variable it
+    inherited is a surprise, and the file -- credential-redacted though it is --
+    still holds everything else that crossed the wire. Enabling it should be
+    visible at the call site.
+    """
+    import saprfclib.trace as trace_mod
+
+    source = Path(trace_mod.__file__).read_text(encoding="utf-8")
+    assert "environ" not in source
+    assert "getenv" not in source
