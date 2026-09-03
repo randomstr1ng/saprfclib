@@ -251,3 +251,42 @@ def test_the_frame_is_238_bytes_for_the_reference_inputs() -> None:
         func_name="RFCPING",
     )
     assert len(frame) == 216
+
+
+def test_ping_and_attributes_complete_the_deferred_logon() -> None:
+    """A fresh wRFC connection used to refuse both.
+
+    connect() does the HTTP upgrade and defers the LOGON to the first call, so
+    the session sits in WS_PENDING. Calling ping() on it produced "operation not
+    allowed in state 'WS_PENDING'" -- a description of the library's own
+    bookkeeping, offering the caller nothing to act on. Asking to ping a
+    connection is a reasonable way to say "establish it", and on wRFC the LOGON
+    names RFCPING and the server runs it, so there is no extra round trip.
+
+    Asserted structurally: exercising it needs a live WebSocket endpoint, and
+    what must not regress is that both entry points reach the helper at all.
+    """
+    import inspect
+
+    from saprfclib.connection import Connection
+
+    for name in ("ping", "get_connection_attributes"):
+        src = inspect.getsource(getattr(Connection, name))
+        assert "_ensure_ws_session" in src, (
+            f"{name} does not complete a deferred wRFC LOGON, so it will refuse a "
+            f"connection that has not called yet"
+        )
+
+
+def test_ensure_ws_session_is_a_no_op_off_the_wrfc_path() -> None:
+    """It is called unconditionally, so it must not disturb anything else."""
+    from saprfclib.connection import Connection
+    from saprfclib.session import SessionState
+
+    from .test_connection import MockTransport, _handshake_responses
+
+    conn = Connection(MockTransport(_handshake_responses()))
+    conn._handshake(client="001", user="U", passwd="p")
+    assert conn._session.state is SessionState.READY
+    conn._ensure_ws_session()
+    assert conn._session.state is SessionState.READY

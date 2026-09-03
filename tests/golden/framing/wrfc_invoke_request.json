@@ -16,7 +16,7 @@
     "There is no wRFC-specific invoke format. This is a classic invoke TLV stream sent without a GW header, which is why the fix for issue #14's invoke path was a deletion rather than a new encoder.",
     "UTF-16LE, unlike the LOGON, which is single-byte. The LOGON is exchanged in codepage 1100 and the session moves to 4103 once established, so the asymmetry is deliberate.",
     "Carries no 0x5001 ngrfc record, no 0x0136 session key, and neither 0x0503 nor 0x0420 -- the last two are response markers, and the frame this replaced sent them in a request.",
-    "This is the second invoke of the session. The first frame after a LOGON -- the RFC_GET_FUNCTION_INTERFACE call -- additionally carries 0x0101, 0x0103, 0x0106 and 0x0514 ahead of these records. [ASSUMED] that a plain invoke may be the first frame after a LOGON without that prefix; the reference never does it, so it is untested."
+    "This is the second invoke of the session. The first frame after a LOGON -- the RFC_GET_FUNCTION_INTERFACE call -- additionally carries 0x0101, 0x0103, 0x0106 and 0x0514 ahead of these records. A plain invoke without that prefix IS accepted as the first frame after a LOGON: saprfclib's builtin-descriptor path sends exactly that for STFC_CONNECTION and the call completes, returning the echoed value. So the prefix is what the reference happens to send on its metadata fetch, not a requirement of the first frame."
   ],
   "field_annotations": [
     {

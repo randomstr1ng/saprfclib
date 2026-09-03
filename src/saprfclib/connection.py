@@ -2985,6 +2985,47 @@ class Connection:
         attrs = self._session.attributes
         return attrs.sys_id if attrs is not None else None
 
+    def _ensure_ws_session(self) -> None:
+        """Complete the deferred wRFC LOGON, if it has not happened yet.
+
+        A wRFC connection does the HTTP upgrade in ``connect()`` and defers the
+        LOGON to the first call, so it sits in WS_PENDING until something needs
+        the session. That is a reasonable design and a poor one to expose: a
+        caller who opened a connection and asked to ``ping()`` it got
+        ``operation not allowed in state 'WS_PENDING'``, which describes the
+        library's internal bookkeeping rather than anything they did wrong, and
+        offers no way forward.
+
+        The LOGON names RFCPING in its own 0x0102 and the server runs it, so
+        completing the session here is itself the liveness check ``ping()`` was
+        asking for -- there is no extra round trip.
+
+        No-op on any other transport or state, so callers can invoke it
+        unconditionally.
+        """
+        if not self._is_ws() or self._session.state is not SessionState.WS_PENDING:
+            return
+        auth = self._ws_auth or {}
+        logon_msg, session_token = _build_ws_logon_message(
+            func_name="RFCPING",
+            user=auth["user"],
+            passwd=auth["passwd"],
+            client=auth["client"],
+            lang=auth["lang"],
+            local_ip=auth["local_ip"],
+        )
+        self._ws_session_token = session_token
+        with _fail_closed(self._session, "RFCPING"):
+            self._transport.send_message(logon_msg)
+            logon_resp = self._transport.recv_message()
+            attrs_ws = _ws_parse_logon_response(logon_resp)
+            failure = _ws_logon_failure(logon_resp)
+        if failure is not None:
+            if attrs_ws and attrs_ws.sys_id:
+                self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
+            raise failure
+        self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
+
     def get_connection_attributes(self) -> ConnectionAttributes:
         """Return the negotiated ConnectionAttributes (populated at READY, TRANS-07).
 
@@ -2992,6 +3033,10 @@ class Connection:
         """
         if self._async_conn is not None:
             return self._async_conn.get_connection_attributes()
+        # On wRFC the attributes only exist once the LOGON has run, and the LOGON
+        # is deferred. Asking for them is a reasonable way to say "establish the
+        # session", so do that rather than reporting an internal state.
+        self._ensure_ws_session()
         attrs = self._session.attributes
         if attrs is None:
             raise ValueError("connection is not in READY state")
@@ -3397,6 +3442,11 @@ class Connection:
         if self._async_conn is not None and self._loop_thread is not None:
             return bool(self._loop_thread.run(self._async_conn.ping()))
         with self._lock:
+            # On wRFC this both establishes the session and answers the question:
+            # the LOGON names RFCPING and the server runs it.
+            if self._is_ws() and self._session.state is SessionState.WS_PENDING:
+                self._ensure_ws_session()
+                return True
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:

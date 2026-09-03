@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ping()` and `get_connection_attributes()` no longer refuse a fresh wRFC connection.
+  `connect()` does the HTTP upgrade and defers the LOGON to the first call, so the
+  session sat in `WS_PENDING` and both raised `operation not allowed in state
+  'WS_PENDING'` — a description of the library's own bookkeeping that gave the caller
+  nothing to act on. Both now complete the deferred LOGON, which on wRFC costs no extra
+  round trip: the LOGON names `RFCPING` in its `0x0102` and the server runs it, so
+  establishing the session *is* the liveness check.
+
 - `ConnectionMetrics` recorded nothing on the wRFC and SNC paths. Call stats were
   collected only in `AsyncConnection.call`, which classic TCP delegates to; the other two
   transports run `Connection.call` directly, so metrics on either reported zero calls
