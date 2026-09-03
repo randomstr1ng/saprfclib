@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `connect(read_timeout=...)` now reaches the WebSocket transport. It was accepted and
+  silently dropped on that path: the value went to `socket.create_connection` as the
+  *connect* budget and nothing applied it afterwards, so a caller who asked for a bounded
+  read got an unbounded one. A server that stopped answering then blocked them forever
+  with no way to tell a slow reply from a dead connection. The default stays `None`,
+  matching the classic transport — an RFC call may legitimately run for hours, so the fix
+  is that a caller *can* bound it, not that one is imposed.
+
 - **The wRFC LOGON frame is rebuilt to a shape the server accepts (#14).** Replaying a
   reference client's LOGON from this library's own transport was accepted, which
   localised the entire fault to the frame — the HTTP upgrade, the WebSocket layer and the

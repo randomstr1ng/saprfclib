@@ -52,6 +52,7 @@ from wsproto.events import (
 )
 
 from saprfclib.exceptions import CommunicationError, WebSocketError
+from saprfclib.transport import DEFAULT_READ_TIMEOUT
 
 __all__ = ["WsTransport", "connect_ws"]
 
@@ -562,6 +563,7 @@ def connect_ws(
     sap_client: str | None = None,
     lang: str = "EN",
     timeout: float | None = None,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
     ws_ping_interval: float = 60.0,
     ca_bundle: str | None = None,
     client_cert: str | None = None,
@@ -575,6 +577,18 @@ def connect_ws(
     SAP-specific headers (sap-client, sap-rfcpro-suppvers, etc.) + optional HTTP
     Basic auth, Sec-WebSocket-Accept validation and single-redirect handling (D-16
     steps 4-5) → a WsTransport over masked binary frames with ping/pong keepalive.
+
+    ``timeout`` bounds the connect and the upgrade; ``read_timeout`` bounds every
+    read afterwards and is applied once the handshake is done. They are separate
+    because a slow connect and a slow RFC call want very different limits: the
+    default read timeout is ``None``, matching the classic transport, because an
+    RFC call may legitimately run for hours and a library that cut it off at sixty
+    seconds would be unusable.
+
+    Before this existed, ``connect(read_timeout=...)`` had no effect at all on a
+    WebSocket connection -- the value was accepted and silently dropped, so a
+    caller who asked for a bounded read got an unbounded one and a server that
+    stopped answering blocked them forever.
 
     Security (T-07-PROXY-CRED / T-07-CRED): ``ws_proxy_pass`` and ``passwd`` are
     used only to build Basic auth tokens and are NEVER logged or embedded in
@@ -635,6 +649,8 @@ def connect_ws(
     # are fed in as trailing_data so no frame is lost.
     ws_conn = Connection(ConnectionType.CLIENT, trailing_data=leftover or b"")
 
+    # Switch from the connect budget to the read budget now the handshake is done.
+    tls_sock.settimeout(read_timeout)
     return WsTransport(
         tls_sock,
         ws_conn,

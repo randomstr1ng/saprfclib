@@ -71,3 +71,46 @@ def test_the_log_record_survives_warnings_being_silenced() -> None:
         logger.removeHandler(handler)
 
     assert seen, "warnings were silenced and nothing was left to say verification was off"
+
+
+def test_read_timeout_reaches_the_websocket_socket() -> None:
+    """connect(read_timeout=...) used to be accepted and dropped on this path.
+
+    The value went to socket.create_connection as the *connect* budget and
+    nothing applied it afterwards, so a caller who asked for a bounded read got
+    an unbounded one. A server that stopped answering then blocked them forever,
+    which is what happened when a wRFC LOGON drew silence: the probe hung with no
+    way to tell a slow reply from a dead one.
+
+    Asserted at the seam rather than end to end, since opening a real WebSocket
+    needs a live endpoint.
+    """
+    import inspect
+
+    from saprfclib import connect
+    from saprfclib.ws import connect_ws
+
+    assert "read_timeout" in inspect.signature(connect_ws).parameters
+    # And it must actually be forwarded, not merely accepted.
+    src = inspect.getsource(connect)
+    call = src[src.index("connect_ws(") :]
+    call = call[: call.index(")")]
+    assert "read_timeout=read_timeout" in call, (
+        "connect() accepts read_timeout but does not pass it to the WebSocket transport"
+    )
+
+
+def test_the_read_timeout_default_matches_the_classic_transport() -> None:
+    """None, deliberately.
+
+    An RFC call may legitimately run for hours, so a library that cut reads off
+    at some convenient number would be unusable for the calls that matter most.
+    The point of the fix is that a caller *can* bound it, not that one is imposed.
+    """
+    import inspect
+
+    from saprfclib.transport import DEFAULT_READ_TIMEOUT
+    from saprfclib.ws import connect_ws
+
+    assert DEFAULT_READ_TIMEOUT is None
+    assert inspect.signature(connect_ws).parameters["read_timeout"].default is DEFAULT_READ_TIMEOUT

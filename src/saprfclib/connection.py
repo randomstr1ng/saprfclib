@@ -4491,6 +4491,7 @@ def connect(
             sap_client=client,
             verify=ws_tls_verify,
             timeout=timeout,
+            read_timeout=read_timeout,
         )
         conn = Connection(
             transport,  # type: ignore[arg-type]
