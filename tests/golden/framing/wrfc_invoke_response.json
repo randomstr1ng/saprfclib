@@ -1,0 +1,129 @@
+{
+  "message_type": "WRFC_INVOKE_RESPONSE",
+  "capture_source": "live capture 2026-09-03; SAP A4H kernel 793. Successful STFC_CONNECTION reply over WebSocket RFC. Sanitised: the RESPTEXT value, which reports the system id, date, time and logon data, is replaced with a same-width string so every offset and length stays valid.",
+  "evidence": "parse_invoke_response reads it without modification, returning ECHOTEXT='probe' -- the value sent in wrfc_invoke_request.bin",
+  "expected_parse": {
+    "ECHOTEXT": "probe",
+    "return_code": 0,
+    "raises": null
+  },
+  "notes": [
+    "A wRFC response is a classic response TLV stream without the GW header, so the classic parser reads it. That is the counterpart to the request finding: neither direction needed a wRFC-specific codec.",
+    "0x0503 present and 0x0417 absent with 0x0420 zero is the success shape documented in framing.md.",
+    "0x0514 echoes the session token the client proposed in its LOGON."
+  ],
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 6,
+      "name": "call_end_marker",
+      "value": "0500 0000",
+      "type": "variable",
+      "note": "tag 0x0500 len=0"
+    },
+    {
+      "offset": 6,
+      "length": 6,
+      "name": "success_marker",
+      "value": "0503 0000",
+      "type": "variable",
+      "note": "tag 0x0503 len=0"
+    },
+    {
+      "offset": 12,
+      "length": 22,
+      "name": "session_token",
+      "value": "0514 0010",
+      "type": "variable",
+      "note": "tag 0x0514 len=16"
+    },
+    {
+      "offset": 34,
+      "length": 10,
+      "name": "return_code",
+      "value": "0420 0004",
+      "type": "variable",
+      "note": "tag 0x0420 len=4"
+    },
+    {
+      "offset": 44,
+      "length": 6,
+      "name": "marker",
+      "value": "0512 0000",
+      "type": "variable",
+      "note": "tag 0x0512 len=0"
+    },
+    {
+      "offset": 50,
+      "length": 22,
+      "name": "exporting_declaration",
+      "value": "0205 0010",
+      "type": "variable",
+      "note": "tag 0x0205 len=16, 'ECHOTEXT'"
+    },
+    {
+      "offset": 72,
+      "length": 22,
+      "name": "exporting_declaration",
+      "value": "0205 0010",
+      "type": "variable",
+      "note": "tag 0x0205 len=16, 'RESPTEXT'"
+    },
+    {
+      "offset": 94,
+      "length": 22,
+      "name": "param_name",
+      "value": "0201 0010",
+      "type": "variable",
+      "note": "tag 0x0201 len=16, 'ECHOTEXT'"
+    },
+    {
+      "offset": 116,
+      "length": 516,
+      "name": "param_value",
+      "value": "0203 01fe",
+      "type": "variable",
+      "note": "tag 0x0203 len=510, 'probe'"
+    },
+    {
+      "offset": 632,
+      "length": 22,
+      "name": "param_name",
+      "value": "0201 0010",
+      "type": "variable",
+      "note": "tag 0x0201 len=16, 'RESPTEXT'"
+    },
+    {
+      "offset": 654,
+      "length": 516,
+      "name": "param_value",
+      "value": "0203 01fe",
+      "type": "variable",
+      "note": "tag 0x0203 len=510, 'SAP R/3 Rel. 758   Sysid: TST      Date: 20260101   Time: 000000   Log'"
+    },
+    {
+      "offset": 1170,
+      "length": 86,
+      "name": "program",
+      "value": "0130 0050",
+      "type": "variable",
+      "note": "tag 0x0130 len=80, 'SAPLSTFC'"
+    },
+    {
+      "offset": 1256,
+      "length": 14,
+      "name": "server_duration_us",
+      "value": "0667 0008",
+      "type": "variable",
+      "note": "tag 0x0667 len=8"
+    },
+    {
+      "offset": 1270,
+      "length": 4,
+      "name": "terminator",
+      "value": "ffff0000",
+      "type": "fixed",
+      "note": "end of stream"
+    }
+  ]
+}

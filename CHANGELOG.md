@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The wRFC invoke is verified against a call that actually completed. Fixtures
+  `wrfc_invoke_request.bin` / `wrfc_invoke_response.bin` are a reference client's
+  `STFC_CONNECTION` exchange, and `build_invoke_request` produces the request **byte for
+  byte** — 648 bytes — while `parse_invoke_response` reads the reply unmodified and
+  returns `ECHOTEXT='probe'`. Neither direction needed a wRFC-specific codec.
+
 - **The wRFC invoke frame is a classic invoke TLV stream (#14).** There is no
   wRFC-specific invoke format — a reference client's invoke over WebSocket is
   byte-for-byte what `build_invoke_request` already produced for classic RFC, so the fix
