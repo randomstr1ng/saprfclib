@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Removed the ngrfc/Q-marker subsystem — 17 functions and about 700 lines — now that the
+  wRFC invoke is a classic invoke TLV stream. It was unreachable from production and kept
+  alive only by its own tests, which is the worst state for code encoding a *disproven*
+  protocol shape: anyone looking for "the wRFC invoke builder" would have found
+  `_build_ws_invoke_message` and reached for the wrong thing. Gone with it: the `0x5001`
+  header constants, the ngrfc type map, and the `0x0136` session key and its counter,
+  which belonged to a frame the server rejects.
+  The tests went with their subject rather than being retargeted — 13 in
+  `test_wrfc_encoding.py`, all of `test_wrfc_invoke.py`, and a 28-test section of
+  `test_connection.py`. Tests for the still-live LOGON builder are kept, and the one
+  guarding the session-token/invoke-key conflation now asserts that machinery stays
+  deleted. Coverage floor raised to 78.5.
+
 - `ping()` and `get_connection_attributes()` no longer refuse a fresh wRFC connection.
   `connect()` does the HTTP upgrade and defers the LOGON to the first call, so the
   session sat in `WS_PENDING` and both raised `operation not allowed in state

@@ -49,7 +49,6 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from saprfclib.compress import DecompressError, sap_lz4_frame_decompress
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
@@ -243,30 +242,6 @@ _WS_TLV_CP = bytes.fromhex("04010003000a0200000023")  # 0x0106: wRFC codepage
 # Byte[2] distinguishes schema-only vs value-carrying frames (pcap-verified):
 #   0x03 = schema only (T/K markers, no Q_SCALAR values) — frames 226/229
 #   0x02 = value-carrying (Q_SCALAR or TABLE_Q markers present) — frame 233
-_WS_5001_HDR = bytes.fromhex("2448030300410300230040200000")  # schema-only (byte[2]=0x03)
-_WS_5001_HDR_WITH_VALS = bytes.fromhex(
-    "2448020300410300230040200000"
-)  # with Q-markers (byte[2]=0x02)
-# INVOKE: V1 mode + LZ4 send (bytes[10-11]=0x4060 LE → 0x6040).
-# Body must be wrapped with _sap_lz4_frame(); server will use the LZ4 decompressor.
-_WS_5001_HDR_INVOKE = bytes.fromhex("2448030300410300230040600000")
-
-# 0x0104: SDK environment block (250B) — present in every client frame in reference pcap
-# (frames 225/229/233/237/241). Content encodes SDK version (780), OS (Linux), MF, and
-# network attributes including IP addresses from the reference environment (192.168.66.x).
-# We send this pcap reference value in all invoke frames. Server appears to use it for
-# informational purposes only; IP/version mismatch has not caused rejection in live tests.
-# GAP-0104: generating an environment-correct 0x0104 requires further RE. For now the pcap
-# reference bytes are sufficient to satisfy the server's frame-validation pass.
-_WS_TLV_0104_PCAP_REF = bytes.fromhex(
-    "100402000c000187680000044c0000138910040b0020ef7ffe2ddab737f674087e9325971597ef"
-    "f2bf8f4f71ff9f8e37261b000000001004040008001700080012000810040d001000000027000000"
-    "eb00000031000000eb1004160002000c100417000200201004190002000010041e000800000382000"
-    "0075c10042500020002100409000337383010042b00054c696e757810042c00024d46100424000800"
-    "00085000000f0010042800080000078900000ef010042a00080000081c00000ef010041300340367"
-    "05bf5405f70f07e1000000c0a84234016705926005ed0f04e1000000c0a8423400670593d005ed0f"
-    "04e1000000c0a8423400"
-)
 
 # NG RFC V2 RFCTYPE → NGRFC_TYPE mapping ( the type mapping, V2 path)
 _NGRFC_TYPE_V2: dict[int, int] = {
@@ -677,18 +652,6 @@ _V1_TYPE_PREFIX: dict[int, bytes] = {
 }
 
 
-def _v1_type_name(rfctype: int, nuc_length: int) -> bytes:
-    """Return D-block \\TYPE= name for a scalar CHAR-like field.
-
-    Pcap-verified pattern: \\TYPE=CHAR30 for CHAR30, \\TYPE=DATS for DATE.
-    LENGTH is appended for variable-width types (CHAR, NUM).
-    """
-    prefix = _V1_TYPE_PREFIX.get(rfctype, b"\\TYPE=CHAR")
-    if rfctype in (0, 6):
-        return prefix + str(nuc_length).encode("ascii")
-    return prefix  # DATE/TIME: fixed name, no length suffix
-
-
 # protocol analysis confirmed V1 format markers (ngrfcSerializeParams):
 #   T(0x54) = schema activation (EXPORT/CHANGING/TABLES params, direction & 2 != 0)
 #   Q(0x51) = caller-supplied value (IMPORT/CHANGING/TABLES with data)
@@ -737,36 +700,6 @@ def _make_wrfc_builtin_descs() -> dict[str, FunctionDesc]:
 _WRFC_BUILTIN_DESCS: dict[str, FunctionDesc] = _make_wrfc_builtin_descs()
 
 
-def _v1_encode_char_value(value: str, nuc_length: int, uc_length: int) -> bytes:
-    """Encode one CHAR/DATE/TIME/NUM value for V3 fast-serializer (HDR byte[2]=0x03) Q-markers.
-
-    protocol analysis NgRfcTypeSerializer::serialize<RFCTYPE_CHAR> confirmed:
-      Unicode connection (wRFC target is always Unicode): flag[0x10]=0 → UC trimmed mode.
-        uc_length ≤ 9: 'O' (0x4F) + value padded to nuc_length chars in UTF-16-LE.
-                      Server reads exactly uc_length bytes (column_meta.length from D-block).
-        uc_length > 9: 'C' (0x43) + LE uint16(trimmed_UC_bytes, NO 0x8000) + UTF-16-LE stripped.
-                      SDK: getTrimEndLength(uc_data, char_count, space=0x20) * 2 → blen.
-                      Server reads min(blen, TypeDesc.field_len) UC bytes from stream.
-                      Sending blen=510 (full padded UC) hangs: if TypeDesc.field_len=255 (NUC),
-                      min(510,255)=255, leaving 255 leftover bytes that corrupt next parse.
-                      Sending blen=0x8000+NUC hangs: V3 parser reads raw int2=0x8004=32772 → block.
-                      Sending blen=trimmed_UC_bytes (<= nuc_length): min(blen, 255 or 510)=blen → ✓.
-
-      NUC connection (V2 subsequent invokes): flag[0x10]=1, uses 0x8000+NUC (NOT used here).
-    """
-    if uc_length <= _V1_CHAR_THRESHOLD_UC:
-        padded = value[:nuc_length].ljust(nuc_length)
-        return b"\x4f" + padded.encode("utf-16-le")
-    stripped = value[:nuc_length].rstrip()
-    if uc_length > 0x3333:
-        # Large field: the field serializer case 0 sbb formula → compMode='S' when
-        # arg3 (=uc_length) > 0x3333; falls through to the string serializer which
-        # converts UTF-16LE→UTF-8 in chunks. We convert Python str→UTF-8 directly.
-        return b"\x53" + _v1_stringlike_chunks(stripped.encode("utf-8"))
-    uc_bytes = stripped.encode("utf-16-le")
-    return b"\x43" + struct.pack("<H", len(uc_bytes)) + uc_bytes
-
-
 _V1_COL_NAME = b"TABLE_LINE"
 
 # Pcap-verified (frame 233): both DATA (1 col) and FIELDS (5 cols) TABLE Q-markers use this
@@ -776,111 +709,7 @@ _V1_TABLE_QMARKER_TNAME = bytes.fromhex(
 )  # b"\\TYPE=%_T00004S00000000O0000037072"
 
 
-def _v1_table_q_marker(name_b: bytes, table_idx: int) -> bytes:
-    """Build TABLE Q-marker for an IMPORT/TABLES param that sends table data.
-
-    Wire layout (protocol analysis the parameter serializer → serializeTable → the metadata serializer):
-      0x51 + name_len(1B) + name        [Q-marker from the parameter serializer]
-      0x4b                               [K-marker from the metadata serializer, isFirstRow=1]
-      (col_count | 0xD000) LE(2B)       [col_count=0 → 0xD000; the metadata serializer]
-      table_idx LE(2B)                   [delta-manager table ID; the metadata serializer]
-      tname_len(1B) + tname              [type name via the name serializer;]
-
-    Used for IMPORT/TABLES TABLE params where the client provides (possibly empty) table data.
-    EXPORT TABLE params use a T-marker only (no Q, no K) — see _build_ngrfc_params.
-    """
-    tname = _V1_TABLE_QMARKER_TNAME
-    return (
-        b"\x51"
-        + bytes([len(name_b)])
-        + name_b
-        + b"\x4b\x00\xd0"
-        + struct.pack("<H", table_idx)
-        + bytes([len(tname)])
-        + tname
-    )
-
-
-def _v1_q_marker(name_b: bytes, uc_length: int, encoded_value: bytes, type_name: bytes) -> bytes:
-    """Build one V1 Q-marker for a CHAR-UC scalar import param (pcap-verified).
-
-    Wire layout confirmed by pcap frame 233 (RFC_READ_TABLE QUERY_TABLE / DELIMITER):
-      0x51 + name_len(1B) + name
-      0x44                           D-block marker
-      0x01 0x50                      writeInt2(0x5001) LE — structure path, ncols=1|0x5000
-      type_name_len(1B) + type_name  (e.g. \\TYPE=CHAR255)
-      0x06                           ngrfc_type=6 (CHAR UC)
-      uc_length_LE(2B)               field_len
-      col_name_len(1B) + col_name    "TABLE_LINE" — pcap-verified for all CHAR import params
-      [encoded_value]                compMode + value
-    """
-    type_block = (
-        b"\x44\x01\x50"
-        + bytes([len(type_name)])
-        + type_name
-        + b"\x06"
-        + struct.pack("<H", uc_length)
-        + bytes([len(_V1_COL_NAME)])
-        + _V1_COL_NAME
-    )
-    return b"\x51" + bytes([len(name_b)]) + name_b + type_block + encoded_value
-
-
-def _v1_q_block(
-    name_b: bytes,
-    type_name: bytes,
-    ngrfc_type: int,
-    field_len: int | None,
-    encoded_value: bytes,
-    decimals: int | None = None,
-) -> bytes:
-    """Build a V1 Q-marker for any scalar IMPORT param type.
-
-    Generalises _v1_q_marker to all rfctypes.  D-block format (protocol analysis
-    the single-type metadata serializer; pcap-verified for CHAR):
-
-      0x44 0x01 0x50           D-marker + ncols=1|0x5000 LE
-      type_name_LV             1B len + ABAP type descriptor (\\TYPE=INT4 etc.)
-      ngrfc_type(1B)           from the type mapping
-      [field_len LE(2B)]       absent for ngrfc_type ≤ 4 (INT1/INT2/INT/INT8)
-      [decimals(1B)]           BCD (ngrfc_type=9) only: decimal places
-      TABLE_LINE_LV            col name — scalar IMPORT params always use TABLE_LINE
-
-    field_len=None means no field_len bytes in D-block (ngrfc_type ≤ 4).
-    """
-    type_desc = bytes([ngrfc_type])
-    if field_len is not None:
-        type_desc += struct.pack("<H", field_len)
-        if decimals is not None:
-            type_desc += bytes([decimals])
-    d_block = (
-        b"\x44\x01\x50"
-        + bytes([len(type_name)])
-        + type_name
-        + type_desc
-        + bytes([len(_V1_COL_NAME)])
-        + _V1_COL_NAME
-    )
-    return b"\x51" + bytes([len(name_b)]) + name_b + d_block + encoded_value
-
-
 # ngrfc_type values for Unicode (wRFC) mode — protocol analysis
-_V1_NGT: dict[int, int] = {
-    0: 6,  # CHAR → CHAR_UC
-    1: 12,  # DATE → DATE_UC
-    2: 9,  # BCD
-    3: 14,  # TIME → TIME_UC
-    4: 23,  # BYTE (type X)
-    6: 8,  # NUM  → NUMC_UC
-    7: 19,  # FLOAT (FLTP, 0x13)
-    8: 3,  # INT4
-    9: 2,  # INT2
-    10: 1,  # INT1
-    29: 24,  # STRING (0x18)
-    30: 25,  # XSTRING (0x19)
-    31: 4,  # INT8
-    32: 29,  # UTCLONG (0x1d) — protocol analysis case 0x20
-}
 
 # D-block type_name strings per rfctype (ABAP internal type descriptors).
 # Length suffix appended for variable-width types (CHAR, NUMC, P, X).
@@ -903,368 +732,6 @@ _V1_TNAME_PREFIX: dict[int, bytes] = {
     4: b"\\TYPE=X",  # → \\TYPE=X4
     6: b"\\TYPE=NUMC",  # → \\TYPE=NUMC10
 }
-
-
-def _v1_tname(rfctype: int, nuc_length: int) -> bytes:
-    if rfctype in _V1_TNAME_FIXED:
-        return _V1_TNAME_FIXED[rfctype]
-    return _V1_TNAME_PREFIX[rfctype] + str(nuc_length).encode()
-
-
-def _v1_enc_int(value: int, width: int, signed: bool) -> bytes:
-    """compMode 'N' (0x4E) + LE fixed-width integer.
-
-    the field serializer INT4: writeByte(0x4E) then 4B LE signed.
-    """
-    fmt = {(1, False): "B", (2, True): "h", (4, True): "i", (8, True): "q"}
-    return b"\x4e" + struct.pack("<" + fmt[(width, signed)], int(value))
-
-
-def _v1_enc_struct_field(fd: FieldDesc, value: Any) -> bytes:
-    """Encode one field value for a STRUCTURE body (compMode + encoded_value).
-
-    protocol analysis: dispatch on ngrfc_type, write compMode byte then value.
-    protocol analysis: initial-value path writes 0x49 ('I'); non-initial calls
-    the field serializer.  We always write the full value (no 'I' optimization) — safe and simpler.
-
-    Field types handled: all rfctypes that can appear inside an ABAP structure.
-    """
-    rt = fd.rfctype
-    if rt in (0, 1, 3, 6):  # CHAR, DATE, TIME, NUM — UC char encoding
-        return _v1_encode_char_value(
-            str(value) if value is not None else "", fd.nuc_length, fd.uc_length
-        )
-    if rt in (8, 9, 10, 31):  # INT4, INT2, INT1, INT8
-        _cfg = {8: (4, True), 9: (2, True), 10: (1, False), 31: (8, True)}
-        width, signed = _cfg[rt]
-        return _v1_enc_int(int(value) if value is not None else 0, width, signed)
-    if rt == 7:  # FLOAT
-        return b"\x4e" + struct.pack("<d", float(value) if value is not None else 0.0)
-    if rt == 2:  # BCD (TYPE P)
-        from decimal import Decimal
-
-        v = value if value is not None else Decimal(0)
-        return _v1_enc_bcd(v, fd.nuc_length, fd.decimals)
-    if rt == 4:  # BYTE (TYPE X)
-        raw = value.encode("utf-8") if isinstance(value, str) else bytes(value or b"")
-        raw = raw[: fd.nuc_length].ljust(fd.nuc_length, b"\x00")
-        return b"\x4e" + raw
-    if rt == 29:  # STRING
-        return _v1_enc_string(str(value) if value is not None else "")
-    if rt == 30:  # XSTRING
-        raw = value.encode("utf-8") if isinstance(value, str) else bytes(value or b"")
-        return _v1_enc_xstring(raw)
-    if rt == 32:  # UTCLONG — the field serializer case 0x20 → INT8 path (compMode=0x4e + int64LE)
-        return _v1_enc_int(int(value) if value is not None else 0, 8, True)
-    raise NotImplementedError(
-        f"STRUCTURE field rfctype={rt} ({fd.name!r}) not supported in V1 Q-marker"
-    )
-
-
-def _v1_q_struct(name_b: bytes, fd: FieldDesc, value: dict[str, object]) -> bytes:
-    """Build V1 Q-marker for STRUCTURE (rfctype=0x11) IMPORT param.
-
-    Wire layout (protocol analysis the metadata serializer, the column metadata serializer,
-    the data serializer, the field serializer):
-
-      0x51 + name_len(1B) + name          Q-marker (the parameter serializer)
-      0x44                                D marker (the metadata serializer writeByte)
-      (n_fields | 0x5000) LE(2B)          writeInt2 normal path (n_fields <= 0xffe)
-      struct_tname_LV                     the name serializer(struct type name) — 0x00 if unknown
-      Per-field metadata (the column metadata serializer):
-        ngrfc_type(1B)                    the single-type metadata serializer
-        [field_len LE(2B)]                absent for ngrfc_type <= 4 (INT types)
-        [decimals(1B)]                    BCD only (ngrfc_type == 9)
-        field_name_LV                     the name serializer(field_name), UTF-8 LV
-      Per-field values (the data serializer field loop):
-        compMode(1B) + encoded_value      the field serializer result (never 'I' optimization)
-    """
-    td = fd.type_desc
-    if td is None:
-        raise ValueError(f"STRUCTURE param {name_b!r} has no type_desc — cannot serialize")
-
-    fields = td.fields
-    n_fields = len(fields)
-
-    # D-block header: D + int16LE(n_fields | 0x5000) + struct_type_name_LV
-    d_block = bytearray()
-    d_block.append(0x44)
-    d_block += struct.pack("<H", (n_fields | 0x5000) & 0xFFFF)
-    # Struct type name: write empty LV (0x00) — we don't have the DDIC type name.
-    # the name serializer writes 0 bytes for empty string; 0x00 is the well-formed LV
-    # equivalent (length=0) that the server can safely skip.
-    d_block.append(0x00)
-
-    # Per-field metadata
-    for fld in fields:
-        rt = fld.rfctype
-        ngt = _V1_NGT.get(rt)
-        if ngt is None:
-            raise NotImplementedError(
-                f"STRUCTURE field {fld.name!r} rfctype={rt} has no ngrfc_type mapping"
-            )
-        d_block.append(ngt)
-        if ngt > 4:  # the single-type metadata serializer: write field_len for non-INT types
-            field_len = fld.uc_length if fld.unicode_mode else fld.nuc_length
-            d_block += struct.pack("<H", field_len)
-            if ngt == 9:  # BCD: also write decimals
-                d_block.append(fld.decimals)
-        # field name LV (ASCII/UTF-8)
-        fname_b = fld.name.encode("ascii")
-        d_block += _ngrfc_write_lv(fname_b)
-
-    # Per-field values
-    val_dict: dict[str, object] = {}
-    if isinstance(value, dict):
-        val_dict = {k.upper(): v for k, v in value.items()}
-
-    field_values = bytearray()
-    for fld in fields:
-        fval = val_dict.get(fld.name.upper())
-        field_values += _v1_enc_struct_field(fld, fval)
-
-    return b"\x51" + bytes([len(name_b)]) + name_b + bytes(d_block) + bytes(field_values)
-
-
-def _v1_enc_bcd(value: object, nuc_length: int, decimals: int) -> bytes:
-    """compMode 'N' (0x4E) + packed BCD bytes for ABAP TYPE P.
-
-    Encoding: each byte = 2 BCD digits (high nibble first).
-    Last nibble: 0xC = positive, 0xD = negative.
-    nuc_length bytes total; (2*nuc_length-1) digit positions.
-    """
-    from decimal import Decimal
-
-    d = Decimal(str(value))
-    is_neg = d < 0
-    scaled = int(abs(d) * (10**decimals))
-    max_digits = 2 * nuc_length - 1
-    digits_str = str(scaled).zfill(max_digits)
-    if len(digits_str) > max_digits:
-        raise OverflowError(
-            f"BCD value {value!r} overflows P({nuc_length}) dec={decimals} "
-            f"({len(digits_str)} > {max_digits} digits)"
-        )
-    nibbles = [int(c) for c in digits_str] + [0xD if is_neg else 0xC]
-    result = bytearray(nuc_length)
-    for i in range(nuc_length):
-        result[i] = (nibbles[2 * i] << 4) | nibbles[2 * i + 1]
-    return b"\x4e" + bytes(result)
-
-
-def _v1_stringlike_chunks(data: bytes) -> bytes:
-    """Chunk UTF-8 bytes for the string-serializer non-UC (wRFC) wire format.
-
-    protocol analysis non-UC path (arg1[0x10]==0):
-    - First chunk: max 0x3FFF bytes. Last flag = 0x4000 (first+last only).
-    - Subsequent chunks: max 0x7FFF bytes. Last flag = 0x8000.
-    - Non-last chunks (any position): no flag, bare byte_count.
-    - No total count written after last chunk for non-UC mode (skip when
-      arg1[0x10]==0 && entry_r15==r12, confirmed from hexdump at: je +0x43).
-
-    UTF-8 multi-byte sequence boundaries are respected when splitting (trim end back
-    while data[end] is a continuation byte 0x80-0xBF).
-    """
-    total = len(data)
-    if total == 0:
-        return struct.pack("<H", 0x4000)  # empty single chunk: 0 bytes | last-flag
-
-    out = bytearray()
-    first = True
-    pos = 0
-    while pos < total:
-        limit = 0x3FFF if first else 0x7FFF
-        end = min(pos + limit, total)
-        if end < total:
-            # Trim to valid UTF-8 boundary: back up while data[end] is a continuation byte
-            while end > pos and (data[end] & 0xC0) == 0x80:
-                end -= 1
-        chunk = data[pos:end]
-        pos = end
-        is_last = pos >= total
-        hdr = len(chunk)
-        if is_last:
-            hdr |= 0x4000 if first else 0x8000
-        out += struct.pack("<H", hdr)
-        out += chunk
-        first = False
-    return bytes(out)
-
-
-def _v1_enc_string(value: str) -> bytes:
-    """compMode 'S' (0x53) + the string serializer chunks for STRING.
-
-    protocol analysis non-UC (wRFC) mode confirmed:
-    single chunk: int16LE(utf8_byte_count | 0x4000) + utf8_bytes.
-    Multi-chunk: see _v1_stringlike_chunks. No total count for non-UC mode.
-    """
-    return b"\x53" + _v1_stringlike_chunks(value.encode("utf-8"))
-
-
-def _v1_enc_xstring(value: bytes | bytearray) -> bytes:
-    """compMode 'X' (0x58) + the string serializer chunks for XSTRING.
-
-    Same chunk format as STRING but raw bytes (no UTF-8 conversion).
-    the string serializer non-UC path: first-chunk max 0x3FFF, subsequent 0x7FFF.
-    """
-    return b"\x58" + _v1_stringlike_chunks(bytes(value))
-
-
-def _build_ngrfc_params(params: dict[str, Any], desc: FunctionDesc) -> bytes:
-    """Build NG RFC V1 (fast serializer v3, HDR byte[2]=0x03) parameter bytes.
-
-    protocol analysis confirmed format (ngrfcSerializeParams, sub_4af169):
-
-      T-markers — schema activation for EXPORT/CHANGING/TABLES params:
-        protocol analysis: writes T iff direction & 2 != 0.
-        0x54 + name_len(1B) + name
-        RFC_EXPORT (2) ✓, RFC_CHANGING (3) ✓, RFC_TABLES (7=0b111) ✓, RFC_IMPORT (1) ✗.
-
-      Q-markers — param values supplied by caller (IMPORT/CHANGING/TABLES with data):
-        protocol analysis: Q(0x51) hardcoded, then per-type dispatch.
-        Scalar/struct (rfctype ≠ 5):
-          0x51 + name_len(1B) + name + D-block(0x5001) + compMode + value
-        TABLE (rfctype == 5), IMPORT/TABLES direction, table data present:
-          0x51 + name_len(1B) + name
-          + K(0x4b) [from the metadata serializer isFirstRow=1,]
-          + (col_count | 0xD000) LE(2B) []
-          + dm_table_id LE(2B) []
-          + tname_len(1B) + tname []
-          + col_metadata [the column metadata serializer]
-          + row_count(2B) + row_data
-
-      EXPORT TABLE params (e.g. GFI PARAMS): T-marker only — no Q, no K.
-        protocol analysis: EXPORT params skip when data ptr == 0.
-
-      Terminator: 0x45 (EXECUTE marker, setNgRfcExecute).
-    """
-    params_upper = {k.upper(): v for k, v in params.items()}
-    t_section = bytearray()
-    q_section = bytearray()
-    table_idx = 0
-
-    for fd in desc.parameters:
-        pname = fd.name.upper()
-        name_b = pname.encode("ascii")
-        rt = fd.rfctype
-
-        # T-markers: schema activation for EXPORT, CHANGING, TABLES params.
-        # the out-parameter path: if (direction & 2) == 0 → skip.
-        if fd.direction & 2:
-            t_section += b"\x54" + bytes([len(name_b)]) + name_b
-
-        # Q-markers: caller-supplied values (only for params present in `params`).
-        if pname not in params_upper:
-            continue
-
-        val = params_upper[pname]
-
-        if rt == 5:  # RFCTYPE_TABLE — Q + K inside body
-            table_idx += 1
-            q_section += _v1_table_q_marker(name_b, table_idx)
-
-        elif rt == 0:  # CHAR — pcap-verified path (ngrfc_type=6, _v1_q_marker)
-            tname = _v1_type_name(rt, fd.nuc_length)
-            q_section += _v1_q_marker(
-                name_b,
-                fd.uc_length,
-                _v1_encode_char_value(str(val), fd.nuc_length, fd.uc_length),
-                tname,
-            )
-
-        elif rt in (1, 3, 6):  # DATE, TIME, NUM — char-like UC encoding, correct ngrfc_type
-            tname = _v1_tname(rt, fd.nuc_length)
-            q_section += _v1_q_block(
-                name_b,
-                tname,
-                _V1_NGT[rt],
-                fd.uc_length,
-                _v1_encode_char_value(str(val), fd.nuc_length, fd.uc_length),
-            )
-
-        elif rt in (8, 9, 10, 31):  # INT4, INT2, INT1, INT8 — no field_len in D-block
-            _cfg = {8: (4, True), 9: (2, True), 10: (1, False), 31: (8, True)}
-            width, signed = _cfg[rt]
-            q_section += _v1_q_block(
-                name_b,
-                _v1_tname(rt, fd.nuc_length),
-                _V1_NGT[rt],
-                None,  # ngrfc_type ≤ 4 → no field_len bytes in D-block
-                _v1_enc_int(val, width, signed),
-            )
-
-        elif rt == 7:  # FLOAT (FLTP)
-            q_section += _v1_q_block(
-                name_b,
-                b"\\TYPE=FLTP",
-                19,
-                8,
-                b"\x4e" + struct.pack("<d", float(val)),
-            )
-
-        elif rt == 2:  # BCD (TYPE P)
-            q_section += _v1_q_block(
-                name_b,
-                _v1_tname(rt, fd.nuc_length),
-                9,
-                fd.nuc_length,
-                _v1_enc_bcd(val, fd.nuc_length, fd.decimals),
-                decimals=fd.decimals,
-            )
-
-        elif rt == 29:  # STRING
-            q_section += _v1_q_block(
-                name_b,
-                b"\\TYPE=STRING",
-                24,
-                0,
-                _v1_enc_string(str(val)),
-            )
-
-        elif rt == 30:  # XSTRING
-            raw = val.encode("utf-8") if isinstance(val, str) else bytes(val)
-            q_section += _v1_q_block(
-                name_b,
-                b"\\TYPE=XSTRING",
-                25,
-                0,
-                _v1_enc_xstring(raw),
-            )
-
-        elif rt == 4:  # BYTE (TYPE X, raw)
-            raw = val.encode("utf-8") if isinstance(val, str) else bytes(val)
-            raw = raw[: fd.nuc_length].ljust(fd.nuc_length, b"\x00")
-            q_section += _v1_q_block(
-                name_b,
-                _v1_tname(rt, fd.nuc_length),
-                23,
-                fd.nuc_length,
-                b"\x4e" + raw,
-            )
-
-        elif rt == 0x11:  # RFCTYPE_STRUCTURE
-            q_section += _v1_q_struct(name_b, fd, val if isinstance(val, dict) else {})
-
-        elif rt == 32:  # RFCTYPE_UTCLONG — ngrfc_type=0x1d, INT8 wire encoding
-            # the field serializer case 0x1f,0x20 → shared INT8 path; compMode=0x4e + int64LE.
-            # ngrfc_type=29 (0x1d) > 4 → field_len=8 IS written in D-block metadata.
-            # UNCERTAIN: tname "\\TYPE=UTCLONG" not live-captured.
-            q_section += _v1_q_block(
-                name_b,
-                b"\\TYPE=UTCLONG",
-                _V1_NGT[32],
-                8,  # field_len: UTCLONG is always 8 bytes
-                _v1_enc_int(val, 8, True),
-            )
-
-        else:
-            raise NotImplementedError(
-                f"V1 ngrfc Q-marker not implemented for rfctype={rt} "
-                f"(param {pname!r}); DECF16/DECF34 not yet supported"
-            )
-
-    # 0x45 = EXECUTE marker (protocol analysis.
-    return bytes(t_section + q_section + b"\x45")
 
 
 def _lz4_block_compress(data: bytes) -> bytes:
@@ -1346,142 +813,6 @@ def _build_ws_invoke_frame(
     Source: reference-client capture, A4H kernel 793.
     """
     return build_invoke_request(func_name, desc, params)
-
-
-def _build_ws_invoke_message(
-    func_name: str,
-    desc: FunctionDesc,
-    params: dict[str, Any],
-    *,
-    session_key: bytes = b"",
-    logon_func: str = "RFCPING",
-    # legacy params accepted but unused (callers may still pass them)
-    sysnr: str = "00",
-    local_ip: str = "127.0.0.1",
-    lang: str = _DEFAULT_LANG,
-) -> bytes:
-    """Build a subsequent wRFC function-invoke frame (pcap-verified structure).
-
-    Pcap ground truth: frames 229/233/237/241 in websocketrfc_sniff.pcap.
-    NO session header (0x0101-0x0160), NO auth TLVs, NO session-info TLVs.
-
-    Structure (pcap frames 229/233):
-      0x0502 (call marker, empty)
-      0x0136 (37B: \\x01 + 36B session key from LOGON — reuse same key each call)
-      0x000b (SAP release "757", 6B UTF-16LE)
-      0x0102 (func_name UTF-16LE)
-      0x000b (SAP release "757" duplicate)
-      0x0130 (40-char end marker: logon_func + "="*(38-len) + "FT", 80B UTF-16LE — pcap: always LOGON func)
-      0x0503 (empty)
-      0x0420 (\\x00\\x00\\x00\\x00 — RC=0 request)
-      0x0512 (empty)
-      0x5001 (_WS_5001_HDR 14B + ngrfc body)
-      TERM (\\xff\\xff\\x00\\x00)
-
-    Credentials never appear in this frame (threats T-Q0E-01 / T-07-CRED).
-    """
-    name = func_name.upper()
-    rel_u16 = "757".encode("utf-16-le")
-    # 0x0130 end marker: logon_func + "="*(38-len) + "FT" = 40 chars (80B UTF-16LE)
-    # Pcap-verified: invoke frames use the LOGON function name (not the current func),
-    # space-padded to exactly 40 chars (80B UTF-16LE). NOT "=...FT" — that format is
-    # for LOGON frames only; invoke frames use simple ljust(40) space padding.
-    logon = logon_func.upper()
-    func_end_padded = logon.ljust(40).encode("utf-16-le")
-
-    _ngrfc_body = _build_ngrfc_params(params, desc)
-    # Pcap-verified: client→server invoke frames use _WS_5001_HDR (no LZ4, 0x2040).
-    # _WS_5001_HDR_INVOKE (0x6040) appears only in server→client RESPONSE frames.
-    # Byte[2] of the HDR distinguishes schema-only (0x03) vs value-carrying frames (0x02):
-    #   frame 229 (T-markers only, no Q_SCALAR): HDR byte[2]=0x03
-    #   frame 233 (T+K+Q_SCALAR+TABLE_Q): HDR byte[2]=0x02
-    _has_q_markers = b"\x51" in _ngrfc_body
-    _invoke_hdr = _WS_5001_HDR_WITH_VALS if _has_q_markers else _WS_5001_HDR
-    call_key = session_key if session_key else (b"\x01" + b"\x00" * 36)
-
-    # Pcap frame 229 (RFC_SYSTEM_INFO) and 233 (RFC_READ_TABLE) both show:
-    #   0x0130 → 0x0503 (empty) → 0x0420 → 0x0512 → 0x5001 → 0x0104 → TERM
-    # Prior comment claiming "NO 0x0503 in invoke frames" was wrong — capture analysis confirms it.
-    # Hypothesis: 0x0104 with pcap reference IPs (192.168.66.x) causes RABAX on live system.
-    # Test: omit 0x0104 (same approach as LOGON frame) to see if RABAX resolves.
-    # LOGON comment: "wrong-environment 0x0104 causes WP hang" → same may apply to invoke.
-    parts: list[bytes] = [
-        _tlv_ext(0x0502, b""),
-        _tlv_ext(0x0136, call_key),
-        _tlv_ext(0x000B, rel_u16),
-        _tlv_ext(0x0102, name.encode("utf-16-le")),
-        _tlv_ext(0x000B, rel_u16),
-        _tlv_ext(0x0130, func_end_padded),
-        _tlv_ext(0x0503, b""),
-        _tlv_ext(0x0420, b"\x00\x00\x00\x00"),
-        _tlv_ext(0x0512, b""),
-        _tlv_ext(0x5001, _invoke_hdr + _ngrfc_body),
-        # 0x0104 intentionally omitted: pcap-reference IPs cause RABAX on non-pcap system.
-        _TAG_TERMINATOR.to_bytes(2, "big") + b"\x00\x00",
-    ]
-
-    return b"".join(parts)
-
-
-def _ws_parse_invoke_response(data: bytes, desc: FunctionDesc) -> dict[str, Any]:
-    """Parse a raw wRFC invoke response (WebSocket TLV, no GW header).
-
-    Raises :class:`AbapSystemFailure` when the server signals an error — the message
-    carries the numeric E-code (e.g. "163" = CALL_FUNCTION_RECEIVE_ERROR) from the
-    0x0420 return-code tag and/or the decoded 0x0402 message text, so callers and the
-    live gate can distinguish the known wRFC 0x5001 descriptor gap (STATE.md) from a
-    transport failure. On success, returns a dict keyed by param name with
-    UTF-16LE-decoded string values. Never echoes credentials (T-07-CRED / T-Q0E-01).
-
-    NOTE (STATE.md blocker): the exact wRFC error-tag layout is only partially RE'd.
-    This parser surfaces the documented 0x0420 return code and 0x0402 message text
-    rather than inventing an error schema (no-guessing policy). It uses the existing
-    bounds-checked ``Session._parse_tlv`` so a malformed/error response is never
-    mis-decoded as param data (T-Q0E-03).
-
-    LZ4 decompression: if the server sends a SAP LZ4 frame (marker byte 0x34), the
-    payload is decompressed before TLV parsing.  With _WS_5001_HDR_INVOKE flags=0x6040
-    (LZ4 send enabled) the server may compress its responses too; this path handles both.
-    the LZ4 decompressor::ctor reads marker 0x34 then decomp_len+comp_len.
-    """
-    if data and data[0] == 0x34:
-        try:
-            data = sap_lz4_frame_decompress(data)
-        except DecompressError as exc:
-            raise AbapSystemFailure(message=f"wRFC LZ4 decompression failed: {exc}") from exc
-
-    tags = Session._parse_tlv(data)
-
-    err_text = ""
-    err_msg = tags.get(0x0402)
-    if err_msg:
-        try:
-            err_text = err_msg.decode("utf-8", errors="replace").strip("\x00 ")
-        except Exception:
-            err_text = err_msg.hex()
-
-    ecode: int | None = None
-    rc_bytes = tags.get(0x0420)
-    if rc_bytes and len(rc_bytes) == 4:
-        rc = struct.unpack(">I", rc_bytes)[0]
-        if rc != 0:
-            ecode = rc
-
-    if ecode is not None:
-        detail = f" {err_text}" if err_text else ""
-        raise AbapSystemFailure(message=f"wRFC call failed: E={ecode}{detail}")
-    if err_text:
-        raise AbapSystemFailure(message=f"wRFC call failed: {err_text}")
-
-    # Success — decode returned 0x0201/0x0203 param pairs as UTF-16LE strings.
-    result: dict[str, object] = {}
-    for pname, value in _extract_name_value_pairs(data):
-        try:
-            decoded: object = value.decode("utf-16-le").rstrip("\x00 ")
-        except Exception:
-            decoded = value
-        result[pname] = decoded
-    return result
 
 
 def _convert_date_time_fields(result: dict[str, Any], desc: FunctionDesc) -> dict[str, Any]:
@@ -2362,19 +1693,14 @@ class Connection:
         self._metrics = ConnectionMetrics()
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
-        self._ws_call_key: bytes = b"\x01" + b"\x00" * 36  # set by _ws_begin / _ws_handshake
         # 16 bytes proposed by this client in the LOGON's 0x0514 and echoed in the
-        # reply. Distinct from _ws_call_key, which is the 37-byte 0x0136 value the
-        # invoke frames carry -- an accepted LOGON has no 0x0136 at all, so the two
-        # are not the same thing and assigning one to the other silently truncates
-        # every invoke key from 37 bytes to 20.
+        # reply, so a caller can correlate the session.
         self._ws_session_token: bytes = b""
         # Server-reported duration of the most recent call (tag 0x0667, seconds).
         # The async core has its own; this one serves the wRFC and SNC paths,
         # which do not delegate.
         self._last_server_duration_s: float | None = None
         self._ws_auth: dict[str, Any] | None = None  # stored by _ws_begin for deferred LOGON
-        self._ws_invoke_counter: int = 2  # next invoke counter; LOGON uses 1, invokes start at 2
         # Async delegation (set by connect() for classic TCP paths, D-07).
         # None for SNC/wRFC paths which keep the existing sync transport code unchanged.
         self._async_conn: AsyncConnection | None = None
@@ -2399,9 +1725,7 @@ class Connection:
         inst._cache = async_conn._cache
         inst._struct_desc_cache = async_conn._struct_desc_cache
         inst._snc_mode = False
-        inst._ws_call_key = b"\x01" + b"\x00" * 36
         inst._ws_auth = None
-        inst._ws_invoke_counter = 2
         inst._async_conn = async_conn
         inst._loop_thread = loop_thread
         inst._strict_params = async_conn._strict_params
@@ -2450,7 +1774,6 @@ class Connection:
             "server_port": server_port,
             "sysnr": sysnr,
         }
-        self._ws_invoke_counter = 2  # reset; LOGON uses counter=1, invokes start at 2
         self._session.begin_ws_session()
 
     def _ws_handshake(
@@ -2501,18 +1824,6 @@ class Connection:
         }
         # DISCONNECTED → WS_PENDING; the LOGON frame is deferred to the first call().
         self._session.begin_ws_session()
-
-    def _next_ws_invoke_key(self) -> bytes:
-        """Return wRFC 0x0136 session key with next invoke counter, then increment.
-
-        Pcap-verified: LOGON uses counter=1 in last 4 bytes (BE), first invoke uses
-        counter=2, second uses counter=3, etc. Server validates counter monotonicity
-        to detect replay attacks. Format: b\"\\x01\" + 32B session_id + 4B BE counter.
-        """
-        prefix = self._ws_call_key[:33]  # b"\x01" + 32B session_id
-        key = prefix + struct.pack(">I", self._ws_invoke_counter)
-        self._ws_invoke_counter += 1
-        return key
 
     def _handshake(
         self,
@@ -3139,7 +2450,6 @@ class Connection:
                     local_ip=auth["local_ip"],
                 )
                 self._ws_session_token = session_token
-                self._ws_invoke_counter = 2  # LOGON uses counter=1, invokes start at 2
                 self._transport.send_message(logon_msg)
                 logon_resp = self._transport.recv_message()
                 # Auth: extract ConnectionAttributes from 0x0450/0x0452/0x0453.
@@ -3621,7 +2931,6 @@ class Connection:
             local_ip=auth["local_ip"],
         )
         self._ws_session_token = session_token
-        self._ws_invoke_counter = 2
         try:
             self._transport.send_message(logon_msg)
             logon_resp = self._transport.recv_message()
@@ -4187,7 +3496,7 @@ class Connection:
         """
         if not response:
             return UnitState.NOT_FOUND
-        from saprfclib.invoke import _decode_utf16le, _extract_name_value_pairs
+        from saprfclib.invoke import _decode_utf16le
 
         try:
             for name, val in _extract_name_value_pairs(response):
