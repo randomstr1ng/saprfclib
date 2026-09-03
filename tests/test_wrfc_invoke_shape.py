@@ -179,3 +179,33 @@ def test_the_successful_response_parses_with_the_classic_parser() -> None:
 
     result = parse_invoke_response((GOLDEN / "wrfc_invoke_response.bin").read_bytes(), _stfc())
     assert result["ECHOTEXT"] == "probe"
+
+
+def test_a_parameterless_function_is_not_treated_as_a_failed_fetch() -> None:
+    """RFC_PING has no parameters, so its interface legitimately has no rows.
+
+    The wRFC bootstrap raised AbapSystemFailure whenever the metadata reply
+    contained no parameter rows, which made every parameterless function
+    uncallable over wRFC while reporting something that had not happened:
+    "RFC_GET_FUNCTION_INTERFACE returned no parameter rows, no return code and no
+    message". The reply had in fact succeeded.
+
+    Whether the fetch failed is a question the reply answers directly -- 0x0417
+    marks an exception and 0x0420 carries the return code -- so those are asked
+    instead of inferring from the row count.
+    """
+    import struct as _s
+
+    from saprfclib.invoke import tlv_record as tr
+    from saprfclib.session import Session
+
+    # A successful reply with an empty PARAMS table: success marker, zero return
+    # code, no exception marker, no rows.
+    reply = (
+        tr(0x0500, b"") + tr(0x0503, b"") + tr(0x0420, _s.pack(">I", 0)) + _s.pack(">HH", 0xFFFF, 0)
+    )
+    tags = Session._parse_tlv(reply)
+    assert 0x0417 not in tags, "no exception marker"
+    assert _s.unpack(">I", tags[0x0420])[0] == 0, "return code zero"
+    # Those two facts are what the bootstrap now consults; a row count of zero is
+    # not evidence of anything.

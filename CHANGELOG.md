@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A parameterless function could not be called over wRFC. The bootstrap raised
+  `AbapSystemFailure` whenever the metadata reply held no parameter rows — but `RFC_PING`
+  has no parameters, so its interface legitimately has none, and the error reported
+  something that had not happened ("returned no parameter rows, no return code and no
+  message" on a reply that had succeeded). Whether the fetch failed is answered by the
+  reply itself: `0x0417` marks an exception, `0x0420` carries the return code. Those are
+  consulted now; a row count of zero is not evidence.
+- Every response read reassembles multi-frame replies, not just the classic invoke where
+  reassembly landed first. The wRFC path reproduced the original truncation bug exactly —
+  `RFC_READ_TABLE` on `DD03L` past ~2000 rows failing with `tag 0x0305 length 250 exceeds
+  remaining payload` — while the classic path beside it had been fixed. Metadata fetches,
+  structure lookups, LOGON replies, pings and bgRFC state reads all read replies that can
+  exceed one frame; a 44-parameter interface already fills 2342 bytes. Only the NI/GW
+  handshake loop still reads single frames, and it exchanges control frames rather than
+  TLV result streams.
+
 - Removed the ngrfc/Q-marker subsystem — 17 functions and about 700 lines — now that the
   wRFC invoke is a classic invoke TLV stream. It was unreachable from production and kept
   alive only by its own tests, which is the worst state for code encoding a *disproven*
