@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The message-server entry layout is corrected, and with it a latent bug. Three fields
+  were wrong in a way that reinforced itself: bytes 135–137 were recorded as an "0xFFFF
+  marker", 137–141 as a primary IPv4 and 141–145 as a duplicate. They are none of those —
+  125–141 is a single IPv6 field, and every captured address is IPv4-mapped
+  (`::ffff:192.168.88.7`), so the `ffff` is the mapping prefix and the "primary IPv4" was
+  the embedded address. The "duplicate" is a separate `hostaddrv4` field holding the same
+  value, which is exactly why the wrong one went unnoticed. The service name sat at
+  104–124 rather than the recorded 80–124, which happened to contain it only because the
+  host field ahead of it was 40 bytes instead of 64.
+  The bug: reading the IPv4 out of the mapped v6 works only while the address *is*
+  mapped. A server answering with a real IPv6 would have yielded four bytes from the
+  middle of it — a plausible-looking address rather than an error. The parser now reads
+  the dedicated `hostaddrv4` field. Three `[ASSUMED]` labels in `router.py` are resolved.
+
 - Three stale or unresolved entries in the protocol docs corrected.
   - The table of remaining `[ASSUMED]` exception tags still listed `0x0412`–`0x0414` as
     unconfirmed and `0x040B` as a tag worth trying, after the first were confirmed by

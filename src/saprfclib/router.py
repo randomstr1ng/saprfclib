@@ -279,32 +279,42 @@ _SAPMS_HEADER_SIZE = 118  # wire-captured
 # Per-server entry size (wire-captured: 3 entries × 160 bytes = 480 bytes payload).
 _SAPMS_ENTRY_SIZE = 160  # wire-captured
 
-# Per-server entry field offsets (relative to entry start, wire-captured):
-#   [0:40]    instance_name — space-padded ASCII
-#   [40:80]   hostname_string — space-padded dotted IPv4 or hostname
-#   [80:124]  space-padded ASCII carrying a SERVICE NAME, not a name or padding.
-#             The captured entries read '-', 'tick-port', '-'; the one non-'-'
-#             value belongs to the only entry with a real port. [ASSUMED] the
-#             internal split: all three entries have exactly 24 leading spaces,
-#             which suggests a 24-byte field followed by a 20-byte one rather
-#             than one 44-byte field, but one capture cannot fix a boundary that
-#             every entry happens to leave blank.
-#   [124:135] zeros, except 0xbb at [124] on the one entry that names a real
-#             server. [ASSUMED] — a single differing byte across three entries is
-#             a correlation, not a field.
-#   [135:137] 0xFFFF marker (wire-captured in all 3 entries)
-#   [137:141] ip_addr_primary (4-byte BE IPv4)
-#   [141:145] ip_addr_secondary (4-byte BE IPv4, duplicate)
-#   [145:147] port (2-byte BE)
-#   [147:160] [ASSUMED] status or kind. Byte [147] is 0x01 on the entry that
-#             names a real application server (192.168.88.7:3200) and 0x05 on the
-#             two placeholder entries whose port is 0; [148:160] is zero in all
-#             three. Two values from one capture is not an enumeration. A capture
-#             from a system with more than one application server would settle
-#             whether 0x01 means "usable" or something narrower.
-_ENTRY_FFFF_OFFSET = 135  # wire-captured
-_ENTRY_IP_OFFSET = 137  # wire-captured
-_ENTRY_PORT_OFFSET = 145  # wire-captured
+# Per-server entry field offsets (relative to entry start), confirmed against
+# tests/golden/router/sapms_server_list.bin. The widths sum to exactly the
+# captured 160-byte entry:
+#
+#   [  0: 40]  client       instance name, space-padded ASCII
+#   [ 40:104]  host         hostname, 64 bytes
+#   [104:124]  service      service name; 'tick-port' on the entry with a real
+#                           port, '-' on the placeholders
+#   [124:125]  msgtype      message-type flags
+#   [125:141]  hostaddrv6   IPv6 address
+#   [141:145]  hostaddrv4   IPv4 address
+#   [145:147]  servno       port, BE uint16
+#   [147:148]  status
+#   [148:149]  nitrace
+#   [149:153]  sys_service  BE uint32
+#   [153:160]  padding
+#
+# An earlier reading of this had three fields wrong, and the errors reinforced
+# each other. Bytes 135-137 were recorded as an "0xFFFF marker" and 137-141 as a
+# primary IPv4 with 141-145 as a duplicate. They are neither: 125-141 is a single
+# IPv6 field, and every captured address is IPv4-mapped -- ::ffff:192.168.88.7 --
+# so the ffff is the mapping prefix and the "primary IPv4" was the embedded
+# address. The "duplicate" is the separate hostaddrv4 field carrying the same
+# value. The service name was also placed at 80-124 rather than 104-124, which
+# happened to contain it because the host field ahead of it was recorded as 40
+# bytes instead of 64.
+#
+# That mattered beyond tidiness: reading the IPv4 out of the mapped v6 works only
+# while the address IS mapped. A server answering with a real IPv6 address would
+# have yielded four bytes from the middle of it, which is a plausible-looking
+# address rather than an error.
+_ENTRY_HOSTADDRV6_OFFSET = 125
+_ENTRY_HOSTADDRV4_OFFSET = 141
+_ENTRY_PORT_OFFSET = 145
+_ENTRY_SERVICE_OFFSET = 104
+_ENTRY_SERVICE_LEN = 20
 
 
 def parse_sapms_server_list(frame: bytes) -> list[tuple[str, int]]:
@@ -385,8 +395,12 @@ def parse_sapms_server_list(frame: bytes) -> list[tuple[str, int]]:
                 f"SAPMS frame entry {i} exceeds buffer bounds: "
                 f"entry [{entry_start}:{entry_end}] but buffer is {len(frame)} bytes"
             )
-        # Extract binary IP (4-byte BE at entry offset _ENTRY_IP_OFFSET).
-        ip_bytes = frame[entry_start + _ENTRY_IP_OFFSET : entry_start + _ENTRY_IP_OFFSET + 4]
+        # The dedicated IPv4 field, not the one embedded in the IPv6 above it.
+        # Both hold the same value while the v6 address is IPv4-mapped, and only
+        # this one still holds an IPv4 address when it is not.
+        ip_bytes = frame[
+            entry_start + _ENTRY_HOSTADDRV4_OFFSET : entry_start + _ENTRY_HOSTADDRV4_OFFSET + 4
+        ]
         if len(ip_bytes) < 4:
             raise ValueError(f"SAPMS entry {i}: IP field truncated at buffer boundary")
         host = socket.inet_ntoa(ip_bytes)
