@@ -205,3 +205,43 @@ def test_server_time_fraction_is_zero_when_nothing_was_measured() -> None:
     empty = ConnectionMetrics()
     assert empty.server_time_fraction == 0.0
     assert empty.mean_server_duration_s == 0.0
+
+
+def test_the_sync_call_path_records_metrics_too() -> None:
+    """Shipped as working in v0.1.3, and silent on two transports.
+
+    Metrics were recorded only in AsyncConnection.call, which classic TCP
+    delegates to. The wRFC and SNC paths run Connection.call directly, so a
+    ConnectionMetrics on either reported zero calls however many were made -- and
+    a counter that is quietly absent is worse than one that is obviously missing,
+    because a dashboard showing nothing looks like an idle connection rather than
+    a broken metric. It surfaced only when a live wRFC call succeeded and the run
+    still printed "0 call(s)".
+    """
+    from tests.test_connection import _invoke_response_for_stfc, _ready_connection_with_invoke
+
+    conn, _ = _ready_connection_with_invoke([_invoke_response_for_stfc(echo="hi")])
+    assert conn.metrics.calls == 0
+
+    conn.call("STFC_CONNECTION", REQUTEXT="hi")
+
+    assert conn.metrics.calls == 1
+    assert conn.metrics.failures == 0
+    assert conn.metrics.total_duration_s > 0
+    assert conn.metrics.last is not None
+    assert conn.metrics.last.func_name == "STFC_CONNECTION"
+
+
+def test_a_failed_sync_call_is_recorded_as_a_failure() -> None:
+    """Counting only successes hides the trend worth alerting on."""
+    from saprfclib.exceptions import CommunicationError
+    from tests.test_connection import _ready_connection_with_invoke
+
+    conn, _ = _ready_connection_with_invoke([])  # no reply scripted -> EOF
+    with pytest.raises(CommunicationError):
+        conn.call("STFC_CONNECTION", REQUTEXT="hi")
+
+    assert conn.metrics.calls == 1
+    assert conn.metrics.failures == 1
+    assert conn.metrics.last is not None
+    assert conn.metrics.last.failed is True

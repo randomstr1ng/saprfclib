@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ConnectionMetrics` recorded nothing on the wRFC and SNC paths. Call stats were
+  collected only in `AsyncConnection.call`, which classic TCP delegates to; the other two
+  transports run `Connection.call` directly, so metrics on either reported zero calls
+  however many were made. A counter that is quietly absent is worse than one obviously
+  missing — a dashboard showing nothing reads as an idle connection rather than a broken
+  metric. Found when a live wRFC call succeeded and the run still printed `0 call(s)`.
+  Failures are recorded on that path too, and `server_duration_s` now comes through.
+
 - The wRFC invoke is verified against a call that actually completed. Fixtures
   `wrfc_invoke_request.bin` / `wrfc_invoke_response.bin` are a reference client's
   `STFC_CONNECTION` exchange, and `build_invoke_request` produces the request **byte for
