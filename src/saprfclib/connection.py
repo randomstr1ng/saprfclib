@@ -405,10 +405,6 @@ def _build_ws_logon_message(
     client: str,
     lang: str = _DEFAULT_LANG,
     local_ip: str = "127.0.0.1",
-    local_port: int = 0,
-    server_host: str,
-    server_port: int,
-    sysnr: str = "00",
     seed: int | None = None,
     prog_name: str = "PYTHON",
 ) -> tuple[bytes, bytes]:
@@ -479,10 +475,14 @@ def _build_ws_logon_message(
         _tlv_ext(0x0114, _b(client)),
         _tlv_ext(0x0111, _b(user)),
         _tlv_ext(0x0117, pw_tlv),
-        _tlv_ext(0x0115, _b(lang.upper())),
+        # One ASCII byte, via the same normaliser the classic logon uses. Calling
+        # .upper() instead sent "EN" as two bytes whenever a caller passed an ISO
+        # code -- which connect() does by default -- and the server rejected the
+        # logon without saying which field was wrong.
+        _tlv_ext(0x0115, _encode_logon_language(lang)),
         _tlv_ext(0x0501, b"\x01"),
         _tlv_ext(0x0007, _b(local_ip)),
-        _tlv_ext(0x0011, _b(lang.upper())),
+        _tlv_ext(0x0011, _encode_logon_language(lang)),
         _tlv_ext(0x0012, _b(_WS_OWN_RELEASE)),
         _tlv_ext(0x0013, _b(_WS_OWN_RELEASE)),
         _tlv_ext(0x0008, _b(socket.gethostname()[:32])),
@@ -3030,7 +3030,11 @@ class Connection:
                 auth = self._ws_auth or {}
                 logon_msg, session_token = _build_ws_logon_message(
                     func_name="RFCPING",
-                    **auth,
+                    user=auth["user"],
+                    passwd=auth["passwd"],
+                    client=auth["client"],
+                    lang=auth["lang"],
+                    local_ip=auth["local_ip"],
                 )
                 self._ws_session_token = session_token
                 self._ws_invoke_counter = 2  # LOGON uses counter=1, invokes start at 2
@@ -3511,7 +3515,11 @@ class Connection:
         # Step 1: LOGON + RFCPING (no ngrfc body, proven path, no Q-marker ambiguity).
         logon_msg, session_token = _build_ws_logon_message(
             func_name="RFCPING",
-            **auth,
+            user=auth["user"],
+            passwd=auth["passwd"],
+            client=auth["client"],
+            lang=auth["lang"],
+            local_ip=auth["local_ip"],
         )
         self._ws_session_token = session_token
         self._ws_invoke_counter = 2

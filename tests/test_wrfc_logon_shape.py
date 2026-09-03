@@ -81,8 +81,6 @@ def _logon(**kw: object) -> bytes:
         "client": "001",
         "lang": "E",
         "local_ip": "127.0.0.1",
-        "server_host": "example.invalid",
-        "server_port": 443,
     }
     args.update(kw)
     msg, _token = _build_ws_logon_message(**args)  # type: ignore[arg-type]
@@ -159,8 +157,6 @@ def test_the_session_token_is_returned_for_correlation() -> None:
         passwd="p",
         client="001",
         lang="E",
-        server_host="example.invalid",
-        server_port=443,
     )
     assert len(token) == 16
     assert dict(_records(msg))[0x0514] == token
@@ -208,10 +204,43 @@ def test_the_session_token_is_not_the_invoke_key() -> None:
         passwd="p",
         client="001",
         lang="E",
-        server_host="example.invalid",
-        server_port=443,
     )
     conn._ws_session_token = token
     assert len(conn._ws_session_token) == 16
     assert len(conn._ws_call_key) == 37, "the invoke key must stay 37 bytes"
     assert len(conn._next_ws_invoke_key()) == 37
+
+
+def test_an_iso_language_code_becomes_one_byte() -> None:
+    """The bug that kept the rebuilt LOGON failing after the shape was right.
+
+    connect() takes a two-character ISO code by default, and the builder used
+    lang.upper() -- so "EN" went out as two bytes where the wire carries one.
+    The frame was 240 bytes against a working 238, and the server rejected the
+    logon without saying which field was wrong.
+
+    The classic logon path already normalised this. Only the wRFC builder did
+    not, which is why a helper existing in the same module was no protection.
+    """
+    for given in ("EN", "en", "E", "e"):
+        by_tag = dict(_records(_logon(lang=given)))
+        assert by_tag[0x0115] == b"E", given
+        assert by_tag[0x0011] == b"E", given
+
+
+def test_the_frame_is_238_bytes_for_the_reference_inputs() -> None:
+    """Total width is the cheapest check that every field is the right size.
+
+    A single field two bytes too wide moves this number, which is how the
+    language bug was found after every structural assertion already passed.
+    """
+    frame = _logon(
+        user="Developer",
+        passwd="thirteenchars",
+        client="001",
+        lang="EN",
+        local_ip="127.0.1.1",
+        prog_name="startrfc",
+        func_name="RFCPING",
+    )
+    assert len(frame) == 238
