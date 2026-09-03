@@ -214,10 +214,20 @@ def _logon(**overrides: object) -> tuple[bytes, bytes]:
     return _build_ws_logon_message(**kwargs)  # type: ignore[arg-type]
 
 
-def test_logon_message_builds_with_a_session_key() -> None:
-    message, key = _logon()
+def test_logon_message_builds_and_returns_no_session_token() -> None:
+    """The second return value is empty now, and that is the point.
+
+    It used to be a 16-byte token for the 0x0514 record. That record is no longer
+    sent: a reference client's value is host-derived rather than random, so
+    filling it with random bytes put something there no server has been observed
+    to accept, and a LOGON without the record at all is confirmed accepted.
+
+    This asserted len(key) > 0, which would have passed just as well for a token
+    that was wrong -- it only ever checked that something was produced.
+    """
+    message, token = _logon()
     assert len(message) > 0
-    assert len(key) > 0
+    assert token == b""
 
 
 def test_the_password_never_appears_in_the_frame_as_plaintext() -> None:

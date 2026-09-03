@@ -410,8 +410,8 @@ def _build_ws_logon_message(
 ) -> tuple[bytes, bytes]:
     """Build the wRFC LOGON frame, in the shape a server actually accepts.
 
-    Returns ``(msg_bytes, session_token)``. The token is 16 bytes generated here
-    and echoed back in the reply, so a caller can correlate the session.
+    Returns ``(msg_bytes, session_token)``. The token is empty: the 0x0514 record
+    is not sent, for the reason given at its former place in the record list.
 
     This was rewritten after a reference client was observed opening a session
     against a system where this library could not. Replaying that client's frame
@@ -464,14 +464,31 @@ def _build_ws_logon_message(
     def _b(text: str) -> bytes:
         return text.encode("latin-1")
 
-    session_token = os.urandom(16)
+    # 0x0514 is deliberately NOT sent.
+    #
+    # A reference client sends 16 bytes there, but they are not random: across two
+    # runs minutes apart the first 9 were identical (a host- or
+    # installation-derived prefix) and only the following bytes moved. Filling the
+    # field with os.urandom(16) puts a value in it that no server has ever been
+    # observed to accept, and the observed symptom matched -- the server stopped
+    # answering rather than objecting, which is what it does for a frame it cannot
+    # make sense of.
+    #
+    # Omitting the record is confirmed to work: a LOGON with 0x0514 removed
+    # entirely was accepted, and the reply then omits it too, which is how it was
+    # established the client proposes the token rather than the server issuing it.
+    # Sending nothing is better evidenced than sending a guess, and it costs
+    # nothing here -- the token is only a correlation handle.
+    #
+    # [ASSUMED] that no later frame needs it. Only the LOGON was tested without
+    # it; if an invoke turns out to require the correlation, this is where it
+    # would have to be constructed, and how the reference derives it is unknown.
     pw_tlv = _scramble_password_ws(passwd, seed=seed)
 
     parts: list[bytes] = [
         _tlv_ext(0x0101, _WS_TLV_CAPS),
         _tlv_ext(0x0103, _TLV_VER),
         _tlv_ext(0x0106, _WS_TLV_CP),
-        _tlv_ext(0x0514, session_token),
         _tlv_ext(0x0114, _b(client)),
         _tlv_ext(0x0111, _b(user)),
         _tlv_ext(0x0117, pw_tlv),
@@ -493,7 +510,7 @@ def _build_ws_logon_message(
         _tlv_ext(0x0102, _b(fname)),
         struct.pack(">HH", 0xFFFF, 0) + struct.pack(">H", 0xFFFF),
     ]
-    return b"".join(parts), session_token
+    return b"".join(parts), b""
 
 
 def _ws_logon_failure(logon_resp: bytes) -> AbapSystemFailure | None:
