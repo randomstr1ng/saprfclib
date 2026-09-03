@@ -190,32 +190,27 @@ def test_a_password_that_cannot_be_encoded_fails_loudly() -> None:
         _scramble_password_ws("pass中word", seed=1)
 
 
-def test_the_session_token_is_not_the_invoke_key() -> None:
-    """Two different 0x0136-shaped things that must not be conflated.
+def test_the_invoke_key_machinery_is_gone() -> None:
+    """This guarded a conflation that can no longer happen.
 
-    The LOGON returns a 16-byte token for 0x0514. The invoke frames carry a
-    37-byte key at 0x0136 -- b"\\x01" + 32-byte session id + 4-byte counter --
-    and _next_ws_invoke_key builds it by slicing [:33] off the stored value.
-    Storing the 16-byte token there does not raise: the slice simply yields all
-    16 bytes and every invoke key comes out 20 bytes instead of 37. An accepted
-    LOGON carries no 0x0136 at all, so the two are not the same value and never
-    were.
+    It asserted that the 16-byte session token was not stored where the 37-byte
+    0x0136 invoke key lived, because assigning one to the other silently
+    truncated every invoke key. There is no invoke key now: an accepted invoke
+    carries no 0x0136, so the field, its counter and the builder that consumed
+    them are all deleted.
+
+    What is asserted instead is that they stay deleted. Reintroducing a session
+    key would mean reintroducing the frame shape the server rejects.
     """
     from saprfclib.connection import Connection
-    from tests.test_connection import MockTransport
+
+    from .test_connection import MockTransport
 
     conn = Connection(MockTransport([]))
-    _msg, token = _build_ws_logon_message(
-        func_name="RFCPING",
-        user="U",
-        passwd="p",
-        client="001",
-        lang="E",
-    )
-    conn._ws_session_token = token
+    assert not hasattr(conn, "_ws_call_key")
+    assert not hasattr(conn, "_ws_invoke_counter")
+    assert not hasattr(conn, "_next_ws_invoke_key")
     assert conn._ws_session_token == b""
-    assert len(conn._ws_call_key) == 37, "the invoke key must stay 37 bytes"
-    assert len(conn._next_ws_invoke_key()) == 37
 
 
 def test_an_iso_language_code_becomes_one_byte() -> None:
