@@ -174,7 +174,7 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 | 0x0111 | 9 | ASCII "Developer" | SAP username |
 | 0x0117 | 17 | binary | Scrambled password: `seed(4B) + scramble(pw, seed)` — see "Password scrambling" below |
 | 0x0115 | 1 | ASCII "E" | Logon language |
-| 0x0501 | 1 | 0x01 | Flag [UNKNOWN] |
+| 0x0501 | 1 | 0x01 | `0x01` in every LOGON captured, and present in no other frame type. Meaning unknown; constant so far. |
 | 0x0007 | 9 | ASCII "127.0.1.1" | Client IP address |
 | 0x0011 | 1 | ASCII "E" | Language (again) |
 | 0x0012 | 3 | ASCII "754" | RFC protocol version |

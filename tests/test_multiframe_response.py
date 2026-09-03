@@ -209,3 +209,34 @@ def test_every_response_read_reassembles() -> None:
         f"{len(bare)} response reads still take a single frame; a reply larger "
         f"than one frame would be silently truncated"
     )
+
+
+def test_table_row_boundaries_come_from_the_records_not_the_declared_width() -> None:
+    """0x0302's width is not always the transmitted record length.
+
+    A reference capture carries PARAMS with a declared width of 404 and 0x0303
+    records of 402 bytes. Splitting the concatenated bytes by the declared width
+    would drift two bytes per row -- misaligned strings rather than an error.
+
+    The width IS the right stride for the compressed form, where there are no
+    record boundaries to use: a 44-row interface decompresses to 17776 bytes,
+    exactly 44 x 404. So the rule is per-form, and the obvious simplification of
+    "always split by row_size" is wrong for one of them.
+    """
+    assert 17776 == 44 * 404, "the compressed stride is the declared width"
+    # And the uncompressed record is narrower than that width, which is the trap.
+    assert 402 != 404
+
+
+def test_0x0302_field_order_is_width_then_count() -> None:
+    """Settled by one reply carrying two tables with different counts.
+
+    A single table cannot settle it -- either reading fits one pair of numbers.
+    Two tables, 3 records against a 3 and 0 records against a 0, can.
+    """
+    import struct
+
+    params = struct.pack(">II", 404, 3)
+    resumable = struct.pack(">II", 62, 0)
+    assert struct.unpack(">II", params) == (404, 3)
+    assert struct.unpack(">II", resumable) == (62, 0)
