@@ -29,12 +29,12 @@ import pytest
 
 from saprfclib.connection import _build_ws_logon_message, _scramble_password_ws
 
-# Tag order as observed in an accepted LOGON.
+# Tag order as observed in an accepted LOGON, with 0x0514 omitted -- see
+# test_the_session_token_record_is_not_sent.
 EXPECTED_TAGS = [
     0x0101,
     0x0103,
     0x0106,
-    0x0514,
     0x0114,
     0x0111,
     0x0117,
@@ -144,12 +144,19 @@ def test_fields_confirmed_free_are_settable() -> None:
     assert by_tag[0x0102] == b"RFC_PING"
 
 
-def test_the_session_token_is_returned_for_correlation() -> None:
-    """16 bytes, generated here and echoed in the reply.
+def test_the_session_token_record_is_not_sent() -> None:
+    """0x0514 is omitted rather than filled with a guess.
 
-    Removing it entirely is also accepted -- the reply then omits it too, which is
-    how it was established the client proposes it rather than the server issuing
-    it.
+    A reference client sends 16 bytes there, but they are not random: across two
+    runs minutes apart the first 9 bytes were identical and only the tail moved,
+    so the value is host-derived plus a counter. Filling the field with random
+    bytes puts something in it no server has been observed to accept, and the
+    symptom matched -- the server stopped answering rather than objecting.
+
+    Omitting it is confirmed: a LOGON without the record was accepted, and the
+    reply omitted it too, which is how it was established that the client
+    proposes the token rather than the server issuing it. Sending nothing is
+    better evidenced than sending a guess.
     """
     msg, token = _build_ws_logon_message(
         func_name="RFCPING",
@@ -158,8 +165,8 @@ def test_the_session_token_is_returned_for_correlation() -> None:
         client="001",
         lang="E",
     )
-    assert len(token) == 16
-    assert dict(_records(msg))[0x0514] == token
+    assert token == b""
+    assert 0x0514 not in [t for t, _ in _records(msg)]
 
 
 def test_an_over_long_function_name_is_refused() -> None:
@@ -206,7 +213,7 @@ def test_the_session_token_is_not_the_invoke_key() -> None:
         lang="E",
     )
     conn._ws_session_token = token
-    assert len(conn._ws_session_token) == 16
+    assert conn._ws_session_token == b""
     assert len(conn._ws_call_key) == 37, "the invoke key must stay 37 bytes"
     assert len(conn._next_ws_invoke_key()) == 37
 
@@ -243,4 +250,4 @@ def test_the_frame_is_238_bytes_for_the_reference_inputs() -> None:
         prog_name="startrfc",
         func_name="RFCPING",
     )
-    assert len(frame) == 238
+    assert len(frame) == 216

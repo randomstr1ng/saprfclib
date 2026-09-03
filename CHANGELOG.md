@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The wRFC LOGON no longer sends a random `0x0514` session token. A reference client's
+  value is not random — across two runs minutes apart the first 9 of its 16 bytes were
+  identical, a host-derived prefix followed by a counter — so filling the field with
+  `os.urandom(16)` put a value there that no server has been observed to accept, and the
+  symptom matched: the server stopped answering rather than objecting. The record is
+  omitted instead, which is confirmed accepted, and the reply then omits it too. Sending
+  nothing is better evidenced than sending a guess, and reverse-engineering how the
+  reference derives the value would only produce another thing to validate.
+
 - The wRFC LOGON sent a two-byte language code where the wire carries one. `connect()`
   accepts a two-character ISO code and the builder used `lang.upper()`, so `"EN"` went
   out as two bytes, the frame came to 240 against a working 238, and the server rejected
