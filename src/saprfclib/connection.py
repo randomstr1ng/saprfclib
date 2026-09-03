@@ -2328,7 +2328,7 @@ class Connection:
         self._ws_session_token = session_token
         with _fail_closed(self._session, "RFCPING"):
             self._transport.send_message(logon_msg)
-            logon_resp = self._transport.recv_message()
+            logon_resp = _join_response_frames(self._transport.recv_message, "LOGON")
             attrs_ws = _ws_parse_logon_response(logon_resp)
             failure = _ws_logon_failure(logon_resp)
         if failure is not None:
@@ -2451,7 +2451,7 @@ class Connection:
                 )
                 self._ws_session_token = session_token
                 self._transport.send_message(logon_msg)
-                logon_resp = self._transport.recv_message()
+                logon_resp = _join_response_frames(self._transport.recv_message, "LOGON")
                 # Auth: extract ConnectionAttributes from 0x0450/0x0452/0x0453.
                 attrs_ws = _ws_parse_logon_response(logon_resp)
                 # ... and then check whether the call embedded in that LOGON
@@ -2495,7 +2495,9 @@ class Connection:
                 )
                 self._transport.send_message(frame)
                 try:
-                    response = self._transport.recv_message()
+                    response = _join_response_frames(
+                        self._transport.recv_message, "RFC_GET_FUNCTION_INTERFACE"
+                    )
                 except WebSocketError as ws_exc:
                     # The server closed the WebSocket instead of answering
                     # RFC_GET_FUNCTION_INTERFACE. Auth already completed, so this is
@@ -2516,7 +2518,9 @@ class Connection:
                     {"FUNCNAME": func_name},
                 )
                 self._transport.send_message(frame)
-                response = self._transport.recv_message()
+                response = _join_response_frames(
+                    self._transport.recv_message, "RFC_GET_FUNCTION_INTERFACE"
+                )
         else:
             request_tlv = build_invoke_request(
                 "RFC_GET_FUNCTION_INTERFACE",
@@ -2529,7 +2533,11 @@ class Connection:
             handle = self._session.handle or b"        "
             frame = self._build_invoke_frame(handle, request_tlv)
             self._send_invoke_frame(frame)
-            response = self._transport.recv_message()
+            # A function interface can be large -- 44 parameters already fill 2342
+            # bytes -- so this reply chunks like any other.
+            response = _join_response_frames(
+                self._transport.recv_message, "RFC_GET_FUNCTION_INTERFACE"
+            )
 
         # Parse the response TLV to extract PARAMS table rows.
         # We use a direct walker rather than parse_invoke_response because we need
@@ -2553,46 +2561,29 @@ class Connection:
                 len(response),
             )
 
-        # WS_PENDING 2-step (Track 2): if the INVOKE+GFI response yielded no rows,
-        # the server accepted the LOGON (RFCPING, step 1) but failed to execute GFI
-        # (step 2, e.g. CALL_FUNCTION_RECEIVE_ERROR / unknown function).
-        # Surface the failure as AbapSystemFailure including the RC from 0x0420
-        # so the caller can inspect it (test expects "163" in str(exc)).
+        # An empty PARAMS table is not a failure. RFC_PING takes no parameters, so
+        # its interface legitimately has no rows, and treating "no rows" as an
+        # error made every parameterless function uncallable over wRFC while
+        # reporting something that had not happened.
+        #
+        # Whether the fetch failed is a question the reply already answers:
+        # 0x0417 marks an exception and 0x0420 carries the return code. Ask those
+        # rather than inferring from the row count.
         if _ws_pending_path and not rows:
             _tlv_map = Session._parse_tlv(response)
             _rc_raw = _tlv_map.get(0x0420) or b""
             _rc = struct.unpack(">I", _rc_raw)[0] if len(_rc_raw) == 4 else 0
-            _exc_raw = _tlv_map.get(0x0411) or b""
-            _exc_name = (
-                _exc_raw.decode("utf-16-le", errors="replace").rstrip("\x00 ") if _exc_raw else ""
-            )
-            _err_raw = _tlv_map.get(0x0402)
-            _err_msg = ""
-            if _err_raw:
-                try:
-                    _err_msg = _err_raw.decode("utf-16-le", errors="replace").rstrip("\x00 ")
-                except Exception:
-                    pass
-            # When the server sends no return code, say so. This previously fell
-            # back to "163", which is the one case where a fabricated code is most
-            # misleading: _rc is 0 precisely when the server reported NO error, so
-            # the library was inventing a specific failure number to describe a
-            # reply that carried none.
-            _detail = _exc_name or _err_msg
-            if _rc:
-                _summary = f"{_rc}: {_detail or 'RFC_GET_FUNCTION_INTERFACE failed'}"
-            elif _detail:
-                _summary = (
-                    f"RFC_GET_FUNCTION_INTERFACE returned no parameter rows and no "
-                    f"return code; the server said: {_detail}"
+            _is_exception = 0x0417 in _tlv_map
+            if _is_exception or _rc:
+                _exc_raw = _tlv_map.get(0x0411) or b""
+                _exc_name = (
+                    _exc_raw.decode("utf-16-le", errors="replace").rstrip("\x00 ")
+                    if _exc_raw
+                    else ""
                 )
-            else:
-                _summary = (
-                    "RFC_GET_FUNCTION_INTERFACE returned no parameter rows, no return "
-                    "code and no message. The wRFC LOGON was accepted, so the "
-                    "connection works and the interface fetch does not."
-                )
-            raise AbapSystemFailure(message=_summary)
+                _err_msg = _decode_error_text(_tlv_map.get(0x0402))
+                _detail = _exc_name or _err_msg or "RFC_GET_FUNCTION_INTERFACE failed"
+                raise AbapSystemFailure(message=f"{_rc}: {_detail}" if _rc else _detail)
 
         # Build FunctionDesc from the parsed rows. Track STRUCTURE params needing
         # a secondary RFC_GET_STRUCTURE_DEFINITION bootstrap (META-04).
@@ -2720,7 +2711,11 @@ class Connection:
             frame = self._build_invoke_frame(handle, request_tlv)
             self._send_invoke_frame(frame)
 
-        response = self._transport.recv_message()
+        # A DDIC structure definition is a table of field rows and can exceed one
+        # frame for a wide structure.
+        response = _join_response_frames(
+            self._transport.recv_message, "RFC_GET_STRUCTURE_DEFINITION"
+        )
 
         raise_for_rfc_error(_strip_gw_header(response))
         dfies_rows = _parse_dfies_rows(response)
@@ -2770,7 +2765,7 @@ class Connection:
                     handle = self._session.handle or b"        "
                     self._send_invoke_frame(self._build_invoke_frame(handle, request_tlv))
                 with _fail_closed(self._session, "RFCPING"):
-                    resp = self._transport.recv_message()
+                    resp = _join_response_frames(self._transport.recv_message, "RFCPING")
                     return self._rfcping_ok(resp)
             finally:
                 # Guarded: a failed ping leaves the session BROKEN, and mark_ready
@@ -2933,7 +2928,7 @@ class Connection:
         self._ws_session_token = session_token
         try:
             self._transport.send_message(logon_msg)
-            logon_resp = self._transport.recv_message()
+            logon_resp = _join_response_frames(self._transport.recv_message, "LOGON")
         except (OSError, EOFError) as exc:
             raise CommunicationError(str(exc), original_exception=exc) from exc
         # Extract auth (0x0450 → sys_id, etc.) — raises ValueError on auth failure.
@@ -2966,7 +2961,7 @@ class Connection:
         invoke_msg = _build_ws_invoke_frame(func_name, desc, params)
         try:
             self._transport.send_message(invoke_msg)
-            invoke_resp = self._transport.recv_message()
+            invoke_resp = _join_response_frames(self._transport.recv_message, func_name)
         except (OSError, EOFError) as exc:
             raise CommunicationError(str(exc), original_exception=exc) from exc
         except WebSocketError:
@@ -3054,7 +3049,7 @@ class Connection:
                     frame = _build_ws_invoke_frame(func_name, desc, dict(params))
                     with _fail_closed(self._session, func_name):
                         self._transport.send_message(frame)
-                        response = self._transport.recv_message()
+                        response = _join_response_frames(self._transport.recv_message, func_name)
                         self._last_server_duration_s = extract_server_duration(response)
                         result = parse_invoke_response(response, desc)
                 else:
@@ -3469,7 +3464,7 @@ class Connection:
                 request = self._build_invoke_frame(handle, request_tlv)
                 try:
                     self._send_invoke_frame(request)
-                    response = self._transport.recv_message()
+                    response = _join_response_frames(self._transport.recv_message, "bgRFC state")
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
                 # Parse response: look for a BGRFC_STATE param in the response TLV.

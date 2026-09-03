@@ -182,3 +182,30 @@ def test_a_frame_with_no_gw_header_gets_no_opinion() -> None:
     assert _frame_reports_itself_final(b"") is None
     assert _frame_reports_itself_final(MIDDLE.read_bytes()) is False
     assert _frame_reports_itself_final(FINAL.read_bytes()) is True
+
+
+def test_every_response_read_reassembles() -> None:
+    """Not just the classic invoke, which is where reassembly landed first.
+
+    A wRFC call, a metadata fetch and a structure lookup all read replies that
+    can exceed one frame, and each read its own single frame. The wRFC path
+    reproduced the original bug exactly -- RFC_READ_TABLE on DD03L past ~2000
+    rows failing with "tag 0x0305 length 250 exceeds remaining payload" -- while
+    the classic path beside it had been fixed.
+
+    Asserted structurally: exercising each needs a live system of the right kind,
+    and what must not regress is that no response read goes back to a bare
+    recv_message.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).parent.parent / "src" / "saprfclib" / "connection.py").read_text()
+    bare = re.findall(r"^\s*(?:\w+) = self\._transport\.recv_message\(\)", src, re.MULTILINE)
+
+    # What legitimately remains is the NI/GW handshake loop, which exchanges
+    # control frames rather than TLV result streams.
+    assert len(bare) <= 1, (
+        f"{len(bare)} response reads still take a single frame; a reply larger "
+        f"than one frame would be silently truncated"
+    )
