@@ -1,0 +1,95 @@
+{
+  "message_type": "WRFC_INVOKE_REQUEST",
+  "capture_source": "live capture 2026-09-03; SAP A4H kernel 793 over WebSocket RFC. STFC_CONNECTION with REQUTEXT='probe', called by a minimal client built against the reference SDK. Nothing needed sanitising: the frame carries no credential, host or user, only the function name, its parameter names and the literal 'probe'.",
+  "evidence": "saprfclib's build_invoke_request produces this frame byte for byte, 648 bytes, for the same descriptor and parameters",
+  "expected_parse": {
+    "function": "STFC_CONNECTION",
+    "importing": {
+      "REQUTEXT": "probe"
+    },
+    "exporting_declared": [
+      "ECHOTEXT",
+      "RESPTEXT"
+    ]
+  },
+  "notes": [
+    "There is no wRFC-specific invoke format. This is a classic invoke TLV stream sent without a GW header, which is why the fix for issue #14's invoke path was a deletion rather than a new encoder.",
+    "UTF-16LE, unlike the LOGON, which is single-byte. The LOGON is exchanged in codepage 1100 and the session moves to 4103 once established, so the asymmetry is deliberate.",
+    "Carries no 0x5001 ngrfc record, no 0x0136 session key, and neither 0x0503 nor 0x0420 -- the last two are response markers, and the frame this replaced sent them in a request.",
+    "This is the second invoke of the session. The first frame after a LOGON -- the RFC_GET_FUNCTION_INTERFACE call -- additionally carries 0x0101, 0x0103, 0x0106 and 0x0514 ahead of these records. [ASSUMED] that a plain invoke may be the first frame after a LOGON without that prefix; the reference never does it, so it is untested."
+  ],
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 6,
+      "name": "request_marker",
+      "value": "0502 0000",
+      "type": "variable",
+      "note": "tag 0x0502 len=0"
+    },
+    {
+      "offset": 6,
+      "length": 12,
+      "name": "release",
+      "value": "000b 0006",
+      "type": "variable",
+      "note": "tag 0x000b len=6, '754'"
+    },
+    {
+      "offset": 18,
+      "length": 36,
+      "name": "function_name",
+      "value": "0102 001e",
+      "type": "variable",
+      "note": "tag 0x0102 len=30, 'STFC_CONNECTION'"
+    },
+    {
+      "offset": 54,
+      "length": 6,
+      "name": "marker",
+      "value": "0512 0000",
+      "type": "variable",
+      "note": "tag 0x0512 len=0"
+    },
+    {
+      "offset": 60,
+      "length": 22,
+      "name": "exporting_declaration",
+      "value": "0205 0010",
+      "type": "variable",
+      "note": "tag 0x0205 len=16, 'ECHOTEXT'"
+    },
+    {
+      "offset": 82,
+      "length": 22,
+      "name": "exporting_declaration",
+      "value": "0205 0010",
+      "type": "variable",
+      "note": "tag 0x0205 len=16, 'RESPTEXT'"
+    },
+    {
+      "offset": 104,
+      "length": 22,
+      "name": "param_name",
+      "value": "0201 0010",
+      "type": "variable",
+      "note": "tag 0x0201 len=16, 'REQUTEXT'"
+    },
+    {
+      "offset": 126,
+      "length": 516,
+      "name": "param_value",
+      "value": "0203 01fe",
+      "type": "variable",
+      "note": "tag 0x0203 len=510, 'probe'"
+    },
+    {
+      "offset": 642,
+      "length": 4,
+      "name": "terminator",
+      "value": "ffff0000",
+      "type": "fixed",
+      "note": "end of stream"
+    }
+  ]
+}

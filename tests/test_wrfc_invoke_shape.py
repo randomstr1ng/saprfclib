@@ -147,3 +147,35 @@ def test_the_invoke_is_utf16_while_the_logon_is_single_byte() -> None:
     )
     assert invoke[0x0102] == "RFCPING".encode("utf-16-le")  # 14 bytes
     assert dict(_records(logon))[0x0102] == b"RFCPING"  # 7 bytes
+
+
+# --------------------------------------------------------------------------- #
+# Against a real successful call
+# --------------------------------------------------------------------------- #
+
+from pathlib import Path  # noqa: E402
+
+GOLDEN = Path(__file__).parent / "golden" / "framing"
+
+
+def test_our_invoke_is_byte_identical_to_one_that_completed_a_call() -> None:
+    """The strongest form this can be checked in.
+
+    The fixture is the frame a reference client sent for STFC_CONNECTION with
+    REQUTEXT='probe', in an exchange the server answered with ECHOTEXT='probe'.
+    Ours is the same 648 bytes.
+    """
+    ours = _build_ws_invoke_frame("STFC_CONNECTION", _stfc(), {"REQUTEXT": "probe"})
+    assert ours == (GOLDEN / "wrfc_invoke_request.bin").read_bytes()
+
+
+def test_the_successful_response_parses_with_the_classic_parser() -> None:
+    """Neither direction needed a wRFC-specific codec.
+
+    A wRFC response is a classic response TLV stream without the GW header, which
+    is why the parse side was a deletion too.
+    """
+    from saprfclib.invoke import parse_invoke_response
+
+    result = parse_invoke_response((GOLDEN / "wrfc_invoke_response.bin").read_bytes(), _stfc())
+    assert result["ECHOTEXT"] == "probe"
