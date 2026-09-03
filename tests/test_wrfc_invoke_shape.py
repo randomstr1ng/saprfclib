@@ -209,3 +209,51 @@ def test_a_parameterless_function_is_not_treated_as_a_failed_fetch() -> None:
     assert _s.unpack(">I", tags[0x0420])[0] == 0, "return code zero"
     # Those two facts are what the bootstrap now consults; a row count of zero is
     # not evidence of anything.
+
+
+def test_decfloat_crosses_wrfc_through_the_classic_codec() -> None:
+    """The offline half of what closed #19.
+
+    That issue asked for DECF16/DECF34 support in the wRFC ngrfc Q-markers. Those
+    Q-markers no longer exist: the wRFC invoke is a classic invoke TLV stream, so
+    the same codec carries these types on both transports and there is no
+    separate encoder to teach.
+
+    Verified live by calling one function module over both transports and
+    comparing all nine returned values -- identical, encode and decode. This
+    asserts the part that can be checked without a system: the wRFC frame builder
+    produces the same bytes as the classic one for DECFLOAT parameters, so they
+    cannot drift apart unnoticed.
+    """
+    from decimal import Decimal
+
+    from saprfclib.codec import RFCTYPE_DECF16, RFCTYPE_DECF34
+    from saprfclib.invoke import build_invoke_request
+
+    def d(name: str, rfctype: int, width: int) -> FieldDesc:
+        return FieldDesc(
+            name=name,
+            rfctype=rfctype,
+            nuc_length=width,
+            nuc_offset=0,
+            uc_length=width,
+            uc_offset=0,
+            decimals=0,
+            unicode_mode=True,
+            direction=RFC_IMPORT,
+        )
+
+    desc = FunctionDesc(
+        name="Z_DECF",
+        parameters=[d("IV_D16", RFCTYPE_DECF16, 8), d("IV_D34", RFCTYPE_DECF34, 16)],
+    )
+    params = {"IV_D16": Decimal("42.0"), "IV_D34": Decimal("-1")}
+
+    assert _build_ws_invoke_frame("Z_DECF", desc, params) == build_invoke_request(
+        "Z_DECF", desc, params
+    )
+
+    # And the value really is DPD little-endian, as settled in #13 -- 42.0 is
+    # 22 34 ... 02 20 as IEEE lays it out and arrives reversed on the wire.
+    values = [v for t, v in _records(_build_ws_invoke_frame("Z_DECF", desc, params)) if t == 0x0203]
+    assert values[0] == bytes.fromhex("2002000000003422")
