@@ -1312,6 +1312,42 @@ def _sap_lz4_frame(data: bytes) -> bytes:
     return b"\x34" + struct.pack("<II", len(data), len(block)) + block
 
 
+def _build_ws_invoke_frame(
+    func_name: str,
+    desc: FunctionDesc,
+    params: dict[str, Any],
+) -> bytes:
+    """The wRFC invoke frame: a classic invoke TLV stream, sent without a GW header.
+
+    There is no wRFC-specific invoke format. A reference client's invoke over
+    WebSocket is byte-for-byte what ``build_invoke_request`` already produces for
+    classic RFC -- the same tags in the same order with the same lengths:
+
+        0502            request marker
+        000b  UTF-16LE  release
+        0102  UTF-16LE  function name
+        0512            marker
+        0205  UTF-16LE  one per EXPORTING parameter (declarations)
+        0201  UTF-16LE  parameter name      \ one pair per
+        0203  UTF-16LE  parameter value     | IMPORTING parameter
+        ffff            terminator
+
+    What this replaces sent none of the parameters at all. It built a 0x5001
+    record holding an "ngrfc" body with Q-markers and a 0x0136 session key, and
+    added 0x0503, 0x0420 and 0x0130 -- 0x0503 and 0x0420 being response markers
+    appearing in a request. The server answered it with silence, the same way it
+    answered the malformed LOGON.
+
+    Note that the invoke is UTF-16LE while the LOGON is single-byte. That is not
+    an inconsistency to tidy away: the LOGON is exchanged in codepage 1100, which
+    its reply reports in 0x0016, and the session moves to 4103 once it is
+    established.
+
+    Source: reference-client capture, A4H kernel 793.
+    """
+    return build_invoke_request(func_name, desc, params)
+
+
 def _build_ws_invoke_message(
     func_name: str,
     desc: FunctionDesc,
@@ -3093,11 +3129,10 @@ class Connection:
                 self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                 # Step 2: INVOKE+RFC_GET_FUNCTION_INTERFACE (now in READY state).
                 # Q-markers are safe in INVOKE frames (pcap-verified frame 233).
-                frame = _build_ws_invoke_message(
+                frame = _build_ws_invoke_frame(
                     "RFC_GET_FUNCTION_INTERFACE",
                     bootstrap_desc,
                     {"FUNCNAME": func_name},
-                    session_key=self._next_ws_invoke_key(),
                 )
                 self._transport.send_message(frame)
                 try:
@@ -3116,11 +3151,10 @@ class Connection:
                     ) from ws_exc
             else:
                 # Subsequent bootstrap: connection already established, use invoke format.
-                frame = _build_ws_invoke_message(
+                frame = _build_ws_invoke_frame(
                     "RFC_GET_FUNCTION_INTERFACE",
                     bootstrap_desc,
                     {"FUNCNAME": func_name},
-                    session_key=self._next_ws_invoke_key(),
                 )
                 self._transport.send_message(frame)
                 response = self._transport.recv_message()
@@ -3313,11 +3347,8 @@ class Connection:
         if self._is_ws():
             # wRFC: route STRUCTURE lookups through the raw-TLV invoke builder so
             # STRUCTURE params over wRFC are attempted, not silently dropped.
-            frame = _build_ws_invoke_message(
-                "RFC_GET_STRUCTURE_DEFINITION",
-                rsd_desc,
-                {"TABNAME": tabname},
-                session_key=self._next_ws_invoke_key(),
+            frame = _build_ws_invoke_frame(
+                "RFC_GET_STRUCTURE_DEFINITION", rsd_desc, {"TABNAME": tabname}
             )
             self._transport.send_message(frame)
         else:
@@ -3367,11 +3398,8 @@ class Connection:
             try:
                 request_tlv = self._rfcping_request_tlv()
                 if self._is_ws():
-                    frame = _build_ws_invoke_message(
-                        "RFCPING",
-                        FunctionDesc(name="RFCPING", parameters=[]),
-                        {},
-                        session_key=self._next_ws_invoke_key(),
+                    frame = _build_ws_invoke_frame(
+                        "RFCPING", FunctionDesc(name="RFCPING", parameters=[]), {}
                     )
                     self._transport.send_message(frame)
                 else:
@@ -3570,15 +3598,9 @@ class Connection:
         if ws_key:
             self._cache.put(ws_key, desc)
 
-        # Step 2: INVOKE + func_name with params (pcap-verified Q-marker format, frame 233).
-        invoke_key = self._next_ws_invoke_key()  # counter=2 for first post-logon invoke
-        invoke_msg = _build_ws_invoke_message(
-            func_name=func_name,
-            desc=desc,
-            params=params,
-            session_key=invoke_key,
-            logon_func="RFCPING",
-        )
+        # Step 2: the invoke. No session key -- a reference client's invoke carries
+        # no 0x0136, and the server never issued one to echo.
+        invoke_msg = _build_ws_invoke_frame(func_name, desc, params)
         try:
             self._transport.send_message(invoke_msg)
             invoke_resp = self._transport.recv_message()
@@ -3588,7 +3610,11 @@ class Connection:
             # WS close arrived after step 1 (different TCP segment than LOGON response).
             # Same root cause; fall back to classic RFC.
             return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
-        result = _ws_parse_invoke_response(invoke_resp, desc)
+        # A wRFC response is a classic response TLV stream without the GW header,
+        # so the classic parser reads it. Confirmed against reference captures:
+        # the metadata reply, the logon reply and a UCON rejection all parse, the
+        # last one surfacing as the ABAP error it is.
+        result = parse_invoke_response(invoke_resp, desc)
         return _convert_date_time_fields(result, desc)
 
     def call(self, func_name: str, **params: object) -> dict[str, Any]:
@@ -3647,16 +3673,11 @@ class Connection:
 
                 if self._is_ws():
                     # wRFC: raw-TLV invoke over WebSocket (no GW header, no COM_HEAD).
-                    frame = _build_ws_invoke_message(
-                        func_name,
-                        desc,
-                        dict(params),
-                        session_key=self._next_ws_invoke_key(),
-                    )
+                    frame = _build_ws_invoke_frame(func_name, desc, dict(params))
                     with _fail_closed(self._session, func_name):
                         self._transport.send_message(frame)
                         response = self._transport.recv_message()
-                        result = _ws_parse_invoke_response(response, desc)
+                        result = parse_invoke_response(response, desc)
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
                     call_params = _filter_call_params(

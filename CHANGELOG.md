@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The wRFC invoke frame is a classic invoke TLV stream (#14).** There is no
+  wRFC-specific invoke format — a reference client's invoke over WebSocket is
+  byte-for-byte what `build_invoke_request` already produced for classic RFC, so the fix
+  is a deletion rather than a new encoder. What it replaced sent **none of the
+  parameters**: they went into a `0x5001` "ngrfc" body with Q-markers that the server
+  never reads, alongside a `0x0136` session key it never issued and `0x0503`/`0x0420`,
+  which are response markers appearing in a request. A call could not have worked even
+  had the frame been accepted. Responses parse with the classic parser too, confirmed
+  against reference captures of a metadata reply, a logon reply and a UCON rejection.
+  Note the invoke is UTF-16LE while the LOGON is single-byte; that asymmetry is real, as
+  the LOGON is exchanged in codepage 1100 and the session moves to 4103 after it.
+
 - **The wRFC LOGON is confirmed working end to end (#14).** Instrumenting the wire shows
   the sequence: our 220-byte LOGON out, a 632-byte reply back with no embedded failure and
   return code zero, matching the size a reference client's accepted frame draws. Fixture
