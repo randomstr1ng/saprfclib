@@ -324,14 +324,19 @@ def test_live_bgrfc_unit_lifecycle() -> None:
          depending on backend speed; both are valid — see note below)
       5. confirm_unit(unit_id, unit_type) → BGRFC_DEST_CONFIRM sent
 
-    Note on NOT_FOUND after submit (T-06-U04):
-      If the backend processes the unit BEFORE get_unit_state is called, it may
-      have already cleaned up — returning NOT_FOUND. This is NOT an error.
-      NOT_FOUND after a successful submit means the backend committed and cleaned
-      up; it is equivalent to CONFIRMED (anti-pattern: never resend on NOT_FOUND
-      after a known-good submit). This test accepts NOT_FOUND, IN_PROCESS,
-      COMMITTED, or CONFIRMED as valid responses — all indicate the backend
-      received and started processing the unit. ROLLED_BACK is the only failure.
+    Why NOT_FOUND is not accepted (issue #15):
+      An earlier version of this test treated NOT_FOUND after submit as a pass,
+      reasoning that the backend may have committed and cleaned up already. That
+      makes the test unfalsifiable. NOT_FOUND is also exactly what an unconfigured
+      bgRFC backend returns for every unit it was never given: no supervisor
+      destination means nothing is registered, so the state reads NOT_FOUND and
+      the confirm cannot fail because there is nothing to confirm. The whole
+      sequence then "passes" on a system where bgRFC is switched off.
+
+      So this test now does two things instead: it skips outright unless bgRFC is
+      configured, and it requires the state to actually move across the confirm.
+      A confirm the backend ignores looks identical to one that worked, and the
+      state changing is the only thing that tells them apart.
 
     SAPRFC_PASSWD is read from the environment only; never logged, printed,
     or asserted in plaintext (T-06-E01 / T-04-CRED).
@@ -351,6 +356,26 @@ def test_live_bgrfc_unit_lifecycle() -> None:
         passwd=passwd,
     )
     try:
+        # bgRFC has to be configured for anything below to mean anything. Read
+        # the customizing tables and skip rather than fail: an unconfigured
+        # system is a missing precondition, not a defect in the encoding.
+        for table, what in (
+            ("BGRFC_CUST_I_SRV", "supervisor destination"),
+            ("BGRFC_CUST_I_DST", "inbound destination"),
+        ):
+            try:
+                rows = conn.call(
+                    "RFC_READ_TABLE", QUERY_TABLE=table, DELIMITER="|", ROWCOUNT=1
+                ).get("DATA", [])
+            except Exception as exc:  # noqa: BLE001
+                pytest.skip(f"cannot read {table} ({type(exc).__name__}); bgRFC state unknown")
+            if not rows:
+                pytest.skip(
+                    f"bgRFC has no {what} ({table} is empty) — configure it in "
+                    "SBGRFCCONF. Without it a unit is never registered, so this "
+                    "test would pass without exercising the wire encoding."
+                )
+
         # TRFC-05: create_unit with a queue name → unit_type='Q'.
         with conn.create_unit(queues=["SAPRFC_BG_Q1"]) as unit:
             unit_id = unit.unit_id
@@ -371,23 +396,20 @@ def test_live_bgrfc_unit_lifecycle() -> None:
         # TRFC-06: query the unit state on the backend.
         state = conn.get_unit_state(unit_id, unit_type)
 
-        # Acceptable post-submit states (see docstring note on NOT_FOUND):
-        #   NOT_FOUND  — backend processed and cleaned up before we queried
-        #   IN_PROCESS — backend received and is executing (normal fast query)
-        #   COMMITTED  — backend committed the LUW
-        #   CONFIRMED  — backend already confirmed + cleaned up
-        # ROLLED_BACK is the only failure state (unit did not commit).
+        # The backend must know the unit. NOT_FOUND is excluded deliberately:
+        # it is what an unregistered unit reads as, and accepting it is what made
+        # the earlier version of this test unable to fail.
         _valid_states = {
-            UnitState.NOT_FOUND,
             UnitState.IN_PROCESS,
             UnitState.COMMITTED,
             UnitState.CONFIRMED,
         }
         assert state in _valid_states, (
             f"get_unit_state() returned {state!r} for unit {unit_id[:8]}... — "
-            "expected one of NOT_FOUND/IN_PROCESS/COMMITTED/CONFIRMED after submit. "
-            "ROLLED_BACK indicates the backend rejected the BGRFC_DEST_SHIP frame "
-            "(check SBGRFCMON on the SAP side for the error details)."
+            "expected IN_PROCESS/COMMITTED/CONFIRMED after a submit the backend "
+            "accepted. NOT_FOUND means it has no record of the unit, so the "
+            "BGRFC_DEST_SHIP frame did not register; ROLLED_BACK means it "
+            "registered and refused. Check SBGRFCMON for the details."
         )
 
         # TRFC-06: confirm the unit — cleans up backend state tables.
@@ -395,13 +417,19 @@ def test_live_bgrfc_unit_lifecycle() -> None:
         # the backend treats it as a no-op (T-06-U04 anti-pattern guard).
         conn.confirm_unit(unit_id, unit_type)
 
-        # Post-confirm: querying state is optional; NOT_FOUND means success.
+        # TRFC-06: the confirm has to have changed something. confirm_unit()
+        # raising nothing proves only that the frame was accepted, not that it
+        # was acted on -- a frame the backend discards raises nothing either.
         post_state = conn.get_unit_state(unit_id, unit_type)
-        # After confirm, the backend may have cleaned up → NOT_FOUND or CONFIRMED.
         _post_confirm_valid = {UnitState.NOT_FOUND, UnitState.CONFIRMED}
         assert post_state in _post_confirm_valid, (
             f"get_unit_state() after confirm_unit() returned {post_state!r} — "
-            "expected NOT_FOUND (backend cleaned up) or CONFIRMED."
+            "expected CONFIRMED, or NOT_FOUND once the backend has cleaned up."
+        )
+        assert post_state is not state, (
+            f"the unit sat at {state!r} before the confirm and after it. A confirm "
+            "the backend ignores is indistinguishable from one that worked, so an "
+            "unchanged state is not evidence that BGRFC_DEST_CONFIRM was acted on."
         )
 
     finally:

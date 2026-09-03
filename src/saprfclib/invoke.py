@@ -597,10 +597,15 @@ def build_trfc_confirm_request(
 # The UnitID is a 32-char uppercase hex string (: the UUID formatter asserts
 # len == 32).  Unit type is 'T' (no queues) or 'Q' (queues given).
 #
-# OG-06-02 CONFIRMED (2026-08-05): test_live_bgrfc_unit_lifecycle passed — BGRFC_UNIT_ID/
-# BGRFC_UNIT_TYPE named-param encoding confirmed correct by live bgRFC gate.  No raw
-# BGRFC_SRV_STATE/ARFCSDATA struct layout needed — server reads only the named params.
-# Source: discriminator + live bgRFC gate.
+# OG-06-02 NOT CONFIRMED (issue #15). This block previously claimed the named-param
+# encoding was confirmed because test_live_bgrfc_unit_lifecycle passed on 2026-08-05.
+# It was not evidence: that test accepted NOT_FOUND as a successful state, and
+# NOT_FOUND is what every unit reads as on a backend with no supervisor destination
+# — nothing is registered, so the state query and the confirm both succeed by having
+# nothing to act on. The test has since been made to skip unless bgRFC is configured
+# and to require the state to move across the confirm.
+# What would settle it: a live round trip on a configured backend where the unit is
+# visible in the state tables independently of get_unit_state().
 #
 # Security (T-06-U02): UnitID length is enforced to exactly RFC_UNITID_LN=32 hex chars
 # before encoding. queue_names are bounded.
