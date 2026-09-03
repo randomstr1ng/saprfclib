@@ -274,6 +274,7 @@ def connect_tcp(
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float | None = DEFAULT_READ_TIMEOUT,
+    trace: RfcTrace | None = None,
 ) -> Transport:
     """Open a blocking TCP socket and return a Transport bound to it.
 
@@ -302,7 +303,7 @@ def connect_tcp(
     sock.settimeout(read_timeout)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     enable_keepalive(sock)
-    return Transport(sock)
+    return Transport(sock, trace=trace)
 
 
 class AsyncTransport:
@@ -397,6 +398,7 @@ async def connect_tcp_async(
     *,
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
+    trace: RfcTrace | None = None,
 ) -> AsyncTransport:
     """Open an asyncio TCP connection and return an AsyncTransport.
 
@@ -421,4 +423,4 @@ async def connect_tcp_async(
     if sock is not None:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         enable_keepalive(sock)
-    return AsyncTransport(reader, writer)
+    return AsyncTransport(reader, writer, trace=trace)

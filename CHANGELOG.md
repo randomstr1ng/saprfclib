@@ -237,8 +237,15 @@ Pre-1.0, so these land without a major bump, but they can surprise:
 
 ### Added
 
-- `RfcTrace` writes RFC trace files in the SAP SDK's format (#21), attachable to a
-  `Transport` or `AsyncTransport`. The point is diffability: comparing an SDK trace
+- Tracing is a connection parameter rather than an environment variable, unlike the SDK,
+  which reads `RFC_TRACE`. A process that starts writing traffic to disk because of a
+  variable it inherited is a surprise, and the file — credential-redacted though it is —
+  still holds everything else that crossed the wire. Enabling it should be visible at the
+  call site.
+
+- `RfcTrace` writes RFC trace files in the SAP SDK's format (#21), enabled with
+  `connect(trace=RfcTrace(path))` and attachable directly to a `Transport` or
+  `AsyncTransport`. The point is diffability: comparing an SDK trace
   against this library's traffic is what identified every defect behind #14, and doing it
   then meant parsing the SDK's output by hand because there was nothing on this side to
   compare with. The hook sits at the transport, so what lands in the file is what crossed
