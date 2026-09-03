@@ -237,7 +237,7 @@ def build_ni_route(hops: list[RouteHop], dest_host: str, dest_service: str) -> b
     total_data = sum(len(e) for e in hop_entries) + len(dest_data)
 
     out = bytearray()
-    out += b"NI_ROUTE\x00"  # 9 bytes, null-terminated
+    out += _NI_ROUTE_MARKER + b"\x00"  # 9 bytes, null-terminated
     out += bytes([0x02])  # talk_mode
     out += bytes([0x28])  # fixed byte confirmed from live capture
     out += bytes([0x02])  # route_version
@@ -565,6 +565,10 @@ _NAME_LEN = 40
 # SAP GUI performing a group logon (tests/golden/router/sapms_*.bin) and then
 # reproduced against the live server with this library, which answered errorno 0.
 _FLAG_CLIENT = 0x02
+# Not a reliable discriminator, and deliberately unused. A server-sent
+# server-list reply carries 0x03, but a server-sent ATTACH reply carries 0x02 --
+# see sapms_attach_reply.bin against sapms_serverlist_reply.bin. Validating a
+# reply against this value would reject a valid attach.
 _FLAG_SERVER = 0x03
 
 _OP_ATTACH = 0x08
@@ -751,6 +755,10 @@ def _build_sapms_server_list_request() -> bytes:
 
 
 def _build_sapms_group_list_request() -> bytes:
+    # Nothing calls this. Group resolution goes through _build_sapms_login_frame,
+    # which carries the group name; this builder produced
+    # sapms_grouplist_reply.bin during the investigation and is kept so that
+    # capture can be reproduced.
     """Build the logon-group list request body (selector 0x1f)."""
     return build_ms_list_request(_SEL_GROUP_LIST)
 

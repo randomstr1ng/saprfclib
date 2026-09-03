@@ -128,32 +128,39 @@ _TAG_PASSWORD = 0x0117
 _RFCPING_NAME = b"RFCPING"
 
 # ---------------------------------------------------------------------------
-# GW APPCHDR6 frame constants — protocol analysis sources in docs/protocol/framing.md
+# GW frame header constants — field tables in docs/protocol/framing.md
 # ---------------------------------------------------------------------------
-# APPCHDR6 layout shared by ALL GW frames (confirmed):
-#   [0]     = 0x06  type MSB — hardcoded 6 in all builders (the GW_DONE builder/the GW_INFO builder/the GW_CONNECT builder/the gateway send path)
-#   [1]     = type LSB (0x01/0x05/0x09/0x0B/0x0F/0xCB — see types below)
-#   [2]     = protocol version byte from CONV_PROTO[0x17] = 0x02 for NW 7.x
-#   [3]     = 0x00 (from memset)
-#   [4:6]   = 0xffff (flags high word — all builders set this explicitly)
-#   [6:8]   = 0x0000 (flags low word — from memset)
-#   [40:48] = GW handle (8-byte ASCII, from CONV_PROTO[8], i.e. *(arg2+8))
-_GW_TYPE_CONNECT = 0x0601  # protocol analysis:  *(r13_11+0x51) = 1
-_GW_TYPE_INFO = 0x060F  # protocol analysis:   *(r13_4+0x51)  = 0xf
-_GW_TYPE_DONE = 0x0605  # protocol analysis:   *(rdx_14+0x51) = 5
-_GW_TYPE_MONITOR = 0x060B  # GW_MONITOR — defined but NOT sent (pyrfc writev RE: absent)
-_GW_TYPE_RFC = 0x06CB  # RFC data frame (logon + calls) — wire-captured PKT 14
-# Version field [2:4]: only byte [2] is set from CONV_PROTO[0x17] = 0x02; [3] = 0 (memset).
-# We write both as a BE uint16 for clarity — wire result is identical.
+# The 80-byte header shared by ALL GW frames, as observed across every committed
+# capture under tests/golden/ (offsets are into the GW payload, i.e. past the
+# 4-byte NI length prefix):
+#   [0]     = 0x06   high byte of the frame type; 0x06 in every frame observed
+#   [1]     = type low byte (0x01/0x05/0x09/0x0F/0xCB — see types below)
+#   [2]     = 0x02   protocol version; 0x02 in every frame observed
+#   [3]     = 0x00
+#   [4:6]   = 0xffff flags high word
+#   [6:8]   = 0x0000 flags low word
+#   [40:48] = GW handle, 8-byte ASCII, assigned by the gateway
+_GW_TYPE_CONNECT = 0x0601  # Source: gw_connect_response.bin, server_registration_request.bin
+_GW_TYPE_DONE = 0x0605  # Source: gw_done_client.bin, gw_done_server.bin
+# No committed capture holds a GW_INFO frame, so this value rests on behaviour
+# rather than bytes: the handshake this library drives completes against a live
+# gateway with 0x060F here.
+_GW_TYPE_INFO = 0x060F
+_GW_TYPE_RFC = 0x06CB  # RFC data frame (logon + calls). Source: framing/logon_request.bin
+# Continuation frames of a chunked reply carry 0x0609 — see _join_response_frames,
+# which drives reassembly off the TLV terminator rather than the frame type.
+# Source: framing/multiframe_middle_frame.bin, framing/multiframe_final_frame.bin
+# Version field [2:4]: byte [2] = 0x02, byte [3] = 0x00. Written as one BE uint16.
 _GW_VERSION = 0x0200
-# Flags [4:8]: [4:6] = 0xffff set by all builders; [6:8] = 0 from memset. Combined = 0xFFFF0000.
+# Flags [4:8]: [4:6] = 0xffff, [6:8] = 0x0000. Combined = 0xFFFF0000.
 _GW_FLAGS = 0xFFFF0000
 # GW header fields [24:32] — constant across all frames in every captured session.
 # Wire-verified: ALL golden requests AND responses carry identical values (logon +
 # stfc_connection + rfc_read_table + stfc_changing + stfc_structure + stfc_deep_table).
-# [24:28] = 0x00000008: APPC header version field checked by server ("client with wrong
-#   appc header version rejected" error string at / CpicErrDescr 0xf6).
-#   Sending zeros causes immediate 80B 0x06CE rejection from server.
+# [24:28] = 0x00000008: APPC header version, and the server checks it. Sending
+#   zeros instead draws an immediate 80-byte 0x06CE rejection, whose text is
+#   "client with wrong appc header version rejected" — so the field is required
+#   and 8 is what NW 7.x wants. Source: behavioural probe against a live gateway.
 # [28:32] = 0x0000050c (=1292): max-message/buffer-size negotiated at CPIC allocate phase.
 #   Same value in client requests AND server responses; constant for NW 7.x.
 _GW_HDR_APPC_VER = 0x00000008  # GW[24:28]: APPC header version (must be 8 for NW 7.x)
@@ -174,26 +181,29 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 # /SAPDS/RFC_ABAP_INSTALL_RUN, for one). Verified across all nine request
 # fixtures: the BE uint32 at [0:4] equals len(tlv_body) exactly in each.
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
-# Client tail at APPCHDR6[76:80] in 80-byte control frames (GW_INFO, GW_DONE_CLIENT).
-# protocol analysis: var_3c=0xffff at [76:78] (hardcoded);
-#   var_3a=rol.w(CONV_PROTO[0x1c],8)=bswap(0x0400)=0x0004 at [78:80].
-# CONV_PROTO[0x1c] = 0x0400 for NW 7.x standard connection → bswap = 0x0004.
-# strace of installed pyrfc writev confirms: FF FF 00 04 for GW_INFO + GW_DONE_CLIENT.
-# The reference client the GW_DONE builder/the GW_INFO builder show 0xffffffff (SDK version difference, not wrong).
+# Client tail at [76:80] of an 80-byte control frame (GW_INFO, GW_DONE_CLIENT):
+# [76:78] = 0xffff, [78:80] = 0x0004. Live logons complete with this value.
+# The low half is not universal -- committed request captures carry 0x0004 and
+# 0x0001 at [78:80] (compare framing/rfcping_request.bin against
+# framing/logon_request.bin), and the gateway accepted both, so it varies with the
+# connection rather than identifying a malformed frame. Do not validate on it.
 _GW_CLIENT_TAIL = 0xFFFF0004
-# Live pyrfc SNC capture (2026-07-XX): [76:80] = FF FF 00 09 when SNC is active.
-# CONV_PROTO[0x1c] = 0x0900 for SNC → bswap(0x0900) = 0x0009 → 0xFFFF0009.
+# With SNC active the low half is 0x0009. Source: live SNC capture, 2026-07.
 _GW_CLIENT_TAIL_SNC = 0xFFFF0009
 
-# RFC logon frame tail and header (PKT 14 capture + analysis):
-# _RFC_MARKER at frame[76:80]: same [76:78]=0xffff, [78:80]=0x0004 pattern as control frames.
+# RFC logon frame tail and header. Source: framing/logon_request.bin.
+# _RFC_MARKER sits at frame[76:80]; see the note on _GW_CLIENT_TAIL for why its
+# low half is not a value to check incoming frames against.
 # _COM_HEAD: EBCDIC "RFC000000000" = 0xD9 0xC6 0xC3 = EBCDIC R/F/C, 0xF0*9 = EBCDIC '0'*9.
 _RFC_MARKER = b"\xff\xff\x00\x04"
 _COM_HEAD = b"\xd9\xc6\xc3\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0"  # EBCDIC "RFC000000000"
 
-# Fixed logon TLV values (from PKT 14 wire capture; not yet independently confirmed).
-# These are static capability descriptors — confirmed correct by live logon success.
-# TODO: analyse RfcConnection logon TLV builder to explain each byte.
+# Fixed logon TLV values, taken from the PKT 14 wire capture and confirmed by live
+# logon success against a real system. That is evidence they are accepted, not an
+# account of what each byte means -- the internal structure of these descriptors is
+# not established. Settling it means substituting one field at a time against a live
+# server and recording what it still accepts, the method that settled the wRFC LOGON
+# shape; reading it out of the SDK binary is not a route this repository can cite.
 _TLV_CAPS = b"\x03\x01\x01\x01\x01\x01\x00\x00"  # tag 0x0101: RFC capability flags
 _TLV_VER = b"\x00\x00\x0e\x0b"  # tag 0x0103: RFC protocol version (14.11)
 _TLV_CP = b"\x04\x01\x00\x03\x00\x0a\x02\x00\x00\x00\x23"  # tag 0x0106: codepage descriptor
@@ -210,60 +220,7 @@ _TLV_REL = b"754"  # tags 0x0012/0x0013/0x000B: SAP release
 _WS_OWN_RELEASE = "754"
 _WS_TLV_CAPS = bytes.fromhex("0301010101010000")  # 0x0101: wRFC caps
 _WS_TLV_CP = bytes.fromhex("04010003000a0200000023")  # 0x0106: wRFC codepage
-# 0x5001 header: 14-byte prefix present in every wRFC invoke 0x5001 TLV.
-# Layout ( ctor + setHeader + flush):
-#   [0]     0x24 '$'  — stream-start marker written by flush(1)
-#   [1]     0x48 'H'  — getHeader marker written by setHeader
-#   [2]     0x00      — serializerVersion → conn[0x3d2] via setSerializerVersion.
-#                       readColumnMetadata MLIL-verified: conn[0x3d2]==0 (this
-#                       value) → V2 on-wire (readByte=ngrfc_type FIRST, then readInt2=
-#                       uc_length for types 5-9; jump to skipping switch).
-#                       conn[0x3d2]==1 → V1 on-wire (readInt2=length FIRST, then
-#                       readByte=ngrfc_type). 0x01 caused RABAX: server parsed our
-#                       byte(type)+int2(len) as V1, read int2 from wrong bytes → ngrfc_type=0
-#                       → deserializeField switch exceeded 0x1d → RABAX.
-#   [3]     0x03      — understandSerializerVersion (constant from [rbx].w = 0x302)
-#   [4]     0x00      — cond flag ([].b == 2)
-#   [5-6]   0x41 0x03 — charset2BCD (conn[0x25a] copy via)
-#   [7]     0x00      — stream[5] (uninitialised, stays 0)
-#   [8-9]   0x23 0x00 — conn[0xe08] LE (session handle/counter)
-#   [10-11] 0x40 0x20 — conn[0x3ce] LE (0x2040 → no LZ4; the write-format selector
-#: SDK sets no-LZ4 for payloads ≤ 0x1fff bytes. All current
-#                        invoke bodies are well below that threshold, so raw (uncompressed) body
-#                        is always correct. LZ4 (0x6040) caused RABAX via the LZ4 decompressor.)
-#   [12-13] 0x00 0x00 — bool_arg from NgRfcSendStream ctor (0 = not final? always 0 for invoke)
-# 14-byte 0x5001 function-interface header (pcap-verified: frames 108/229).
-# byte[2]=0x03 (V1 fast-serializer) used for BOTH LOGON and INVOKE:
-#   - LOGON (RFCPING, no params): byte[2]=0x03 + no body → live-confirmed SEC-05 (abf0590).
-#     byte[2]=0x00 (V2 mode) BREAKS LOGON: server aborts with TH: WebSocket server session
-#     aborted (code 1001). Root cause unknown but empirically 0x03 is required.
-#   - INVOKE: byte[2]=0x03 + V1 T/K/Q body → pcap-verified frames 108/229.
-# Layout: [0-1]=0x2448 magic, [2]=serializer_ver, [3]=0x03, [4]=0x00, [5-6]=0x4103,
-#   [7]=0x00, [8-9]=0x2300, [10-11]=0x4020 (LE → no LZ4), [12-13]=0x0000.
-# Byte[2] distinguishes schema-only vs value-carrying frames (pcap-verified):
-#   0x03 = schema only (T/K markers, no Q_SCALAR values) — frames 226/229
-#   0x02 = value-carrying (Q_SCALAR or TABLE_Q markers present) — frame 233
 
-# NG RFC V2 RFCTYPE → NGRFC_TYPE mapping ( the type mapping, V2 path)
-_NGRFC_TYPE_V2: dict[int, int] = {
-    0: 6,  # CHAR
-    1: 12,  # DATE
-    2: 9,  # BCD (also needs decimals byte)
-    3: 14,  # TIME
-    4: 0x17,  # BYTE
-    5: 0x1B,  # TABLE
-    6: 8,  # NUM
-    7: 0x13,  # FLOAT
-    8: 3,  # INT / INT4  (fixed size, ngrfc_type <= 4: no length field)
-    9: 2,  # INT2        (fixed size)
-    10: 1,  # INT1        (fixed size)
-    17: 0x1A,  # STRUCTURE
-    23: 0x15,  # DECF16
-    24: 0x16,  # DECF34
-    29: 0x18,  # STRING
-    30: 0x19,  # XSTRING
-    31: 4,  # INT8        (fixed size)
-}
 
 # Password-scramble key table (64 bytes). Confirmed identical across two
 # independent client versions, and verified end-to-end by a live logon.
@@ -591,76 +548,6 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
 
 
 # --------------------------------------------------------------------------- #
-# NG RFC V2 parameter serialization (for the 0x5001 block body)               #
-# RE: the reference client, reference-client analysis                              #
-# --------------------------------------------------------------------------- #
-
-
-def _ngrfc_write_int2(value: int) -> bytes:
-    """Pack uint16 little-endian for NG RFC V2 stream. readInt2: when connection flag at +0xdf6 == 0 (modern x86-64
-    SAP server), the rol.w byte-swap is skipped → native LE memory order.
-    """
-    return struct.pack("<H", value & 0xFFFF)
-
-
-def _ngrfc_write_lv(name_utf8: bytes) -> bytes:
-    """Write name LV: 1-byte length prefix + UTF-8 bytes. the name serializer: for names <= 0xFE bytes, writes 1B length then
-    UTF-8 bytes. Parameter names are ASCII and never exceed 30 chars.
-    """
-    n = len(name_utf8)
-    if n > 0xFE:
-        raise ValueError(f"NG RFC parameter name too long ({n} B): {name_utf8!r}")
-    return bytes([n]) + name_utf8
-
-
-def _ngrfc_encode_stringlike(value: str, char_count: int) -> bytes:
-    """Encode CHAR/DATE/TIME/NUM value as NG RFC the string serializer output. deserialize<NGRFC_TYPE_6> raw asm (confirmed 2026-07-28):
-    - 'O' (0x4F): compMode only, no int2 prefix; server reads column_meta.length
-      bytes directly via label_5287f4 readData.
-    - 'C' (0x43) + int2(blen) WITHOUT 0x8000: server skips encoding block, reads
-      min(blen, TypeDesc.field_len) bytes directly via label_5287f4 readData.
-    - 'C' (0x43) + int2(blen | 0x8000): WRONG for unicode — triggers double-read
-      (temp_buf encode path + label_5287f4 read + skipBytes(32764)) → RABAX.
-
-    Assembly-confirmed compMode propagation (2026-08-01): deserializeData
-    at does `push r14` (compMode byte read from stream) as the 8th arg before
-    the call to deserializeField. deserializeField reads it as arg_10 = [rsp+16], sets
-    r8=arg_10, and the tail call at propagates r8 as entry_r8 into
-    deserialize<NGRFC_TYPE_6>. entry_r8=='C' (0x43) → readInt2 path; else → direct read
-    of column_meta.length bytes. Our 'C' encoding is confirmed correct end-to-end.
-
-    Value is right-padded with spaces to char_count (ABAP CHAR convention).
-    """
-    padded = value[:char_count].ljust(char_count)
-    utf16 = padded.encode("utf-16-le")
-    blen = len(utf16)
-    if blen <= 9:
-        # 'O': no int2 — server reads column_meta.length bytes directly
-        return bytes([0x4F]) + utf16
-    if blen < 0x3334:
-        # 'C': int2(blen) WITHOUT 0x8000 — direct UTF-16LE read
-        return bytes([0x43]) + _ngrfc_write_int2(blen) + utf16
-    raise NotImplementedError(f"NG RFC CHAR field exceeds single-chunk limit ({blen} B > 0x3333)")
-
-
-# rfctype → D-block \\TYPE= prefix (length appended for variable-width types).
-# CHAR/DATE/TIME/NUM use length-based names matching pcap (\\TYPE=CHAR30, \\TYPE=DATS, …).
-_V1_TYPE_PREFIX: dict[int, bytes] = {
-    0: b"\\TYPE=CHAR",  # CHAR — append nuc_length (e.g. \\TYPE=CHAR255)
-    1: b"\\TYPE=DATS",  # DATE — fixed 8-char
-    3: b"\\TYPE=TIMS",  # TIME — fixed 6-char
-    6: b"\\TYPE=NUMC",  # NUM  — append nuc_length
-}
-
-
-# protocol analysis confirmed V1 format markers (ngrfcSerializeParams):
-#   T(0x54) = schema activation (EXPORT/CHANGING/TABLES params, direction & 2 != 0)
-#   Q(0x51) = caller-supplied value (IMPORT/CHANGING/TABLES with data)
-#   K(0x4b) = TABLE metadata header (nested inside Q body; the metadata serializer)
-#   D(0x44) = type-descriptor block inside Q scalar body
-#   0x01 = V1 body terminator (NOT the 0x45 EXECUTE used in V2)
-
-_V1_CHAR_THRESHOLD_UC = 9  # same as V2: uc_length ≤ 9 → 'O' (UC direct read), else → 'C' NUC
 
 
 # Hardcoded FunctionDescs for standard functions whose interface is stable and well-known.
@@ -699,85 +586,6 @@ def _make_wrfc_builtin_descs() -> dict[str, FunctionDesc]:
 
 
 _WRFC_BUILTIN_DESCS: dict[str, FunctionDesc] = _make_wrfc_builtin_descs()
-
-
-_V1_COL_NAME = b"TABLE_LINE"
-
-# Pcap-verified (frame 233): both DATA (1 col) and FIELDS (5 cols) TABLE Q-markers use this
-# same tname regardless of column structure — it is a generic "rfctype=TABLE" descriptor.
-_V1_TABLE_QMARKER_TNAME = bytes.fromhex(
-    "5c545950453d255f5430303030345330303030303030304f30303030303337303732"
-)  # b"\\TYPE=%_T00004S00000000O0000037072"
-
-
-# ngrfc_type values for Unicode (wRFC) mode — protocol analysis
-
-# D-block type_name strings per rfctype (ABAP internal type descriptors).
-# Length suffix appended for variable-width types (CHAR, NUMC, P, X).
-_V1_TNAME_FIXED: dict[int, bytes] = {
-    1: b"\\TYPE=DATS",
-    3: b"\\TYPE=TIMS",
-    7: b"\\TYPE=FLTP",
-    8: b"\\TYPE=INT4",
-    9: b"\\TYPE=INT2",
-    10: b"\\TYPE=INT1",
-    29: b"\\TYPE=STRING",
-    30: b"\\TYPE=XSTRING",
-    31: b"\\TYPE=INT8",
-    32: b"\\TYPE=UTCLONG",  # UNCERTAIN: tname not live-captured; follows \\TYPE= convention
-}
-# rfctypes NOT in _V1_TNAME_FIXED append nuc_length to their prefix:
-_V1_TNAME_PREFIX: dict[int, bytes] = {
-    0: b"\\TYPE=CHAR",  # → \\TYPE=CHAR30
-    2: b"\\TYPE=P",  # → \\TYPE=P8
-    4: b"\\TYPE=X",  # → \\TYPE=X4
-    6: b"\\TYPE=NUMC",  # → \\TYPE=NUMC10
-}
-
-
-def _lz4_block_compress(data: bytes) -> bytes:
-    """Pure-Python LZ4 block compressor, literal-only (no match finding).
-
-    Emits valid LZ4 block data per spec (lz4.org/lz4_Frame_format.html).
-    All payload goes into one terminal sequence: token[high4=lit_len_cap]
-    + extra-length bytes + literals. No match offset/length emitted (last-
-    sequence rule). Server uses LZ4_decompress_safe_usingDict with zero-init
-    dict for first block — independent literal-only blocks are fully safe. ngrfcSerializeParams: conn[0x3ce]=0x4020 → high-byte bit6
-    set → NgRfcLZ4Compressor active; literal-only output satisfies the
-    decompressor (no-guessing policy: no match logic until RE confirms dict).
-    """
-    if not data:
-        return b""
-    n = len(data)
-    out = bytearray()
-    lit_len = n
-    token_lit = min(lit_len, 15)
-    out.append(token_lit << 4)  # high nibble = literal count cap, low = 0 (no match)
-    if token_lit == 15:
-        remaining = lit_len - 15
-        while remaining >= 255:
-            out.append(255)
-            remaining -= 255
-        out.append(remaining)
-    out += data
-    return bytes(out)
-
-
-def _sap_lz4_frame(data: bytes) -> bytes:
-    """SAP LZ4 framing: [0x34 type marker][4B LE uncomp_len][4B LE comp_len][lz4_block_data].
-
-    protocol analysis (confirmed 2026-07-28):
-    - NgRfcLZ4Compressor::ctor: writeByte(0x34) — type-marker byte written once.
-    - NgRfcLZ4Compressor::doCompress: writeInt4(uncomp)+writeInt4(comp)+writeData.
-    - the LZ4 decompressor::ctor: readByte() checked == 0x34, else throw;
-      then calls decompress() which reads int4(uncomp)+int4(comp)+readData(comp).
-    - the NgRfc receive stream: reads full 0x5001 payload into buffer,
-      consumes byte-0='$', calls getHeader() (bytes 1-13), setSerializerVersion(); buffer
-      pointer at byte 14 when createDecompressor → the LZ4 decompressor::ctor runs.
-    Prior removal of 0x34 was incorrect (doCompress does not write it; ctor does).
-    """
-    block = _lz4_block_compress(data)
-    return b"\x34" + struct.pack("<II", len(data), len(block)) + block
 
 
 def _metadata_reply_succeeded(response: bytes) -> bool:
@@ -1806,13 +1614,10 @@ class Connection:
     ) -> None:
         """Deferred wRFC LOGON setup: store auth, advance to WS_PENDING, wait for first call.
 
-        wRFC connect defers the RFC LOGON to the first call() (Track 2 lazy-LOGON).
-        LOGON+RFCPING(b"\\x45") is sent on first call; RFCPING has no params so the
-        ngrfc body is just the EXECUTE marker (protocol analysis confirms
-        0x45 is written for every function including zero-param ones).
-
-        A prior observation of RFCPING hanging with b"\\x45" was server WP exhaustion
-        from a 670s work-process tie-up (rdisp/max_wprun_time), not a protocol error.
+        wRFC connect defers the RFC LOGON to the first call(): the LOGON frame names
+        the function to run in 0x0102, so there is nothing to send until a caller
+        says which function that is. The frame carries no separate call body -- see
+        _build_ws_logon_message for the shape and the evidence behind it.
 
         Never logs credentials (T-07-CRED).
         """
@@ -1976,7 +1781,7 @@ class Connection:
                 )
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
-                    # Outer GW-SNC APPCHDR6 (80B) is added by SncTransport._build_gw_snc_frame.
+                    # Outer GW-SNC header (80B) is added by SncTransport._build_gw_snc_frame.
                     # protocol analysis STIntSend/the SNC output path: arg4 (plain data) = COM_HEAD + TLV — no GW header.
                     return [_COM_HEAD + tlv]
                 return [self._build_logon_frame(handle, tlv)]
@@ -1993,18 +1798,21 @@ class Connection:
 
         Confirmed from the GW_CONNECT frame builder.
         Fields confirmed by analysis:
-          [0:2]   type = 0x0601  *(r13_11+0x51) = 1 → APPCHDR6[1]=1
-          [2:4]   version = 0x0200  APPCHDR6[2]=CONV_PROTO[0x17]=0x02
+          [0:2]   type = 0x0601
+          [2:4]   version = 0x0200
           [4:8]   flags = 0xFFFF0000  [4:6]=0xffff, [6:8]=0 (memset)
-          [10]    SNC bit: 0x01 plain / 0x21 SNC  *(r13_11+0x5a)|=0x20 (SNC mode)
-          [16]    0xC0  *(r13_11+0x60)|=0x80 (0x80 confirmed); 0x40 from init
-          [21]    0x04  *(r13_11+0x65)|=4 (confirmed)
-          [22]    0x00  *(r13_11+0x66)=0 (when handle>=0)
-          [40:48] "        "  strncpy(r13_11+0x78,"        ",8) — no handle outbound
-          [48:56] "NWRFC   "  UtilCpyUcToNet(r13_11+0x80,...,LU_name,8) = remote partner
-          [73]    0x01  *(r13_11+0x99) = 1
-          [76:78] 0x0000  *(r13_11+0x9c)=bswap(port); cpic_with_lu_addr==0 → port=0
-          [78:80] 0xffff  *(r13_11+0x9e) = 0xffff
+          [10]    0x01 plain / 0x21 SNC (bit 0x20 marks SNC)
+          [16]    0xC0
+          [21]    0x04  (a standard client; the registration ACK comes back 0x06)
+          [22]    0x00
+          [40:48] "        "  no handle outbound — the gateway assigns one
+          [48:56] "NWRFC   "  remote partner LU name, 8 bytes, net/ASCII
+          [73]    0x01
+          [76:78] 0x0000
+          [78:80] 0xffff  (the ACK flips this to 0x0004)
+
+        Every fixed byte above is read off the committed capture
+        tests/golden/framing/server_registration_request.bin.
         Remaining bytes: wire-captured from PKT 8 (golden fixture validated).
         """
         payload = bytearray(453)
@@ -2015,7 +1823,7 @@ class Connection:
             b"\x00\x00\x01\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x04\x00\x00\x00\x00\x01\x75"
         )
         if snc:
-            payload[10] |= 0x20  # *(r13_11+0x5a)|=0x20 (SNC capability flag)
+            payload[10] |= 0x20  # bit 0x20 = SNC capability
         payload[28:36] = b"\x00\x00\x05\x00\x00\x00\x00\x00"
         payload[40:48] = b"        "  # no handle in outbound request
         payload[48:56] = b"NWRFC   "  # remote LU name = RFC gateway partner
@@ -2053,12 +1861,15 @@ class Connection:
 
         Confirmed from the GW_INFO frame builder.
         Fields confirmed by analysis:
-          [0:2]   type = 0x060F  *(r13_4+0x51) = 0xf
-          [4:8]   flags = 0xFFFF0000  *(r13_4+0x54) = 0xffff → [4:6]; [6:8]=0 (memset)
-          [27]    0x90  *(r13_4+0x6b) = 0x90
-          [30]    0x04  *(r13_4+0x6e) = 4
-          [40:48] handle  *(r13_4+0x78) = *(rax_2+8) = CONV_PROTO handle
-          [76:80] 0xFFFF0004 (plain) / 0xFFFF0009 (SNC): CONV_PROTO[0x1c] bswap
+          [0:2]   type = 0x060F
+          [4:8]   flags = 0xFFFF0000  ([4:6] = 0xffff, [6:8] = 0x0000)
+          [27]    0x90
+          [30]    0x04
+          [40:48] handle  the 8-byte ASCII handle the gateway assigned
+          [76:80] 0xFFFF0004 plain / 0xFFFF0009 with SNC
+
+        No committed capture holds a GW_INFO frame; what stands behind these bytes
+        is that a live gateway completes the handshake when they are sent.
           Total size 0xe0=224 bytes: confirmed from the gateway send path(..., 0xe0) in the GW_INFO builder.
         payload[8:12], [24:28], [28:32]: wire-captured from PKT 10 golden fixture.
         ``snc=True`` selects _GW_CLIENT_TAIL_SNC (live pyrfc SNC capture D-24).
@@ -2086,11 +1897,14 @@ class Connection:
 
         Confirmed from the GW_DONE frame builder.
         Fields confirmed by analysis:
-          [0:2]   type = 0x0605  *(rdx_14+0x51) = 5
-          [4:8]   flags = 0xFFFF0000  *(rdx_14+0x54) = 0xffff → [4:6]; [6:8]=0 (memset)
-          [30]    0x01  *(rdx_14+0x6e) = 1
-          [40:48] handle  *(rdx_14+0x78) = *(rax_2+8) = CONV_PROTO handle
-          [76:80] 0xFFFF0004 (plain) / 0xFFFF0009 (SNC): CONV_PROTO[0x1c] bswap
+          [0:2]   type = 0x0605
+          [4:8]   flags = 0xFFFF0000  ([4:6] = 0xffff, [6:8] = 0x0000)
+          [30]    0x01
+          [40:48] handle  the 8-byte ASCII handle the gateway assigned
+          [76:80] 0xFFFF0004 plain / 0xFFFF0009 with SNC
+
+        Source: tests/golden/handshake/gw_done_client.bin (and gw_done_server.bin
+        for the gateway's reply).
           Total size 0x50=80 bytes: confirmed from the gateway send path(..., 0x50) in the GW_DONE builder.
         ``snc=True`` selects _GW_CLIENT_TAIL_SNC (live pyrfc SNC capture D-24).
         """
@@ -2098,25 +1912,9 @@ class Connection:
         struct.pack_into(">H", payload, 0, _GW_TYPE_DONE)
         struct.pack_into(">H", payload, 2, _GW_VERSION)
         struct.pack_into(">I", payload, 4, _GW_FLAGS)
-        payload[28:32] = b"\x00\x00\x01\x00"  # [30]=1 confirmed (confirmed)
+        payload[28:32] = b"\x00\x00\x01\x00"  # [30]=1 confirmed
         payload[40:48] = handle
         struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
-        return bytes(payload)
-
-    @staticmethod
-    def _build_gw_monitor(handle: bytes) -> bytes:
-        """Build the 80-byte GW_MONITOR (0x060B) frame sent after RFC logon.
-
-        Frida/strace RE: pyrfc sends this immediately after the RFC logon request,
-        before waiting for the logon response. The server requires both frames before
-        sending the logon response — without it, recv blocks indefinitely.
-        """
-        payload = bytearray(80)
-        struct.pack_into(">H", payload, 0, _GW_TYPE_MONITOR)
-        struct.pack_into(">H", payload, 2, _GW_VERSION)
-        struct.pack_into(">I", payload, 4, _GW_FLAGS)
-        payload[40:48] = handle
-        struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL)
         return bytes(payload)
 
     @staticmethod
@@ -2128,9 +1926,8 @@ class Connection:
           [4:8]   0xFFFF0000       flags ([4:6]=0xffff hardcoded, [6:8]=0 from memset)
           [24:28] 0x00000008       APPC header version (must be 8 for NW 7.x) — _GW_HDR_APPC_VER
           [28:32] 0x0000050C       CPIC max message length = 1292 — _GW_HDR_MAX_LEN
-          [40:48] handle           8-byte ASCII GW handle (CONV_PROTO[8])
-          [76:80] RFC_MARKER       FF FF 00 04 (plain) / FF FF 00 09 (SNC):
-                                   CONV_PROTO[0x1c] bswap — matches _GW_CLIENT_TAIL_SNC for SNC
+          [40:48] handle           8-byte ASCII GW handle
+          [76:80] RFC_MARKER       FF FF 00 04 (plain) / FF FF 00 09 (SNC)
           [80:92] COM_HEAD         EBCDIC "RFC000000000"
           [92:]   TLV body
         """
@@ -2185,8 +1982,8 @@ class Connection:
     def _send_invoke_frame(self, frame: bytes) -> None:
         """Send an RFC invoke frame to the transport.
 
-        For SNC, strip the outer 80B GW header (76B APPCHDR6 + 4B RFC_MARKER) —
-        SncTransport._build_gw_snc_frame builds its own APPCHDR6 envelope, so the
+        For SNC, strip the outer 80B GW header (76B header + 4B RFC_MARKER) —
+        SncTransport._build_gw_snc_frame builds its own GW envelope, so the
         encrypted payload must be only TLV+footer (same protocol analysis logic as logon).
         For non-SNC, send the full GW-framed bytes unchanged.
 
@@ -2258,7 +2055,8 @@ class Connection:
             _tlv_ext(_TAG_FUNCTION, _RFCPING_NAME),
             # Terminator: no repeated tag
             _TAG_TERMINATOR.to_bytes(2, "big") + b"\x00\x00",
-            # Trailing call-frame marker (strace RE full capture: pyrfc sends F8)
+            # Trailing call-frame marker. Behavioural evidence only: the gateway
+            # accepts this frame and answers the ping.
             b"\xff\xff\x00\x00\x00\xf8\x00\x00\x85\x00",
         ]
         return b"".join(parts)
@@ -2375,11 +2173,11 @@ class Connection:
     def _is_ws(self) -> bool:
         """True if the transport is a wRFC WebSocket transport (lazy import).
 
-        Mirrors the lazy-import guard used at handshake time: wRFC uses raw-TLV
-        application framing over WebSocket binary frames (no GW header), so invoke
-        paths must route through ``_build_ws_invoke_message`` / ``_ws_parse_invoke_response``
-        instead of the classic GW-framed builders. Returns False if the optional ws
-        module is unavailable.
+        Mirrors the lazy-import guard used at handshake time. wRFC carries the same
+        invoke TLV stream as classic RFC but without the GW header, so the only
+        thing this decides is whether to wrap a frame in that header -- the
+        builders and parsers are shared. Returns False if the optional ws module
+        is unavailable.
         """
         try:
             from saprfclib.ws import WsTransport
@@ -2403,9 +2201,8 @@ class Connection:
         walks 0x0201/0x0203 pairs to extract the table rows as dicts with the
         confirmed 12-column layout (META-01 columns confirmed 2026-06-27).
 
-        The wRFC transport routes through the raw-TLV wRFC invoke builder/parser
-        (_build_ws_invoke_message) instead of the GW-framed classic/SNC path; the
-        SNC/plain-TCP branch is unchanged.
+        On wRFC the same request TLV is sent without a GW header; on classic and
+        SNC it is wrapped in one. Nothing else differs between the two paths.
 
         OSError/EOFError propagate to call()'s CommunicationError wrapper.
         """
@@ -2427,11 +2224,9 @@ class Connection:
                 unicode_mode=unicode_mode,
                 direction=RFC_IMPORT,
             ),
-            # PARAMS is an EXPORTING TABLE param (the server sends it back).
-            # pcap-verified: K marker requires ncols=12 with full column schema.
-            # ncols=0 → APCRFC_NO_MEMORY (server rejects schema-less table decl).
-            # PARAMS is EXPORT TABLE → T-marker only (protocol analysis: direction & 2 != 0).
-            # No K/Q emitted for EXPORT params (server provides the value).
+            # PARAMS is an EXPORTING TABLE param, declared so the server sends it
+            # back. Only the declaration goes out -- an EXPORT param carries no
+            # value from the client -- and the 12-column reply is parsed above.
             FieldDesc(
                 name="PARAMS",
                 rfctype=5,  # RFCTYPE_TABLE
@@ -2453,7 +2248,7 @@ class Connection:
         if self._is_ws():
             if self._session.state is SessionState.WS_PENDING:
                 # 2-step lazy LOGON (Track 2):
-                # Step 1: LOGON+RFCPING (empty ngrfc body).
+                # Step 1: LOGON, with RFCPING as the function it runs.
                 # The LOGON frame is built to the shape a server accepts: no
                 # 0x5001 record, single-byte strings, and the function to run
                 # named in 0x0102. See _build_ws_logon_message for how that was
@@ -2506,7 +2301,6 @@ class Connection:
                     raise close_exc
                 self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
                 # Step 2: INVOKE+RFC_GET_FUNCTION_INTERFACE (now in READY state).
-                # Q-markers are safe in INVOKE frames (pcap-verified frame 233).
                 frame = _build_ws_invoke_frame(
                     "RFC_GET_FUNCTION_INTERFACE",
                     bootstrap_desc,
@@ -2851,18 +2645,16 @@ class Connection:
     ) -> dict[str, Any]:
         """Classic RFC fallback when the wRFC session cannot be completed.
 
-        On-premise ABAP kernels (A4H and similar) reject a non-empty ngrfc body in
-        the wRFC LOGON frame -- with b"\x45" the server never answers at all -- so
-        the LOGON carries an empty body. That much works: A4H answers it with a
-        1118-byte reply. What does not complete is the interface fetch that
-        follows, and why is still open (issue #14).
+        The wRFC LOGON shape is settled (issue #14): no 0x5001 record, single-byte
+        strings, the function to run named in 0x0102. A server that accepts it
+        needs no fallback. This path is for the ones that do not -- the LOGON reply
+        carries an exception instead of a result, or the server closes the
+        WebSocket after authenticating. The auth tags are filled in either way, so
+        such a reply reads as a clean logon to anything that only checks for a
+        sys_id; reading the result is what catches it.
 
-        An earlier version of this docstring said LOGON+RFCPING "always ends with
-        E=163 and WebSocket close". A probe corrected the second half only: there
-        is no close, the server answers -- but the answer carries the error, with
-        E=163 in its 0x0418 breadcrumb, and the auth tags filled in alongside it.
-        This method transparently re-runs the call over a classic TCP RFC
-        connection derived from the LOGON response:
+        The call is then re-run over a classic TCP RFC connection derived from the
+        LOGON response, transparently to the caller:
 
           1. Extract partner_host (0x0453) and sys_number (0x0452) from attrs_ws.
           2. Open a classic TCP connection to partner_host:3300+sysnr.
@@ -2918,25 +2710,22 @@ class Connection:
         """WS_PENDING: LOGON+RFCPING then INVOKE+func_name (two round-trips).
 
         Two-step protocol:
-          Step 1: LOGON frame with RFCPING (empty ngrfc body) — authenticates, establishes
-                  the wRFC session. RFCPING needs no param values, so no Q-markers are needed
-                  in the LOGON frame. (No pcap ground truth exists for LOGON-frame Q-markers;
-                  all observed LOGON frames carry only T/K markers with no param values.)
-          Step 2: INVOKE frame with func_name + params — executes the actual function using
-                  the pcap-verified INVOKE Q-marker format (frame 233: 0x5001 D-block,
-                  TABLE_LINE col_name, compMode='C').
+          Step 1: LOGON frame naming RFCPING as the function to run -- authenticates
+                  and establishes the wRFC session. RFCPING takes no parameters, so
+                  the frame carries declarations only.
+          Step 2: INVOKE frame with func_name + params. A wRFC invoke is byte-for-byte
+                  a classic invoke TLV stream sent without a GW header, so this is
+                  build_invoke_request's output unchanged.
 
         Transitions WS_PENDING → READY (via complete_ws_first_call) between step 1 and 2.
         Caller must hold self._lock.  Called only when state is WS_PENDING.
 
-        On-premise A4H: the LOGON itself succeeds, but the wRFC session cannot be
-        driven to a usable state (issue #14). In that case the classic fallback
-        is invoked to re-run
-        the call via a classic TCP RFC connection (transparent to the caller).
+        If the server refuses the LOGON or closes the WebSocket after it, the call
+        is re-run over classic TCP RFC instead (transparent to the caller).
         """
         auth = self._ws_auth or {}
 
-        # Step 1: LOGON + RFCPING (no ngrfc body, proven path, no Q-marker ambiguity).
+        # Step 1: LOGON, with RFCPING as the function it runs.
         logon_msg, session_token = _build_ws_logon_message(
             func_name="RFCPING",
             user=auth["user"],
@@ -2963,12 +2752,9 @@ class Connection:
             # connection attempt.
             return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         if self._transport.drain_queued_close():  # type: ignore[attr-defined]
-            # Auth passed and the server then closed the WebSocket. A non-empty
-            # ngrfc LOGON body leaves the server silent indefinitely; an empty one
-            # is answered, but the answer reports CALL_FUNCTION_RECEIVE_ERROR
-            # because the embedded call receives no data. Neither body is right,
-            # and what a correct one looks like is still open (issue #14).
-            # Fall back to classic TCP RFC transparently.
+            # Auth passed and the server then closed the WebSocket. The frame shape
+            # is the accepted one, so this is the server declining to carry the
+            # session rather than a malformed request. Fall back to classic TCP.
             return self._ws_classic_fallback(func_name, desc, params, attrs_ws)
         self._session.complete_ws_first_call(attributes=attrs_ws, codepage="4103")
         # Cache the descriptor now that the attributes are on the session.
@@ -3043,8 +2829,8 @@ class Connection:
             _failed = True
             try:
                 # WS_PENDING fast-path: if the target function is in _WRFC_BUILTIN_DESCS,
-                # embed it directly in the LOGON frame (pcap-verified pattern, frame 108).
-                # This avoids GFI and returns the result in one round-trip.
+                # name it in the LOGON frame directly -- the LOGON runs the function
+                # it names, so this avoids GFI and answers in one round-trip.
                 if ws_pending:
                     builtin = _WRFC_BUILTIN_DESCS.get(func_name.upper())
                     if builtin is not None:

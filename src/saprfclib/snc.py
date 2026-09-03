@@ -816,18 +816,18 @@ class SncTransport:
     # -- GW envelope builder/stripper (port-4800 flow) -----------------------
 
     def _build_gw_snc_frame(self, snc_frame: bytes) -> bytes:
-        """Wrap an SNC frame in the GW type-0x06CB envelope (the SNC output path protocol analysis).
+        """Wrap an SNC frame in the GW type-0x06CB envelope.
 
-        Layout (all confirmed from proxy capture + protocol analysis of the SNC output path):
+        Layout, as observed in a proxy capture of an SNC session:
           [0:2]   0x06CB   GW frame type
-          [2]     0x02     version (from CONV_PROTO+0x17, always 2 in practice)
+          [2]     0x02     version; 0x02 in every GW frame observed
           [4:6]   0xFFFF   flags high bytes
           [10]    0x28     SNC + encrypted flag bits
-          [26:28] LE 0x0800 (from CONV_PROTO; zero-init → 0x0008 in BE view)
-          [30:32] LE 0x0C05 (from CONV_PROTO; zero-init → 0x050C in BE view)
+          [26:28] LE 0x0800 (0x0008 read big-endian)
+          [30:32] LE 0x0C05 (0x050C read big-endian)
           [40:48] handle   8-byte ASCII GW connection handle
           [48:52] LE 0x00850000 → wire bytes 00 00 85 00
-          [76:80] FF FF 00 09   RFC_MARKER (hardcoded by the SNC output path)
+          [76:80] FF FF 00 09   RFC_MARKER, the SNC variant of the plain FF FF 00 04
           [80:]   SNC frame content
           [-8:]   trailer = BE(snc_size) + 00 00 85 00
         """

@@ -4,7 +4,7 @@
   "evidence": "server registration path",
   "ni_header_length": 4,
   "notes": [
-    "Registration request = the SAME 0x0601 GW_CONNECT APPCHDR6 frame the client emits; program_id-independent on the wire.",
+    "Registration request = the SAME 0x0601 GW_CONNECT header frame the client emits; program_id-independent on the wire.",
     "STIRegTp args: arg1=tpname(PROGRAM_ID, <=64 chars, no '*'), arg2=gwhost(<=2048), arg3=gwserv(non-empty). GwIConnect kind=0xb, proposes codepage '1100'.",
     "PROGRAM_ID is NOT present in this frame in any encoding. 'NWRFC' at payload[48:56] is the fixed partner LU name (UtilCpyUcToNet, STIInit). tpname is conveyed by the follow-up SAP_CMACCPTP3 accept exchange (Wave 2).",
     "RFC marker direction: request payload[78:80]=0xffff; ACK flips to 0x0004 and fills the handle.",

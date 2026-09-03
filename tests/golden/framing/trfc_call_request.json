@@ -3,7 +3,7 @@
   "capture_source": "SYNTHETIC-PENDING-LIVE: built from confirmed ARFC_DEST_SHIP wire format (2026-07-03). Live capture required before D-08 phase gate. See docs/protocol/trfc.md §'Open Gaps' OG-06-01.",
   "evidence": "server dispatch (ARFC_DEST_SHIP discriminator); TID generation (TID format) (param layout)",
   "notes": [
-    "SYNTHETIC fixture: byte values are structurally correct (APPCHDR6 + TLV stream + 8B footer per framing.md) but the ARFCSSTATE table rows with actual TID bytes are absent.",
+    "SYNTHETIC fixture: byte values are structurally correct (GW header + TLV stream + 8B footer per framing.md) but the ARFCSSTATE table rows with actual TID bytes are absent.",
     "A live tRFC capture must replace this fixture before the D-08 phase gate (Plan 06 live integration test). The sidecar schema and capture_source field will be updated at that time.",
     "No credentials or hostnames in this fixture — it contains only protocol structure bytes.",
     "TID alphabet (protocol analysis): ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@- (41 chars, NOT hex). Wire encoding: ABAP CHAR fields ARFCIPID/PID/TIME/TIDCNT in ARFCSSTATE row.",
