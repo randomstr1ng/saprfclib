@@ -102,3 +102,55 @@ def test_both_logon_paths_check_for_the_embedded_failure() -> None:
             f"{name} parses a wRFC LOGON reply without checking whether it carries "
             f"an embedded failure"
         )
+
+
+# --------------------------------------------------------------------------- #
+# The rebuilt frame, accepted
+# --------------------------------------------------------------------------- #
+
+ACCEPTED = Path(__file__).parent / "golden" / "framing" / "wrfc_logon_accepted.bin"
+
+
+def test_the_rebuilt_logon_is_accepted() -> None:
+    """The counterpart to the failure fixture: same system, frame rebuilt.
+
+    Captured from a LOGON this library built, after the shape was corrected. The
+    old frame drew a 1118-byte reply carrying CALL_FUNCTION_RECEIVE_ERROR; this
+    one draws 632 bytes with no embedded exception and a zero return code.
+    """
+    raw = ACCEPTED.read_bytes()
+    assert _ws_logon_failure(raw) is None
+
+    attrs = _ws_parse_logon_response(raw)
+    assert attrs is not None
+    assert attrs.sys_id == "TST"
+    assert attrs.kernel_rel == "793"
+
+
+def test_the_accepted_reply_carries_a_result_not_just_an_acknowledgement() -> None:
+    """The LOGON runs the function named in its own 0x0102.
+
+    0x0503 present, 0x0417 absent and 0x0420 zero is the success shape documented
+    in framing.md -- so for a parameterless function the LOGON is the whole call,
+    not a step before it.
+    """
+    import struct
+
+    raw = ACCEPTED.read_bytes()
+    tags, pos, n = set(), 0, len(raw)
+    while pos + 4 <= n:
+        tag, ln = struct.unpack_from(">HH", raw, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if ln == 0xFFFF:
+            ln = struct.unpack_from(">I", raw, pos)[0]
+            pos += 4
+        tags.add(tag)
+        pos += ln
+        if pos + 2 <= n and struct.unpack_from(">H", raw, pos)[0] == tag:
+            pos += 2
+
+    assert 0x0503 in tags, "success marker"
+    assert 0x0417 not in tags, "exception marker must be absent"
+    assert 0x0420 in tags, "return code"
