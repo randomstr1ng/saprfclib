@@ -556,7 +556,7 @@ the gateway service must be non-empty. `saprfclib` enforces the same limits in
 emits, and independent of the PROGRAM_ID on the wire:
 
 ```
-NI header (4B) + APPCHDR6 (0x0601 GW_CONNECT)
+NI header (4B) + GW header (0x0601 GW_CONNECT)
   [0]      0x06            GW frame
   [1]      0x01            GW_CONNECT type
   [10]     0x01 / [16] 0xC0 / [21] 0x04 / [22] 0x00   STIInit constants

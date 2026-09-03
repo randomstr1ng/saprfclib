@@ -298,43 +298,52 @@ kernel 793 sends a **238-byte** LOGON frame containing nineteen records:
 ffff  0                           terminator
 ```
 
-### Three things that are not what this library assumed
+### Three things the earlier LOGON builder had wrong
+
+All three are fixed (issue #14). The frame above is what the library now sends.
 
 **There is no `0x5001` ngrfc record.** The function to run is named in `0x0102`
-and the record set ends. saprfclib wraps a `0x5001` record around an ngrfc body
-and always has; the server then tries to receive RFC data from it and answers
+and the record set ends. The earlier builder wrapped a `0x5001` record around an
+ngrfc body; the server then tried to receive RFC data from it and answered
 `CALL_FUNCTION_RECEIVE_ERROR` — which describes exactly that. Two values were
 tried in that record, an empty body and `b"\x45"`, and both failed because the
-record should not be there at all.
+record should not have been there at all.
 
 **The request is single-byte; the response is UTF-16LE.** The wire is asymmetric.
 `"001"` occupies 3 bytes going out and `"A4H"` occupies 6 coming back. The reply
 carries `0x0016 = "1100"`, a single-byte codepage, while the session's negotiated
 partner codepage is `4103` — so the LOGON is exchanged in 1100 and the session
-moves to 4103 after it. saprfclib encodes the LOGON as UTF-16LE throughout, which
-is why its frame is roughly twice the size for the same strings.
+moves to 4103 after it. The earlier builder encoded the LOGON as UTF-16LE
+throughout, which made its frame roughly twice the size for the same strings.
 
-**`0x0130` is the client program name**, `"startrfc"` — 8 bytes, unpadded.
-saprfclib puts an 80-byte padded function name there.
+**`0x0130` is the client program name**, `"startrfc"` — 8 bytes, unpadded. The
+earlier builder put an 80-byte padded function name there.
 
-### What is not established
+### The LOGON runs the function it names
 
-Whether this is the only valid shape. The existing builder's comments cite a
-capture described as pcap-verified, which is not in this tree and may be from the
-BTP ABAP Environment rather than an on-premise system; the two may legitimately
-differ. What is established is that the shape above works against A4H and the one
-saprfclib sends does not.
+Its reply is a full RFC result, not a bare acknowledgement, and has to be read as
+one. The authentication tags are filled in whether or not the embedded call
+succeeded, so a reply carrying an exception still looks like a clean logon to
+anything that only checks for a `sys_id` — which is how the earlier failure went
+unnoticed. `_ws_logon_failure` reads the result before the session is declared
+usable.
 
-The `0x0117` password material is 17 bytes here against the 6 this library
-produces, so the schemes differ — but authentication is not the failure. The
-current LOGON already authenticates: its reply carries `0x0450 'A4H'` and the
-full attribute set, and only the embedded call fails. Credentials also travel in
-the HTTP `Authorization` header of the upgrade request, which may be what
-actually satisfies the server.
+### What is still not established
 
-*Source: reference-client trace against the authors' own system, decoded in
-`parse_sdk_trace.py`. The trace establishes what to send; a capture of this
-library sending it, and the server accepting it, is what will confirm it.*
+Whether this is the only valid shape. It is what a reference client sends and
+what A4H accepts; a server wanting something different would not appear in either
+observation. This is the `[ASSUMED]` label on `_build_ws_logon_message`.
+
+Whether `0x0514` is required on frames after the LOGON. Omitting it from the
+LOGON is accepted, and its value in a reference trace has a stable 9-byte prefix,
+so it is host-derived rather than random — a random one drew silence. The second
+`[ASSUMED]` label covers this.
+
+*Source: a reference-client trace against the authors' own system, decoded in
+`parse_sdk_trace.py`, then confirmed by capturing this library sending the same
+shape and the server accepting it — `tests/golden/framing/wrfc_logon_accepted.bin`.
+The password field is documented under "Password scrambling" below; on wRFC the
+scrambled body is single-byte, matching the rest of the request.*
 
 
 ## Password scrambling (0x0117)

@@ -17,7 +17,7 @@
 # server_registration_request.bin golden fixture. NO guessed bytes.
 #
 # KEY finding: the on-wire registration request is the SAME 0x0601 GW_CONNECT
-# APPCHDR6 frame the client emits, and it is
+# GW header frame the client emits, and it is
 # program_id-INDEPENDENT — the PROGRAM_ID (tpname) does NOT appear in this frame
 # in any encoding. The "NWRFC" string at payload offset 48 is the fixed partner
 # LU name, not the PROGRAM_ID. The tpname is conveyed to the gateway by the
@@ -60,13 +60,15 @@ _NI_HEADER = struct.Struct(">I")  # 4-byte big-endian NI length prefix (NiIWrite
 # Wire-captured server_registration_request.bin = 457B file = 4B NI + 453B payload.
 _REG_PAYLOAD_LEN = 453
 
-# APPCHDR6 / the GW_CONNECT builder fixed fields (protocol analysis; see docs/protocol/framing.md GW
-# common table + GW_CONNECT_REQUEST table). Payload offsets:
-_OFF_B10 = 10  # the GW_CONNECT builder *(r13_11+0x5a) init = 0x01
-_OFF_B16 = 16  # the GW_CONNECT builder *(r13_11+0x60) |= 0x80 + CONV_PROTO 0x40 = 0xC0
-_OFF_B21 = 21  # the GW_CONNECT builder *(r13_11+0x65) |= 4 (standard client) = 0x04
-_OFF_LU_NAME = 48  # UtilCpyUcToNet partner LU name (8 bytes, net/ASCII)
-_OFF_B73 = 73  # the GW_CONNECT builder *(r13_11+0x99) = 1
+# GW_CONNECT fixed fields. Every value below is read off the payload of the
+# committed capture tests/golden/framing/server_registration_request.bin -- the
+# payload being the file past its 4-byte NI prefix. See docs/protocol/framing.md,
+# GW common table + GW_CONNECT_REQUEST table. Payload offsets:
+_OFF_B10 = 10  # 0x01 in the capture
+_OFF_B16 = 16  # 0xC0 in the capture
+_OFF_B21 = 21  # 0x04, a standard client; the registration ACK carries 0x06
+_OFF_LU_NAME = 48  # partner LU name (8 bytes, net/ASCII)
+_OFF_B73 = 73  # 0x01 in the capture
 _OFF_MARKER = 76  # request marker [76:80]: 0x0000 then 0xFFFF (request)
 
 _LU_PARTNER_NAME = b"NWRFC   "  # 8-byte partner LU name (fixed; docs/protocol/framing.md)
@@ -160,7 +162,7 @@ class ServerSession:
         self._gwserv = gwserv
 
         payload = bytearray(_REG_PAYLOAD_LEN)
-        # APPCHDR6 header (GW common table + GW_CONNECT_REQUEST):
+        # GW header (GW common table + GW_CONNECT_REQUEST):
         struct.pack_into(">H", payload, 0, _GW_TYPE_CONNECT)  # [0:2] 0x0601
         struct.pack_into(">H", payload, 2, _GW_VERSION)  # [2:4] 0x0200
         struct.pack_into(">I", payload, 4, _GW_FLAGS)  # [4:8] 0xFFFF0000
@@ -319,8 +321,10 @@ class ServerSession:
             raise ValueError(f"registration ACK GW payload too short: {len(data)} < 80")
         # Handle at GW payload[40:48] (gateway-assigned ASCII, e.g. b"36964135").
         self._handle = data[40:48]
-        # protocol analysis: REG_WAITING[78:80] = rol.w(*(arg2+0x1c), 8).
-        # Empirically: *(arg2+0x1c) is populated from ACK[78:80] by the gateway connect call.
+        # The gateway's own tail value, to be echoed on later frames of this
+        # registration. It is the gateway's to choose, not ours: the request goes
+        # out with 0xffff at [78:80] and the ACK comes back with 0x0004.
+        # Source: server_registration_request.bin vs server_registration_ack.bin.
         self._ack_tail = bytes(data[78:80])
         self._state = ServerSessionState.REGISTERED
         return b""

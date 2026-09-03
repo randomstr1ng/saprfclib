@@ -89,8 +89,10 @@ _TAG_TERMINATOR = 0xFFFF  # stream terminator (len=0)
 #   0x0301(name) → [0x0330(dm_id)] → 0x0302(row_size+row_count) → 0x0303* → 0x0306
 # RESPONSE sequence (server uses the same serializer path — symmetric):
 #   0x0301(name) → 0x0302(info) → {0x0303|0x0304|0x0305}* → 0x0306
-_TAG_TABLE_NAME = 0x0301  # TABLE param name tag (replaces 0x0201 for TABLE rfctype)
-_TAG_TABLE_BEGIN = 0x0301  # alias: same tag received in responses (name+begin combined)
+# TABLE param name tag (replaces 0x0201 for TABLE rfctype). The same tag opens a
+# table in a response, where it carries the name and the block start together --
+# there is no separate begin tag.
+_TAG_TABLE_NAME = 0x0301
 _TAG_TABLE_INFO = 0x0302  # 8B: [0-3] BE uint32 row_size, [4-7] BE uint32 row_count
 _TAG_TABLE_CONTENT = 0x0303  # uncompressed row data (RFCID_TableContent)
 # CONFIRMED (the bounded reader case 3): 0x0304 (RFCID_TableCompr) is
@@ -1484,7 +1486,22 @@ def _extract_name_value_pairs(
             table_lz = []
             in_table = False
             if len(value) >= 12:
-                _, dm_id, _ = struct.unpack_from(">III", value, 0)
+                opcode, dm_id, _rows = struct.unpack_from(">III", value, 0)
+                if opcode != _DELTA_OPCODE:
+                    # 10 is the only value ever observed here, and the two uint32
+                    # after it are read as [dm_table_id, row_count] on that basis.
+                    # A different opcode may mean a different layout, and reading
+                    # the id from the wrong place attaches rows to the wrong
+                    # parameter -- wrong data under a valid-looking name. Warn
+                    # rather than raise: the reading may still hold, and refusing
+                    # a frame on one unobserved byte would be its own guess.
+                    _logger.warning(
+                        "table delta record 0x0335 has opcode %d, not the %d seen in "
+                        "every capture; the DM table id and row count are read on the "
+                        "assumption that the layout is unchanged",
+                        opcode,
+                        _DELTA_OPCODE,
+                    )
                 name = (dm_table_names or {}).get(dm_id)
                 if name is not None:
                     current_name = name

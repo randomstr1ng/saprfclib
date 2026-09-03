@@ -336,12 +336,14 @@ def _uc_encoding(field: FieldDesc) -> str:
 def _field_span(field: FieldDesc) -> tuple[int, int]:
     """Return (offset, length) for the active layout.
 
-    Unicode mode selects the uc_* span; otherwise the nuc_* span. Phase 2 tests
-    only exercise unicode_mode=True per D-09.
+    Unicode mode selects the uc_* span; otherwise the nuc_* span. Only the uc_*
+    branch is reachable over a live connection: the session refuses a codepage
+    other than 4103 at logon, so a non-Unicode application server never gets as
+    far as a field decode (D-09). The nuc_* branch stays because a FieldDesc can
+    be built by hand and the descriptor carries both spans.
     """
     if field.unicode_mode:
         return field.uc_offset, field.uc_length
-    # TODO: add non-Unicode system integration test in Phase 3 (D-09 / specifics).
     return field.nuc_offset, field.nuc_length
 
 
