@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The wRFC LOGON is confirmed working end to end (#14).** Instrumenting the wire shows
+  the sequence: our 220-byte LOGON out, a 632-byte reply back with no embedded failure and
+  return code zero, matching the size a reference client's accepted frame draws. Fixture
+  `wrfc_logon_accepted.bin`, the counterpart to `wrfc_logon_receive_error.bin` — same
+  system, same client, frame rebuilt.
+  The LOGON also *runs* the function named in its own `0x0102`: the reply carries a
+  complete RFC result rather than an authentication acknowledgement, so for a
+  parameterless function the LOGON is the whole call.
+
 - The wRFC LOGON no longer sends a random `0x0514` session token. A reference client's
   value is not random — across two runs minutes apart the first 9 of its 16 bytes were
   identical, a host-derived prefix followed by a counter — so filling the field with

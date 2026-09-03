@@ -1,0 +1,142 @@
+{
+  "message_type": "WRFC_LOGON_RESPONSE_ACCEPTED",
+  "capture_source": "live capture 2026-09-03; SAP A4H kernel 793 over WebSocket RFC. Reply to a LOGON built by saprfclib itself, after the frame was rebuilt to the accepted shape. Sanitised length-preservingly: SID, hostnames, system description, user name and IP address replaced with same-width placeholders, so every TLV offset and length stays valid.",
+  "evidence": "the same 632-byte reply size was produced by a reference client's frame with 0x0514 removed; _ws_logon_failure finds no embedded exception in it, where the pre-fix frame drew a 1118-byte reply carrying CALL_FUNCTION_RECEIVE_ERROR",
+  "expected_parse": {
+    "embedded_failure": null,
+    "sys_id": "TST",
+    "sys_number": "00",
+    "kernel_rel": "793",
+    "partner_rel": "758",
+    "return_code": 0
+  },
+  "notes": [
+    "The counterpart to wrfc_logon_receive_error.bin: same system, same client, the frame rebuilt. That one authenticates and reports the embedded call failed; this one authenticates and the call runs.",
+    "0x0503 is present and 0x0417 absent, matching the success/exception complement documented in framing.md, and 0x0420 carries return code 0.",
+    "0x0016 is '1100', the single-byte codepage the LOGON exchange uses, while the session's negotiated partner codepage is 4103. That asymmetry is why a wRFC request is single-byte and its response UTF-16LE.",
+    "The LOGON runs the function named in its own 0x0102 -- the reply carries a complete RFC result, not merely an authentication acknowledgement. For a parameterless function the LOGON is the whole call.",
+    "This does NOT mean wRFC works end to end. The invoke frame sent after this reply is not answered by the server, and carries the same defects this LOGON used to have: 0x0503, 0x0420 and 0x0512 are response markers appearing in a request, plus a 0x5001 record and a 0x0136 session key the server never issued."
+  ],
+  "field_annotations": [
+    {
+      "offset": 48,
+      "length": 14,
+      "name": "logon_codepage",
+      "value": "0016 0008",
+      "type": "variable",
+      "note": "tag 0x0016 len=8, '1100'"
+    },
+    {
+      "offset": 62,
+      "length": 12,
+      "name": "sys_id",
+      "value": "0450 0006",
+      "type": "variable",
+      "note": "tag 0x0450 len=6, 'TST'"
+    },
+    {
+      "offset": 100,
+      "length": 10,
+      "name": "sys_number",
+      "value": "0452 0004",
+      "type": "variable",
+      "note": "tag 0x0452 len=4, '00'"
+    },
+    {
+      "offset": 110,
+      "length": 26,
+      "name": "partner_host",
+      "value": "0453 0014",
+      "type": "variable",
+      "note": "tag 0x0453 len=20, 'testhost01'"
+    },
+    {
+      "offset": 374,
+      "length": 14,
+      "name": "kernel_rel",
+      "value": "0013 0008",
+      "type": "variable",
+      "note": "tag 0x0013 len=8, '793'"
+    },
+    {
+      "offset": 388,
+      "length": 14,
+      "name": "partner_rel",
+      "value": "0012 0008",
+      "type": "variable",
+      "note": "tag 0x0012 len=8, '758'"
+    },
+    {
+      "offset": 448,
+      "length": 30,
+      "name": "user",
+      "value": "0150 0018",
+      "type": "variable",
+      "note": "tag 0x0150 len=24, 'TESTUSER1'"
+    },
+    {
+      "offset": 478,
+      "length": 12,
+      "name": "client",
+      "value": "0151 0006",
+      "type": "variable",
+      "note": "tag 0x0151 len=6, '001'"
+    },
+    {
+      "offset": 490,
+      "length": 8,
+      "name": "language",
+      "value": "0152 0002",
+      "type": "variable",
+      "note": "tag 0x0152 len=2, 'E'"
+    },
+    {
+      "offset": 498,
+      "length": 6,
+      "name": "call_end_marker",
+      "value": "0500 0000",
+      "type": "variable",
+      "note": "tag 0x0500 len=0"
+    },
+    {
+      "offset": 504,
+      "length": 6,
+      "name": "success_marker",
+      "value": "0503 0000",
+      "type": "variable",
+      "note": "tag 0x0503 len=0"
+    },
+    {
+      "offset": 510,
+      "length": 10,
+      "name": "return_code",
+      "value": "0420 0004",
+      "type": "variable",
+      "note": "tag 0x0420 len=4"
+    },
+    {
+      "offset": 520,
+      "length": 6,
+      "name": "response_marker",
+      "value": "0512 0000",
+      "type": "variable",
+      "note": "tag 0x0512 len=0"
+    },
+    {
+      "offset": 612,
+      "length": 14,
+      "name": "server_duration_us",
+      "value": "0667 0008",
+      "type": "variable",
+      "note": "tag 0x0667 len=8"
+    },
+    {
+      "offset": 626,
+      "length": 4,
+      "name": "terminator",
+      "value": "ffff0000",
+      "type": "fixed",
+      "note": "end of stream"
+    }
+  ]
+}
