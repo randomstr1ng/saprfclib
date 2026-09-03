@@ -706,3 +706,74 @@ def test_a_service_name_is_no_longer_truncated() -> None:
     assert b"sapgw00\x00" in ours, "service name must survive intact"
     assert b"sapgw01\x00" in ours
     assert b"sapgw0\x00" not in ours.replace(b"sapgw00\x00", b"").replace(b"sapgw01\x00", b"")
+
+
+# --------------------------------------------------------------------------- #
+# Message-server entry layout, confirmed field by field                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_entry_fields_sum_to_the_captured_entry_size() -> None:
+    """160 bytes, exactly, with no slack to hide a misplaced boundary in."""
+    widths = [40, 64, 20, 1, 16, 4, 2, 1, 1, 4, 7]
+    assert sum(widths) == 160
+
+
+def test_the_address_is_read_from_the_dedicated_ipv4_field() -> None:
+    """Not from the IPv4 embedded in the IPv6 above it.
+
+    Every captured address is IPv4-mapped -- ::ffff:192.168.88.7 -- so bytes
+    135-137 are the mapping prefix and 137-141 the embedded address. Reading
+    there gives the right answer only while the address stays mapped; a server
+    answering with a real IPv6 would yield four bytes from the middle of it,
+    which looks like an address rather than an error.
+    """
+    import ipaddress
+    import struct
+
+    from saprfclib.router import (
+        _ENTRY_HOSTADDRV4_OFFSET,
+        _ENTRY_HOSTADDRV6_OFFSET,
+        _SAPMS_ENTRY_SIZE,
+        _SAPMS_HEADER_SIZE,
+        parse_sapms_server_list,
+    )
+
+    frame = (_GOLDEN_ROOT / "sapms_server_list.bin").read_bytes()
+    entry = frame[_SAPMS_HEADER_SIZE : _SAPMS_HEADER_SIZE + _SAPMS_ENTRY_SIZE]
+
+    v6 = ipaddress.IPv6Address(entry[_ENTRY_HOSTADDRV6_OFFSET : _ENTRY_HOSTADDRV6_OFFSET + 16])
+    assert v6.ipv4_mapped is not None, "the capture is IPv4-mapped"
+
+    v4 = entry[_ENTRY_HOSTADDRV4_OFFSET : _ENTRY_HOSTADDRV4_OFFSET + 4]
+    assert ipaddress.IPv4Address(v4) == v6.ipv4_mapped, (
+        "both fields carry the same address here, which is why the wrong one went unnoticed"
+    )
+    # And the parser agrees with the dedicated field.
+    assert parse_sapms_server_list(frame)[0][0] == str(v6.ipv4_mapped)
+    del struct
+
+
+def test_the_service_name_lands_in_its_own_field() -> None:
+    """104-124, not the 80-124 previously recorded.
+
+    The old boundary happened to contain the name because the host field ahead
+    of it was recorded as 40 bytes rather than 64 -- one wrong width covering for
+    another.
+    """
+    from saprfclib.router import (
+        _ENTRY_SERVICE_LEN,
+        _ENTRY_SERVICE_OFFSET,
+        _SAPMS_ENTRY_SIZE,
+        _SAPMS_HEADER_SIZE,
+    )
+
+    frame = (_GOLDEN_ROOT / "sapms_server_list.bin").read_bytes()
+    # The middle entry is the one with a real port and a real service name.
+    start = _SAPMS_HEADER_SIZE + _SAPMS_ENTRY_SIZE
+    entry = frame[start : start + _SAPMS_ENTRY_SIZE]
+    service = entry[_ENTRY_SERVICE_OFFSET : _ENTRY_SERVICE_OFFSET + _ENTRY_SERVICE_LEN].rstrip(
+        b" \x00"
+    )
+    assert service == b"tick-port"
+    assert entry[40:104].rstrip(b" \x00") == b"vhcala4hci", "host is 64 bytes wide"
