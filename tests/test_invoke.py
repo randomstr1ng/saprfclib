@@ -395,14 +395,21 @@ def test_parse_invoke_response_nonzero_rc_raises_system_failure():
 
 
 def test_parse_invoke_response_bounds_check():
-    """parse_invoke_response raises ValueError when a TLV length exceeds the
-    remaining buffer (T-04-RESP)."""
+    """A TLV length past the end of the buffer is refused, not read (T-04-RESP).
+
+    Reported as CommunicationError rather than the bare ValueError the length
+    check raises. A payload this malformed is usually not an RFC message at all,
+    and quoting the tag and length read out of it describes the parser's
+    confusion rather than what arrived -- so the non-TLV shapes are checked
+    first and the message says the response was unreadable.
+    """
+    from saprfclib.exceptions import CommunicationError
     from saprfclib.invoke import parse_invoke_response
 
     desc = _stfc_connection_desc()
     # A TLV record claiming a length larger than the buffer
     bad_tlv = struct.pack(">HH", 0x0420, 9999)  # claims 9999 bytes but buffer is tiny
-    with pytest.raises(ValueError):
+    with pytest.raises(CommunicationError, match="not a readable RFC message"):
         parse_invoke_response(bad_tlv, desc)
 
 

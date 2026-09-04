@@ -1106,7 +1106,17 @@ def parse_invoke_response(
     by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
     parameters are absent from the result.
     """
-    tags = _parse_tlv_stream(resp)
+    try:
+        tags = _parse_tlv_stream(resp)
+    except ValueError:
+        # Not a TLV stream. raise_for_rfc_error already knows the shapes that are
+        # not -- a gateway *ERR* record, a CPIC refusal in EBCDIC -- and reports
+        # each as what it is. Asking it first turns "malformed TLV: tag 0x2a45
+        # length 21074" (the ASCII of "*ERR" read as a tag and a length) into the
+        # message the gateway actually sent. Only if it recognises nothing does
+        # the parse failure stand.
+        raise_for_rfc_error(resp)
+        raise
     raise_for_rfc_error(resp, _tags=tags)
 
     # Every genuine invoke response carries the return code; only an exception

@@ -210,3 +210,41 @@ def test_sync_call_bootstrap_delegates_to_the_async_core() -> None:
 
     assert conn._call_bootstrap("RFC_PING") is sentinel
     assert handed_over == ["RFC_PING"], "the sync body ran instead of delegating"
+
+
+# --------------------------------------------------------------------------- #
+# A gateway *ERR* frame must be reported as one
+# --------------------------------------------------------------------------- #
+
+
+def test_a_gateway_error_frame_is_decoded_not_parsed_as_tlv() -> None:
+    """parse_invoke_response must recognise a gateway *ERR* record.
+
+    The gateway answers a frame it will not process with a NUL-separated record
+    bracketed by ``*ERR*``. Those bytes are not TLV: walking them reads ``*E`` as
+    a tag and ``RR`` as a length, which is where
+
+        malformed TLV: tag 0x2a45 length 21074
+
+    came from. It says nothing about the conversation having been torn down, and
+    a caller cannot act on it.
+
+    parse_gateway_error and the branch of raise_for_rfc_error that uses it both
+    already existed -- the docstring even names this exact symptom. The defect
+    was ordering: parse_invoke_response parsed the TLV stream first, so it raised
+    before the handler was ever reached.
+    """
+    from saprfclib.exceptions import CommunicationError
+    from saprfclib.invoke import parse_invoke_response
+    from saprfclib.types import FunctionDesc
+
+    frame = (
+        b"*ERR*\x001\x00Conversation 50633926 not found\x00728\x00SAP-Gateway"
+        b"\x00793\x002\x00gwxxconn.c\x00960\x00"
+    )
+    with pytest.raises(CommunicationError) as excinfo:
+        parse_invoke_response(frame, FunctionDesc(name="RFC_PING", parameters=[]))
+
+    message = str(excinfo.value)
+    assert "Conversation 50633926 not found" in message, message
+    assert "0x2a45" not in message, "the bogus tag reading must not reach the caller"
