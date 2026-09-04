@@ -68,6 +68,9 @@ __all__ = [
     "build_bgrfc_request",
     "build_bgrfc_confirm_request",
     "build_bgrfc_state_request",
+    "bgrfc_unit_id_bytes",
+    "bgrfc_unit_kind",
+    "unit_state_from_wire",
 ]
 
 # TLV tag constants (confirmed from golden fixtures + framing.md)
@@ -710,6 +713,109 @@ def build_bgrfc_request(
             parts.append(tlv_record(_TAG_PARAM_VALUE, call_bytes))
     parts.append(tlv_record(_TAG_TERMINATOR))
     return b"".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# bgRFC wire constants
+# --------------------------------------------------------------------------- #
+#
+# BGRFC_DEST_CONFIRM and BGRFC_CHECK_UNIT_STATE_SERVER have ordinary signatures
+# the dictionary describes -- UNIT_ID as BYTE(16), UNIT_KIND as INT4 -- so they
+# are driven through the normal invoke path and no longer have builders here.
+# What remains is the two things the normal path cannot know: which integers
+# those two fields take.
+
+# UNIT_KIND. Not a small enum: the values sit above 1.4 billion, which is why
+# every small integer tried against BGRFC_CHECK_UNIT_STATE_SERVER failed an ABAP
+# assertion instead of being rejected as a bad parameter.
+#
+# Source: live wire behaviour against A4H kernel 793 (2026-09-04). Each value
+# below was sent to BGRFC_CHECK_UNIT_STATE_SERVER on a fresh connection and the
+# server answered with a state rather than asserting. Values outside this set
+# (0..4 were tried) terminate the work process with ASSERTION_FAILED.
+BGRFC_UNIT_KIND_QRFC_OUTBOUND = 1409196101
+BGRFC_UNIT_KIND_QRFC_INBOUND = 1409196102
+BGRFC_UNIT_KIND_TRFC_OUTBOUND = 1409196105
+BGRFC_UNIT_KIND_TRFC_INBOUND = 1409196106
+
+# A client submitting a unit into an SAP system is the inbound direction, so
+# those are the two this library sends. 'T' and 'Q' are the API's own spelling
+# of the distinction, not a wire value.
+_UNIT_KIND_BY_TYPE = {
+    _UNIT_TYPE_T: BGRFC_UNIT_KIND_TRFC_INBOUND,
+    _UNIT_TYPE_Q: BGRFC_UNIT_KIND_QRFC_INBOUND,
+}
+
+
+def bgrfc_unit_kind(unit_type: str) -> int:
+    """Return the UNIT_KIND integer for a 'T' or 'Q' unit type."""
+    try:
+        return _UNIT_KIND_BY_TYPE[unit_type]
+    except KeyError:
+        raise ValueError(f"unit_type must be 'T' or 'Q', got {unit_type!r}") from None
+
+
+def bgrfc_unit_id_bytes(unit_id: str) -> bytes:
+    """Convert a 32-character hex UnitID to the 16 raw bytes the wire carries.
+
+    The hex form is how the SDK and this library's API spell a UnitID. The
+    dictionary declares UNIT_ID as BYTE(16), so the wire takes the bytes it
+    renders, not the rendering. Sending the 32 characters as text is what made a
+    submit answer "BGRFC_DEST_SHIP called without unit ID".
+    """
+    _validate_unit_id(unit_id)
+    return bytes.fromhex(unit_id)
+
+
+# The STATE an inbound unit query answers with. Server-side states are 222xx;
+# the 212xx block belongs to the scheduler's own execution states and is not
+# what BGRFC_CHECK_UNIT_STATE_SERVER returns to a client.
+#
+# 22206 is live-confirmed: querying a unit that was never submitted answers with
+# it, which is exactly "no record of this unit". The rest are [ASSUMED] -- their
+# numbering is contiguous with the confirmed one and their names describe the
+# lifecycle, but no capture has shown them yet. Submitting a unit and watching
+# the value move would settle them, which is blocked on the submit payload.
+_WIRE_STATE_NOT_IN_DB = 22206  # live-confirmed
+_WIRE_STATE_IN_EXECUTION = 22201  # [ASSUMED]
+_WIRE_STATE_FINISHED = 22202  # [ASSUMED]
+_WIRE_STATE_CONFIRMED = 22203  # [ASSUMED]
+_WIRE_STATE_WRONG_STATE = 22209  # [ASSUMED]
+
+
+def unit_state_from_wire(value: int) -> tuple[str, bool]:
+    """Map a wire STATE integer to a UnitState name, and say whether it is known.
+
+    Returns (name, recognised). An unrecognised value returns its own number
+    rather than a plausible default: the previous parser answered NOT_FOUND for
+    anything it could not read, so a state it did not understand was reported as
+    a legitimate one, and a caller could not tell the two apart.
+    """
+    known = {
+        _WIRE_STATE_NOT_IN_DB: "NOT_FOUND",
+        _WIRE_STATE_IN_EXECUTION: "IN_PROCESS",
+        _WIRE_STATE_FINISHED: "COMMITTED",
+        _WIRE_STATE_CONFIRMED: "CONFIRMED",
+        _WIRE_STATE_WRONG_STATE: "ROLLED_BACK",
+    }
+    name = known.get(value)
+    return (name, True) if name is not None else (str(value), False)
+
+
+# --------------------------------------------------------------------------- #
+# Legacy bgRFC frame builders — server-side test fixtures only
+# --------------------------------------------------------------------------- #
+#
+# These build BGRFC_UNIT_ID / BGRFC_UNIT_TYPE as named UTF-16LE CHAR parameters.
+# The dictionary says a real system sends neither: BGRFC_DEST_CONFIRM and
+# BGRFC_CHECK_UNIT_STATE_SERVER declare UNIT_ID as BYTE(16) and UNIT_KIND as
+# INT4. The client no longer uses these -- it drives both modules through the
+# ordinary call path.
+#
+# They remain because server.py's inbound dispatch is keyed to the same names,
+# and these are what its tests feed it. That means the server role would not
+# recognise inbound bgRFC from a real SAP system either. Unverified and tracked
+# separately; do not treat these frames as evidence of the wire format.
 
 
 def build_bgrfc_confirm_request(

@@ -32,7 +32,7 @@ from saprfclib.exceptions import (  # noqa: E402
     RetryExhausted,
 )
 from saprfclib.session import SessionState  # noqa: E402
-from saprfclib.stores import InMemoryTidStore, UnitState  # noqa: E402
+from saprfclib.stores import InMemoryTidStore  # noqa: E402
 from tests._mocks import AsyncMockTransport  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -392,23 +392,26 @@ async def test_bgrfc_unit_retry() -> None:
 async def test_bgrfc_unit_state_transitions() -> None:
     """TRFC-06: confirm/rollback/get_unit_state use the async seam correctly.
 
-    Uses AsyncMockTransport with 3 scripted responses (one per operation).
-    Asserts:
-    - get_unit_state() returns UnitState.NOT_FOUND for empty response.
-    - confirm_unit() completes without error.
-    - rollback_unit() completes without error.
+    An empty or unreadable reply must not resolve to a state. It used to become
+    NOT_FOUND, which a caller answers by re-shipping the unit -- so a lookup that
+    merely failed could re-run a committed LUW. All three now report that the
+    answer could not be read.
     """
     transport = AsyncMockTransport(responses=[b"", b"ok", b""])
     conn = AsyncConnection(transport)
     conn._session._state = SessionState.READY
     unit_id = "1234567890ABCDEF1234567890ABCDEF"
 
-    state = await conn.get_unit_state(unit_id, unit_type="T")
-    assert isinstance(state, UnitState)
-    assert state == UnitState.NOT_FOUND
+    # The exact type depends on where the unreadable reply is noticed (an empty
+    # frame, or a body that is not a TLV stream). What matters is that none of
+    # them returns a UnitState.
+    unreadable = (CommunicationError, ValueError)
 
-    # confirm_unit: must not raise
-    await conn.confirm_unit(unit_id, unit_type="T")
+    with pytest.raises(unreadable):
+        await conn.get_unit_state(unit_id, unit_type="T")
 
-    # rollback_unit: must not raise
-    await conn.rollback_unit(unit_id, unit_type="T")
+    with pytest.raises(unreadable):
+        await conn.confirm_unit(unit_id, unit_type="T")
+
+    with pytest.raises(unreadable):
+        await conn.rollback_unit(unit_id, unit_type="T")

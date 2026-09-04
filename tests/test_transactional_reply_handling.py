@@ -162,11 +162,11 @@ async def test_the_call_after_a_multi_frame_submit_is_not_desynced() -> None:
     first reply and raised "malformed TLV: tag 0x2a45". Here the scripted
     transport runs dry instead, which is the same fault made visible.
     """
-    conn, transport = _conn([*MULTIFRAME, OK_REPLY])
+    conn, transport = _conn([*MULTIFRAME, *MULTIFRAME])
     await conn._submit_unit(UNIT_ID, "T", [], [])
-    await conn.confirm_unit(UNIT_ID, "T")
+    await conn._submit_unit(UNIT_ID, "T", [], [])
     assert transport.unread == 0
-    assert transport.recv_count == 3
+    assert transport.recv_count == 4
 
 
 # --------------------------------------------------------------------------- #
