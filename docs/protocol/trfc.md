@@ -132,16 +132,60 @@ empty and overlong names on the inbound path rather than passing them to a store
 
 bgRFC uses its own function module, `BGRFC_DEST_SHIP`:
 
-| ABAP parameter | Type | Notes |
-|----------------|------|-------|
-| `OUT_IN_QUEUE_NAME_TAB` | TABLE | Queue name(s) for this unit |
-| `ARFCSDATA` | XSTRING | Serialized payload — the function calls buffered in the unit |
-| `ARFCSTATE` | STRUCTURE | State record |
-| `SUPPORTABILITY_INFO` | STRUCTURE | Supportability metadata |
-| `BGRFC_RETRY_DELAY_TIME` | INT4 | Retry delay, seconds |
-| `BGRFC_RETRY_KEY` | CHAR | Retry key (24 characters) |
-| `BGRFC_RETRY_MAX_COUNT` | INT4 | Maximum retry count |
-| `SERVER_STATE` | INT4 | Execution state indicator |
+Read from the dictionary on A4H kernel 793 (2026-09-04) via
+`RFC_GET_FUNCTION_INTERFACE`, so these are the module's declared parameters, not
+an inference. Widths are Unicode (`uc_length`); halve for the non-Unicode column.
+
+| ABAP parameter | Dir | Type | Notes |
+|----------------|-----|------|-------|
+| `OUT_IN_QUEUE_NAME_TAB` | IMPORT | TABLE | rows of `QRFC_QUEUE_NAME_TAB`, one CHAR(40) field |
+| `SDATA` | IMPORT | XSTRING | serialized payload — the calls buffered in the unit |
+| `SSTATE` | IMPORT | STRUCTURE | `BGRFC_SRV_STATE`, 616 bytes — **carries the unit ID** |
+| `SUPPORTABILITY_INFO` | IMPORT | STRUCTURE | `BGRFC_SUPPORTABILITY_INFO`, 112 bytes |
+| `SHUTDOWN_ACTIVE` | CHANGING | CHAR(1) | |
+| `BGRFC_RETRY_DELAY_TIME` | EXPORT | INT4 | retry delay, seconds |
+| `BGRFC_RETRY_KEY` | EXPORT | CHAR(24) | |
+| `BGRFC_RETRY_MAX_COUNT` | EXPORT | INT4 | |
+| `SERVER_STATE` | EXPORT | INT4 | |
+| `SHUTDOWN_INSTANCE` | EXPORT | CHAR(40) | |
+
+**There is no `BGRFC_UNIT_ID` parameter, and no `BGRFC_UNIT_TYPE`.** The unit ID
+is the first field of the `SSTATE` structure:
+
+| `BGRFC_SRV_STATE` field | Type | uc_offset | uc_length |
+|--------------------------|------|-----------|-----------|
+| `UNIT_ID` | BYTE | 0 | 16 |
+| `UNIT_KIND` | INT4 | 16 | 4 |
+| `DESTINATION` | CHAR(32) | 20 | 64 |
+| `QUEUE_NAME` | CHAR(40) | 84 | 80 |
+| `STATE` | INT4 | 164 | 4 |
+| `UNIT_SIZE` | INT4 | 168 | 4 |
+
+`BGRFC_SUPPORTABILITY_INFO` repeats `UNIT_ID` BYTE(16) at offset 0 and
+`UNIT_KIND` INT4 at offset 96.
+
+Two consequences for anything building this frame:
+
+* The unit ID travels as **16 raw bytes**, not as its 32-character hex rendering,
+  and not in UTF-16LE. The hex form is a display convention.
+* `UNIT_KIND` is an **INT4**. The `'T'`/`'Q'` characters below are an SDK-level
+  API convention; they are not what goes on the wire, and which integer means
+  which is not yet established.
+
+### The two simple modules
+
+`BGRFC_DEST_CONFIRM` and `BGRFC_CHECK_UNIT_STATE_SERVER` take the unit ID
+directly rather than through a structure:
+
+| Module | IMPORT | EXPORT |
+|--------|--------|--------|
+| `BGRFC_DEST_CONFIRM` | `UNIT_ID` BYTE(16), `UNIT_KIND` INT4, five optional `RS_*` | `RS_SERVER_RESOURCES_RC` INT4, `RS_SYSTEM_IDENTITY` |
+| `BGRFC_CHECK_UNIT_STATE_SERVER` | `UNIT_ID` BYTE(16), `UNIT_KIND` INT4 | `STATE` INT4, `INSTANCE_NAME`, `MAX_WPRUN_TIME`, `COMMUNICATION_FAILURE`, `SYSTEM_FAILURE` |
+| `BGRFC_GET_UNIT_ID` | — | `UNIT_ID` BYTE(16) |
+
+Both are ordinary signatures the dictionary describes, so neither needs a bespoke
+TLV builder — the normal invoke path encodes them. `BGRFC_GET_UNIT_ID` works and
+returns a 16-byte ID, so a client can take its unit IDs from the server.
 
 ### The 32-character UnitID
 
