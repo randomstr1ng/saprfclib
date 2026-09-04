@@ -359,9 +359,14 @@ def test_live_bgrfc_unit_lifecycle() -> None:
         # bgRFC has to be configured for anything below to mean anything. Read
         # the customizing tables and skip rather than fail: an unconfigured
         # system is a missing precondition, not a defect in the encoding.
+        # BGRFC_CUST_SUPER holds the supervisor destination and BGRFC_MAIN_I_DST
+        # the inbound destinations. Not BGRFC_CUST_I_SRV/BGRFC_CUST_I_DST, which
+        # look like the obvious pair and are per-server and per-destination
+        # scheduler tuning -- empty on a correctly configured system, so gating on
+        # them skips this test forever on exactly the systems it should run on.
         for table, what in (
-            ("BGRFC_CUST_I_SRV", "supervisor destination"),
-            ("BGRFC_CUST_I_DST", "inbound destination"),
+            ("BGRFC_CUST_SUPER", "supervisor destination"),
+            ("BGRFC_MAIN_I_DST", "inbound destination"),
         ):
             try:
                 rows = conn.call(

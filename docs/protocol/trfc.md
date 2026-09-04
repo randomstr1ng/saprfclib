@@ -316,6 +316,36 @@ The live bgRFC test submitted a unit with empty parameters, so no payload bytes 
 for bgRFC function parameters. **Consequence:** the bgRFC payload encoding is inferred from the
 tRFC path rather than confirmed. **To close:** capture a bgRFC unit carrying real parameters.
 
+A specific suspicion, not yet tested: `build_bgrfc_request` names no destination. It sends
+`BGRFC_UNIT_ID`, `BGRFC_UNIT_TYPE`, `BGRFC_QUEUE_<i>` and `BGRFC_CALL_<i>` only, while the
+backend records inbound units in `BGRFC_SRV_STATE`, whose key includes `DESTINATION`. If a
+submit is accepted but no row appears, that is the first thing to check.
+
+### Backend tables (A4H, kernel 793, observed 2026-09-04)
+
+Which tables hold what, read off a live system rather than inferred from their names. This
+matters because the obvious guess is wrong in a way that fails silently:
+
+| Table | Holds |
+|-------|-------|
+| `BGRFC_CUST_SUPER` | supervisor destination — bgRFC does not run without one |
+| `BGRFC_MAIN_I_DST` | inbound destination definitions (name + RFC server group) |
+| `BGRFC_REG_I_DEST` | inbound queue-prefix registration |
+| `BGRFC_SRV_STATE` | live unit state: `UNIT_ID, UNIT_KIND, DESTINATION, QUEUE_NAME, STATE, ...` |
+| `BGRFC_IUNIT_HIST` | inbound unit history, written once a unit leaves `BGRFC_SRV_STATE` |
+| `BGRFC_CUST_I_SRV` | **scheduler tuning per app server** — *not* a destination definition |
+| `BGRFC_CUST_I_DST` / `BGRFC_CUST_O_DST` | **scheduler tuning per destination** — *not* definitions |
+
+The last two rows are the trap. `BGRFC_CUST_I_SRV` and `BGRFC_CUST_I_DST` read like "inbound
+server" and "inbound destination", and both stay **empty on a correctly configured system** —
+they only fill in if someone tunes the scheduler. A configuration check that reads them reports
+"bgRFC is not configured" for a system with both a supervisor and an inbound destination
+defined, which is exactly what happened here before the tables were enumerated.
+
+`BGRFC_SRV_STATE` is what makes issue #15 answerable at all: it lets a confirm be verified
+against the backend's own record instead of against `get_unit_state()`, the function being
+tested. Checking a decoder with itself cannot detect a decoding fault.
+
 ### ARFC_EXECUTE / ARFC_RUN_NOWAIT — OPEN
 
 Whether either is ever called separately from `ARFC_DEST_SHIP` is unconfirmed. Only
