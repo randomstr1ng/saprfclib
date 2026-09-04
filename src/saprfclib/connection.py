@@ -2999,12 +2999,15 @@ class Connection:
                 request = self._build_invoke_frame(handle, request_tlv)
                 try:
                     self._send_invoke_frame(request)
-                    # Receive and discard the server response (RFC_OK or RFC_EXECUTED).
-                    # tRFC has no EXPORTING params; the response carries only the
-                    # return-code TLV. We do not parse it for now (OG-06-01 gate).
-                    self._transport.recv_message()
+                    response = _join_response_frames(self._transport.recv_message, func_name)
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                # tRFC has no EXPORTING params, but the reply still carries the
+                # return code, and reading one frame and discarding it hid both
+                # halves of that: a refusal read as success, and any reply longer
+                # than one frame left its remainder in the socket for the next
+                # call to misparse.
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 self._session.mark_ready()
 
@@ -3048,9 +3051,12 @@ class Connection:
                 request = self._build_invoke_frame(handle, request_tlv)
                 try:
                     self._send_invoke_frame(request)
-                    self._transport.recv_message()
+                    response = _join_response_frames(
+                        self._transport.recv_message, "ARFC_DEST_CONFIRM"
+                    )
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 self._session.mark_ready()
 
@@ -3139,11 +3145,19 @@ class Connection:
                 request = self._build_invoke_frame(handle, request_tlv)
                 try:
                     self._send_invoke_frame(request)
-                    # Receive and discard the server response (RFC_OK or state indicator).
-                    # bgRFC submit has no EXPORTING params (OG-06-02 gate).
-                    self._transport.recv_message()
+                    response = _join_response_frames(
+                        self._transport.recv_message, "BGRFC_DEST_SHIP"
+                    )
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                # The submit has no EXPORTING params, but the reply still reports
+                # whether the backend took the unit. Reading one frame and
+                # discarding it, as this did, hid two failures: a refusal read as
+                # success, and a reply spanning more than one frame left the rest
+                # in the socket for the next call to parse as TLV -- which is how
+                # a later RFC_READ_TABLE came back as "malformed TLV: tag 0x2a45",
+                # the ASCII of an error string.
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 self._session.mark_ready()
 
@@ -3182,9 +3196,12 @@ class Connection:
                 request = self._build_invoke_frame(handle, request_tlv)
                 try:
                     self._send_invoke_frame(request)
-                    self._transport.recv_message()
+                    response = _join_response_frames(
+                        self._transport.recv_message, "BGRFC_DEST_CONFIRM"
+                    )
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 self._session.mark_ready()
 
@@ -3226,9 +3243,10 @@ class Connection:
                 request = self._build_invoke_frame(handle, request_tlv)
                 try:
                     self._send_invoke_frame(request)
-                    self._transport.recv_message()
+                    response = _join_response_frames(self._transport.recv_message, "bgRFC rollback")
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 self._session.mark_ready()
 
@@ -4637,9 +4655,16 @@ class AsyncConnection:
                 async def _do_send() -> None:
                     try:
                         await self._transport.send_message(request)
-                        await self._transport.recv_message()
+                        response = await _join_response_frames_async(
+                            self._transport.recv_message, func_name
+                        )
                     except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                         raise CommunicationError(str(exc), original_exception=exc) from exc
+                    # This docstring promises AbapApplicationError and
+                    # AbapSystemFailure propagate on the first occurrence. While
+                    # the reply was discarded neither could: the call reported
+                    # success whatever the backend said.
+                    raise_for_rfc_error(_strip_gw_header(response))
 
                 await self._submit_with_retry(
                     tid=tid,
@@ -4670,9 +4695,12 @@ class AsyncConnection:
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 try:
                     await self._transport.send_message(request)
-                    await self._transport.recv_message()
+                    response = await _join_response_frames_async(
+                        self._transport.recv_message, "ARFC_DEST_CONFIRM"
+                    )
                 except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 if self._session.state is SessionState.IN_CALL:
                     self._session.mark_ready()
@@ -4729,9 +4757,16 @@ class AsyncConnection:
                 async def _do_send() -> None:
                     try:
                         await self._transport.send_message(request)
-                        await self._transport.recv_message()
+                        response = await _join_response_frames_async(
+                            self._transport.recv_message, "BGRFC_DEST_SHIP"
+                        )
                     except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                         raise CommunicationError(str(exc), original_exception=exc) from exc
+                    # Inside the retry envelope on purpose: a refusal has to reach
+                    # the caller rather than be retried as if it were a transport
+                    # fault. See the note in Connection._submit_unit for what
+                    # discarding this reply cost.
+                    raise_for_rfc_error(_strip_gw_header(response))
 
                 await self._submit_with_retry(
                     unit_id=uid,
@@ -4763,9 +4798,12 @@ class AsyncConnection:
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 try:
                     await self._transport.send_message(request)
-                    await self._transport.recv_message()
+                    response = await _join_response_frames_async(
+                        self._transport.recv_message, "BGRFC_DEST_CONFIRM"
+                    )
                 except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 if self._session.state is SessionState.IN_CALL:
                     self._session.mark_ready()
@@ -4787,9 +4825,12 @@ class AsyncConnection:
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 try:
                     await self._transport.send_message(request)
-                    await self._transport.recv_message()
+                    response = await _join_response_frames_async(
+                        self._transport.recv_message, "bgRFC rollback"
+                    )
                 except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 if self._session.state is SessionState.IN_CALL:
                     self._session.mark_ready()
@@ -4811,9 +4852,12 @@ class AsyncConnection:
                 request = Connection._build_invoke_frame(handle, request_tlv)
                 try:
                     await self._transport.send_message(request)
-                    response = await self._transport.recv_message()
+                    response = await _join_response_frames_async(
+                        self._transport.recv_message, "bgRFC state"
+                    )
                 except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
+                raise_for_rfc_error(_strip_gw_header(response))
                 return Connection._parse_unit_state_response(response)
             finally:
                 if self._session.state is SessionState.IN_CALL:
@@ -4854,9 +4898,14 @@ class AsyncConnection:
         async def _do_resend() -> None:
             try:
                 await self._transport.send_message(payload)
-                await self._transport.recv_message()
+                response = await _join_response_frames_async(
+                    self._transport.recv_message, f"retry {tid}"
+                )
             except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                 raise CommunicationError(str(exc), original_exception=exc) from exc
+            # An ABAP error on a re-drive is deterministic: retrying it would
+            # re-send the same bytes for the same TID to the same refusal.
+            raise_for_rfc_error(_strip_gw_header(response))
 
         async with self._lock:
             self._session._require_state(SessionState.READY)
@@ -4906,9 +4955,12 @@ class AsyncConnection:
         async def _do_resend() -> None:
             try:
                 await self._transport.send_message(payload)
-                await self._transport.recv_message()
+                response = await _join_response_frames_async(
+                    self._transport.recv_message, f"retry unit {unit_id}"
+                )
             except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                 raise CommunicationError(str(exc), original_exception=exc) from exc
+            raise_for_rfc_error(_strip_gw_header(response))
 
         async with self._lock:
             self._session._require_state(SessionState.READY)
