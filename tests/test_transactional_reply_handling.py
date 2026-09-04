@@ -167,3 +167,46 @@ async def test_the_call_after_a_multi_frame_submit_is_not_desynced() -> None:
     await conn.confirm_unit(UNIT_ID, "T")
     assert transport.unread == 0
     assert transport.recv_count == 3
+
+
+# --------------------------------------------------------------------------- #
+# The sync facade must delegate to the async core
+# --------------------------------------------------------------------------- #
+
+
+def test_sync_call_bootstrap_delegates_to_the_async_core() -> None:
+    """Connection._call_bootstrap must route through the async core when present.
+
+    Every other method on Connection checks for _async_conn and hands over. This
+    one did not, so on a classic TCP connection it ran its sync body against
+    _SyncToAsyncTransport, whose send/recv are coroutines: the frame was never
+    sent, and the "response" was a coroutine object. It surfaced as
+
+        TypeError: 'coroutine' object is not subscriptable
+
+    which made the public metadata.get_function_desc() unusable on any classic
+    connection -- the ordinary way to ask a system for a function's interface.
+    """
+    from saprfclib.connection import Connection
+    from saprfclib.types import FunctionDesc
+
+    sentinel = FunctionDesc(name="RFC_PING", parameters=[])
+    handed_over: list[str] = []
+
+    class _FakeAsyncConn:
+        async def _call_bootstrap(self, func_name: str) -> FunctionDesc:
+            handed_over.append(func_name)
+            return sentinel
+
+    class _FakeLoopThread:
+        def run(self, coro):  # noqa: ANN001, ANN202
+            import asyncio
+
+            return asyncio.run(coro)
+
+    conn = Connection.__new__(Connection)
+    conn._async_conn = _FakeAsyncConn()
+    conn._loop_thread = _FakeLoopThread()
+
+    assert conn._call_bootstrap("RFC_PING") is sentinel
+    assert handed_over == ["RFC_PING"], "the sync body ran instead of delegating"

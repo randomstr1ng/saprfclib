@@ -2206,6 +2206,17 @@ class Connection:
 
         OSError/EOFError propagate to call()'s CommunicationError wrapper.
         """
+        # Classic TCP path: delegate to the async core (D-07), as every other
+        # method on this class does. Without this the bootstrap ran its sync body
+        # against _SyncToAsyncTransport, whose send/recv are coroutines: the frame
+        # was never sent and the "response" was a coroutine object, surfacing as
+        # "TypeError: 'coroutine' object is not subscriptable". That made the
+        # public metadata.get_function_desc() unusable on any classic connection.
+        if self._async_conn is not None and self._loop_thread is not None:
+            return cast(
+                FunctionDesc,
+                self._loop_thread.run(self._async_conn._call_bootstrap(func_name)),
+            )
         attrs = self._session.attributes
         unicode_mode = attrs.unicode_mode if attrs else True
 
