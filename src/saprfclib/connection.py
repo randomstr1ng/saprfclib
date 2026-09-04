@@ -54,14 +54,15 @@ from saprfclib.exceptions import (
     AbapSystemFailure,
     CommunicationError,
     RetryExhausted,
+    TransactionalError,
     WebSocketError,
 )
 from saprfclib.invoke import (
     _decode_error_text,
     _extract_name_value_pairs,
-    build_bgrfc_confirm_request,
+    bgrfc_unit_id_bytes,
+    bgrfc_unit_kind,
     build_bgrfc_request,
-    build_bgrfc_state_request,
     build_invoke_request,
     build_trfc_confirm_request,
     build_trfc_request,
@@ -72,6 +73,7 @@ from saprfclib.invoke import (
     parse_invoke_response,
     raise_for_rfc_error,
     tlv_stream_status,
+    unit_state_from_wire,
     unknown_parameters,
 )
 from saprfclib.language import normalize_logon_language
@@ -3198,23 +3200,16 @@ class Connection:
         if self._async_conn is not None and self._loop_thread is not None:
             self._loop_thread.run(self._async_conn.confirm_unit(unit_id, unit_type))
             return
-        with self._lock:
-            self._session._require_state(SessionState.READY)
-            self._session.mark_in_call()
-            try:
-                request_tlv = build_bgrfc_confirm_request(unit_id, unit_type)
-                handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
-                try:
-                    self._send_invoke_frame(request)
-                    response = _join_response_frames(
-                        self._transport.recv_message, "BGRFC_DEST_CONFIRM"
-                    )
-                except (OSError, EOFError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-                raise_for_rfc_error(_strip_gw_header(response))
-            finally:
-                self._session.mark_ready()
+        # Driven through the ordinary call path. This module's signature is one
+        # the dictionary describes -- UNIT_ID as BYTE(16), UNIT_KIND as INT4 --
+        # so the normal encoder handles it. The bespoke builder this replaced
+        # sent parameters that do not exist: BGRFC_UNIT_ID as 32 hex characters
+        # in UTF-16LE, and BGRFC_UNIT_TYPE as the character 'T' or 'Q'.
+        self.call(
+            "BGRFC_DEST_CONFIRM",
+            UNIT_ID=bgrfc_unit_id_bytes(unit_id),
+            UNIT_KIND=bgrfc_unit_kind(unit_type),
+        )
 
     def rollback_unit(self, unit_id: str, unit_type: str = "T") -> None:
         """Signal that a bgRFC unit should be rolled back (TRFC-06).
@@ -3243,23 +3238,10 @@ class Connection:
         # submit (consistent with Pitfall 3 — never bundle submit+rollback).
         # This call is a no-op over the wire when the transport is not live
         # (OG-06-02 gate); the pattern is documented here for completeness.
-        with self._lock:
-            self._session._require_state(SessionState.READY)
-            self._session.mark_in_call()
-            try:
-                # For the offline path (no live SAP), we issue a state query so the
-                # unit_id validation fires (T-06-U02). Full rollback FM TBD at D-08.
-                request_tlv = build_bgrfc_state_request(unit_id, unit_type)
-                handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
-                try:
-                    self._send_invoke_frame(request)
-                    response = _join_response_frames(self._transport.recv_message, "bgRFC rollback")
-                except (OSError, EOFError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-                raise_for_rfc_error(_strip_gw_header(response))
-            finally:
-                self._session.mark_ready()
+        # There is no client-side rollback module. A state query is issued so the
+        # unit id is validated against the backend and the caller learns where the
+        # unit actually stands, which is the only honest thing available here.
+        self.get_unit_state(unit_id, unit_type)
 
     def get_unit_state(self, unit_id: str, unit_type: str = "T") -> UnitState:
         """Query the current state of a bgRFC unit on the backend (TRFC-06).
@@ -3290,23 +3272,32 @@ class Connection:
                 UnitState,
                 self._loop_thread.run(self._async_conn.get_unit_state(unit_id, unit_type)),
             )
-        with self._lock:
-            self._session._require_state(SessionState.READY)
-            self._session.mark_in_call()
-            try:
-                request_tlv = build_bgrfc_state_request(unit_id, unit_type)
-                handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
-                try:
-                    self._send_invoke_frame(request)
-                    response = _join_response_frames(self._transport.recv_message, "bgRFC state")
-                except (OSError, EOFError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-                # Parse response: look for a BGRFC_STATE param in the response TLV.
-                # Offline path (no live SAP): response is empty → return NOT_FOUND.
-                return self._parse_unit_state_response(response)
-            finally:
-                self._session.mark_ready()
+        # Driven through the ordinary call path. This module's signature is one
+        # the dictionary describes -- UNIT_ID as BYTE(16), UNIT_KIND as INT4 --
+        # so the normal encoder handles it. The bespoke builder this replaced
+        # sent parameters that do not exist: BGRFC_UNIT_ID as 32 hex characters
+        # in UTF-16LE, and BGRFC_UNIT_TYPE as the character 'T' or 'Q'.
+        result = self.call(
+            "BGRFC_CHECK_UNIT_STATE_SERVER",
+            UNIT_ID=bgrfc_unit_id_bytes(unit_id),
+            UNIT_KIND=bgrfc_unit_kind(unit_type),
+        )
+        raw = result.get("STATE")
+        if not isinstance(raw, int):
+            raise TransactionalError(
+                f"BGRFC_CHECK_UNIT_STATE_SERVER returned no integer STATE for {unit_id}; "
+                f"got {type(raw).__name__}"
+            )
+        name, recognised = unit_state_from_wire(raw)
+        if not recognised:
+            raise TransactionalError(
+                f"BGRFC_CHECK_UNIT_STATE_SERVER answered STATE={raw} for {unit_id}, a "
+                "value this library has no meaning for. Reported rather than guessed: "
+                "the parser this replaced answered NOT_FOUND for anything it could not "
+                "read, so an unrecognised state was indistinguishable from a unit the "
+                "backend has no record of."
+            )
+        return UnitState[name]
 
     @staticmethod
     def _parse_unit_state_response(response: bytes) -> UnitState:
@@ -4800,24 +4791,16 @@ class AsyncConnection:
 
         Credentials are never logged (T-09-04-CRED).
         """
-        async with self._lock:
-            self._session._require_state(SessionState.READY)
-            self._session.mark_in_call()
-            try:
-                request_tlv = build_bgrfc_confirm_request(unit_id, unit_type)
-                handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
-                try:
-                    await self._transport.send_message(request)
-                    response = await _join_response_frames_async(
-                        self._transport.recv_message, "BGRFC_DEST_CONFIRM"
-                    )
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-                raise_for_rfc_error(_strip_gw_header(response))
-            finally:
-                if self._session.state is SessionState.IN_CALL:
-                    self._session.mark_ready()
+        # Driven through the ordinary call path. This module's signature is one
+        # the dictionary describes -- UNIT_ID as BYTE(16), UNIT_KIND as INT4 --
+        # so the normal encoder handles it. The bespoke builder this replaced
+        # sent parameters that do not exist: BGRFC_UNIT_ID as 32 hex characters
+        # in UTF-16LE, and BGRFC_UNIT_TYPE as the character 'T' or 'Q'.
+        await self.call(
+            "BGRFC_DEST_CONFIRM",
+            UNIT_ID=bgrfc_unit_id_bytes(unit_id),
+            UNIT_KIND=bgrfc_unit_kind(unit_type),
+        )
 
     async def rollback_unit(self, unit_id: str, unit_type: str = "T") -> None:
         """Signal bgRFC unit rollback (TRFC-06 — async parity).
@@ -4827,24 +4810,8 @@ class AsyncConnection:
 
         Credentials are never logged (T-09-04-CRED).
         """
-        async with self._lock:
-            self._session._require_state(SessionState.READY)
-            self._session.mark_in_call()
-            try:
-                request_tlv = build_bgrfc_state_request(unit_id, unit_type)
-                handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
-                try:
-                    await self._transport.send_message(request)
-                    response = await _join_response_frames_async(
-                        self._transport.recv_message, "bgRFC rollback"
-                    )
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-                raise_for_rfc_error(_strip_gw_header(response))
-            finally:
-                if self._session.state is SessionState.IN_CALL:
-                    self._session.mark_ready()
+        # There is no client-side rollback module -- see Connection.rollback_unit.
+        await self.get_unit_state(unit_id, unit_type)
 
     async def get_unit_state(self, unit_id: str, unit_type: str = "T") -> UnitState:
         """Query the current state of a bgRFC unit on the backend (TRFC-06 — async parity).
@@ -4854,25 +4821,32 @@ class AsyncConnection:
 
         Credentials are never logged (T-09-04-CRED).
         """
-        async with self._lock:
-            self._session._require_state(SessionState.READY)
-            self._session.mark_in_call()
-            try:
-                request_tlv = build_bgrfc_state_request(unit_id, unit_type)
-                handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
-                try:
-                    await self._transport.send_message(request)
-                    response = await _join_response_frames_async(
-                        self._transport.recv_message, "bgRFC state"
-                    )
-                except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
-                raise_for_rfc_error(_strip_gw_header(response))
-                return Connection._parse_unit_state_response(response)
-            finally:
-                if self._session.state is SessionState.IN_CALL:
-                    self._session.mark_ready()
+        # Driven through the ordinary call path. This module's signature is one
+        # the dictionary describes -- UNIT_ID as BYTE(16), UNIT_KIND as INT4 --
+        # so the normal encoder handles it. The bespoke builder this replaced
+        # sent parameters that do not exist: BGRFC_UNIT_ID as 32 hex characters
+        # in UTF-16LE, and BGRFC_UNIT_TYPE as the character 'T' or 'Q'.
+        result = await self.call(
+            "BGRFC_CHECK_UNIT_STATE_SERVER",
+            UNIT_ID=bgrfc_unit_id_bytes(unit_id),
+            UNIT_KIND=bgrfc_unit_kind(unit_type),
+        )
+        raw = result.get("STATE")
+        if not isinstance(raw, int):
+            raise TransactionalError(
+                f"BGRFC_CHECK_UNIT_STATE_SERVER returned no integer STATE for {unit_id}; "
+                f"got {type(raw).__name__}"
+            )
+        name, recognised = unit_state_from_wire(raw)
+        if not recognised:
+            raise TransactionalError(
+                f"BGRFC_CHECK_UNIT_STATE_SERVER answered STATE={raw} for {unit_id}, a "
+                "value this library has no meaning for. Reported rather than guessed: "
+                "the parser this replaced answered NOT_FOUND for anything it could not "
+                "read, so an unrecognised state was indistinguishable from a unit the "
+                "backend has no record of."
+            )
+        return UnitState[name]
 
     async def retry_parked(self, tid: str) -> None:
         """Re-send a parked tRFC call from the durable store (D-03b).

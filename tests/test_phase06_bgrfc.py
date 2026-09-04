@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import pytest
 
+from saprfclib.exceptions import CommunicationError
+
 # --------------------------------------------------------------------------- #
 # UnitID format validation (offline — no production symbol needed)
 # --------------------------------------------------------------------------- #
@@ -204,21 +206,13 @@ def test_unit_lifecycle() -> None:
 
     uid = uuid.uuid4().hex.upper()
 
-    # confirm_unit — MockTransport returns empty bytes (no live SAP needed)
+    # An empty reply is not a state. It used to be reported as NOT_FOUND, which a
+    # caller acts on by shipping the unit again -- so a lookup that simply failed
+    # could re-run a committed LUW. Both calls now say the answer was unreadable.
     conn = _make_ready_bgrfc_connection(responses=[b"", b""])
-    conn.confirm_unit(uid, unit_type="T")
-    assert conn._transport.sent, "confirm_unit must have sent a frame"  # type: ignore[attr-defined]
-    frame = conn._transport.sent[0]  # type: ignore[attr-defined]
-    bgrfc_confirm_utf16 = "BGRFC_DEST_CONFIRM".encode("utf-16-le")
-    assert bgrfc_confirm_utf16 in frame, (
-        "BGRFC_DEST_CONFIRM (UTF-16LE) must appear in confirm_unit frame (the server dispatch)"
-    )
+    with pytest.raises(CommunicationError):
+        conn.confirm_unit(uid, unit_type="T")
 
-    # get_unit_state — empty response → NOT_FOUND (offline default)
     conn2 = _make_ready_bgrfc_connection(responses=[b""])
-    state = conn2.get_unit_state(uid, unit_type="T")
-    assert isinstance(state, UnitState), f"get_unit_state must return UnitState, got {type(state)}"
-    # Offline path (no live SAP): state defaults to NOT_FOUND
-    assert state == UnitState.NOT_FOUND, (
-        f"Offline get_unit_state must return NOT_FOUND, got {state!r}"
-    )
+    with pytest.raises(CommunicationError):
+        conn2.get_unit_state(uid, unit_type="T")
