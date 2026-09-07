@@ -440,16 +440,38 @@ Everything from `0502` onward is byte-for-byte what `build_invoke_request` emits
 same call. Ahead of the preamble sits an index section naming `SER_UNIT_TAB`, the called
 function blank-padded to 30 characters, and an option string `basxml=0,`.
 
-**Still open, and now bounded:**
+### The index section, by difference
 
-1. The index section ahead of the preamble — a length-and-count structure, not yet decoded.
-2. A SAPCOMPRESS **compressor**. `compress.py` decompresses LZH and LZC but encodes
-   neither. LZC (algorithm `0x11`) is LZW-based and materially simpler to write than the
-   LZH the reference client chose; whether the server accepts an LZC-compressed `SDATA`
-   is untested and worth trying before writing an LZH encoder.
+Three captures differing in one way each — one call, two calls, one call to a shorter
+function — separate the constants from the fields. What holds across all three:
 
-Neither is an unknown format any more: there is a reference payload that decodes cleanly
-with in-tree code, so any encoder can be checked by round-tripping against it.
+| Offset | Width | Meaning | Evidence |
+|--------|-------|---------|----------|
+| `0x09` | BE uint16 | total plaintext length − 120 | 951/1892/399 against totals 1071/2012/519 |
+| `0x7f` | uint8 | number of calls in the unit | 1 / 2 / 1 |
+| `0x85` | 60 bytes | function name, UTF-16LE, blank-padded to 30 chars | changes only with the function |
+| `0xc3` | 18 bytes | option string `basxml=0,` | constant across all three |
+| `0xfa` | BE uint16 | length of the first call record, which starts at `0x100` | 815/815/263; `256 + 815 = 1071` and `256 + 263 = 519` |
+
+The unit is a chain: the first call record runs from `0x100` for its declared length, and a
+second call follows immediately after it. In the two-call capture the first record ends at
+1071 — exactly where the second begins — and the second runs to 2012. Each record carries
+its own copy of the function name and its own invoke TLV stream (`0502` at 469 in the
+first record of every capture).
+
+**Still open:** the descriptor grammar between `0x20` and `0x100`. It is a tagged
+structure — a `SER_UNIT_TAB` name, then records shaped `<tag> <id> 00 00 00 00 <size>`
+with tags `0xaa`, `0xad`, `0xae`, `0xaf`, and two-byte tags around `0xbc`/`0xbd`/`0xbe` —
+but which of those are field descriptors of the container and which are values is not
+established, and the second call record uses a shorter prefix than the first. Building a
+submit needs that grammar; reading one does not.
+
+### Compression
+
+`sapcompress_compress_lzc()` encodes the LZC variant, round-tripping the captured payload
+and every code width. The reference client uses **LZH**, and whether a server accepts LZC
+in its place is untested — a submit is the only way to find out, and that is blocked on
+the descriptor grammar above.
 
 ### Backend tables (A4H, kernel 793, observed 2026-09-04)
 
