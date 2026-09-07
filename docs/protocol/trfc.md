@@ -416,9 +416,40 @@ serialization — it opens with a `SER_UNIT_TAB` name, carries the called functi
 `STFC_CONNECTION` blank-padded to 30 characters in UTF-16LE, a `basxml=0,` option string,
 and the call's parameter values.
 
-**Still open:** the recorder serialization itself, and whether an uncompressed payload is
-accepted (the library has a SAPCOMPRESS *decompressor* but no compressor). Both are now
-bounded problems with a reference payload to check against, rather than an unknown format.
+### Inside the compressed payload
+
+The plaintext is not a new format. Decoding the captured 1071 bytes by hand gives an
+ordinary RFC TLV stream — the same tags this library already builds — preceded by a
+logon-style preamble:
+
+    0514  16   session token
+    0007  18   client IP address, UTF-16LE
+    0011   2   logon language, "E"
+    0012   6   release, "754"
+    0013  32   kernel release and server address
+    0008  10   client hostname
+    0006  18   partner hostname
+    0130  26   caller program name
+    0502   0   request marker
+    000b   6   release, "754"
+    0102  30   function name, blank-padded to 30 characters
+    0201  16   parameter name, "REQUTEXT"
+    0203 510   parameter value, blank-padded to 255 characters
+
+Everything from `0502` onward is byte-for-byte what `build_invoke_request` emits for the
+same call. Ahead of the preamble sits an index section naming `SER_UNIT_TAB`, the called
+function blank-padded to 30 characters, and an option string `basxml=0,`.
+
+**Still open, and now bounded:**
+
+1. The index section ahead of the preamble — a length-and-count structure, not yet decoded.
+2. A SAPCOMPRESS **compressor**. `compress.py` decompresses LZH and LZC but encodes
+   neither. LZC (algorithm `0x11`) is LZW-based and materially simpler to write than the
+   LZH the reference client chose; whether the server accepts an LZC-compressed `SDATA`
+   is untested and worth trying before writing an LZH encoder.
+
+Neither is an unknown format any more: there is a reference payload that decodes cleanly
+with in-tree code, so any encoder can be checked by round-tripping against it.
 
 ### Backend tables (A4H, kernel 793, observed 2026-09-04)
 
