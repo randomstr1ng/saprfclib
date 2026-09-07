@@ -360,10 +360,29 @@ The live bgRFC test submitted a unit with empty parameters, so no payload bytes 
 for bgRFC function parameters. **Consequence:** the bgRFC payload encoding is inferred from the
 tRFC path rather than confirmed. **To close:** capture a bgRFC unit carrying real parameters.
 
-A specific suspicion, not yet tested: `build_bgrfc_request` names no destination. It sends
-`BGRFC_UNIT_ID`, `BGRFC_UNIT_TYPE`, `BGRFC_QUEUE_<i>` and `BGRFC_CALL_<i>` only, while the
-backend records inbound units in `BGRFC_SRV_STATE`, whose key includes `DESTINATION`. If a
-submit is accepted but no row appears, that is the first thing to check.
+What is now established, by submitting against a live system (A4H kernel 793, 2026-09-04):
+
+* **`SSTATE` reaches the module intact.** An earlier submit answered "BGRFC_DEST_SHIP
+  called without unit ID"; filling `SSTATE.UNIT_ID` with the 16 raw bytes clears that
+  check, so the structure encoding itself works.
+* **The module executes the unit inline.** It is not a queue insert followed by
+  asynchronous execution — the submit deserializes `SDATA` and runs the calls in it
+  before returning, then updates the state row to "finished".
+* **Therefore `SDATA` cannot be isolated from `SSTATE`.** Submitting with an empty
+  payload to test the state record alone does not work: the empty xstring still goes
+  to the deserializer, which fails an assertion. Every attempt with an empty `SDATA`
+  ends in `ASSERTION_FAILED`, whichever `UNIT_KIND` is used and whether or not the
+  optional `SUPPORTABILITY_INFO` is supplied.
+
+So the remaining unknown is the whole of it: `SDATA` is a serialized container holding
+the buffered calls, and nothing can be submitted until its format is known. It is not
+the concatenated invoke TLV streams this library buffers today.
+
+**To close:** capture a reference client submitting a unit that carries real parameters,
+and compare its `SDATA` against what we build. The error messages are a usable
+discriminator now — the backend names what it rejects — but the payload format is not
+reachable by trying shapes against it, because an unparseable payload and a wrong one
+fail the same way.
 
 ### Backend tables (A4H, kernel 793, observed 2026-09-04)
 
