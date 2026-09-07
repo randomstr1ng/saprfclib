@@ -336,3 +336,97 @@ class TestTableTLV:
         )
         pairs = _extract_name_value_pairs(stream)
         assert pairs[0][1] == row
+
+
+# --------------------------------------------------------------------------- #
+# LZC compressor (issue #15)
+# --------------------------------------------------------------------------- #
+#
+# The bgRFC submit payload is a SAPCOMPRESS block, so sending one needs an
+# encoder and this package had only decoders. What these tests establish is that
+# the library reads back exactly what it wrote -- necessary, and the first thing
+# a codec has to do, but NOT evidence that a server accepts the result. The one
+# captured bgRFC payload is LZH; no capture shows a client sending LZC. That gap
+# is recorded in docs/protocol/trfc.md and must not be closed by these tests.
+
+
+def test_lzc_round_trip_over_representative_inputs() -> None:
+    """Every shape that exercises a different path through the coder."""
+    from saprfclib.compress import sapcompress_compress_lzc
+
+    cases = {
+        "empty": b"",
+        "single byte": b"A",
+        "short text": b"hello world",
+        "one value repeated": b"\x00" * 5000,
+        "short cycle": b"ABCABCABC" * 400,
+        "every byte value": bytes(range(256)) * 20,
+        "long text": b"the quick brown fox jumps over the lazy dog. " * 2000,
+    }
+    for name, data in cases.items():
+        blob = sapcompress_compress_lzc(data)
+        assert sapcompress_decompress(blob, len(data)) == data, name
+
+
+def test_lzc_round_trip_across_the_code_width_increases() -> None:
+    """Widening from 9 bits to the limit must not shift the code groups.
+
+    LZC packs codes eight to a group, each group `code_len` bytes wide, and a
+    width increase abandons the rest of the current group. An encoder that
+    widens a step early still emits decodable codes -- they simply land at
+    offsets the reader does not look at, so the data comes back corrupt rather
+    than raising. Inputs here are large enough to cross every width from 9 up.
+    """
+    import random
+
+    from saprfclib.compress import sapcompress_compress_lzc
+
+    rng = random.Random(20260907)
+    for size in (600, 4096, 20000, 70000):
+        data = bytes(rng.randrange(256) for _ in range(size))
+        assert sapcompress_decompress(sapcompress_compress_lzc(data), size) == data, size
+
+
+def test_lzc_round_trip_at_many_lengths() -> None:
+    """Off-by-one errors in the final partial group show up as length-dependent."""
+    import random
+
+    from saprfclib.compress import sapcompress_compress_lzc
+
+    rng = random.Random(11)
+    for size in range(0, 2600, 23):
+        data = bytes(rng.randrange(256) for _ in range(size))
+        assert sapcompress_decompress(sapcompress_compress_lzc(data), size) == data, size
+
+
+def test_lzc_header_declares_length_algorithm_and_magic() -> None:
+    from saprfclib.compress import sapcompress_compress_lzc
+
+    payload = b"x" * 300
+    blob = sapcompress_compress_lzc(payload)
+    assert struct.unpack_from("<I", blob, 0)[0] == len(payload)
+    assert blob[4] & 0x0F == 1, "algorithm id 1 = LZC"
+    assert blob[5:7] == b"\x1f\x9d", "SAPCOMPRESS magic"
+    assert blob[7] & 0x1F == 13, "code-length limit travels in the config byte"
+
+
+def test_lzc_rejects_a_code_length_limit_outside_the_supported_range() -> None:
+    from saprfclib.compress import CompressError, sapcompress_compress_lzc
+
+    with pytest.raises(CompressError):
+        sapcompress_compress_lzc(b"data", code_len_limit=8)
+    with pytest.raises(CompressError):
+        sapcompress_compress_lzc(b"data", code_len_limit=17)
+
+
+def test_lzc_honours_a_non_default_code_length_limit() -> None:
+    import random
+
+    from saprfclib.compress import sapcompress_compress_lzc
+
+    rng = random.Random(3)
+    data = bytes(rng.randrange(256) for _ in range(9000))
+    for limit in (9, 12, 14, 16):
+        blob = sapcompress_compress_lzc(data, code_len_limit=limit)
+        assert blob[7] & 0x1F == limit
+        assert sapcompress_decompress(blob, len(data)) == data, limit
