@@ -729,21 +729,35 @@ def build_bgrfc_request(
 # every small integer tried against BGRFC_CHECK_UNIT_STATE_SERVER failed an ABAP
 # assertion instead of being rejected as a bad parameter.
 #
-# Source: live wire behaviour against A4H kernel 793 (2026-09-04). Each value
-# below was sent to BGRFC_CHECK_UNIT_STATE_SERVER on a fresh connection and the
-# server answered with a state rather than asserting. Values outside this set
-# (0..4 were tried) terminate the work process with ASSERTION_FAILED.
+# Source: live wire behaviour against A4H kernel 793. Each value below was sent
+# to BGRFC_CHECK_UNIT_STATE_SERVER on a fresh connection and the server answered
+# with a state rather than asserting (2026-09-04); the outbound tRFC value is
+# additionally confirmed as what a reference client sends for a type 'T' unit,
+# on both the submit and the confirm (SDK trace, 2026-09-07). Values outside
+# this set (0..4 were tried) terminate the work process with ASSERTION_FAILED,
+# which also kills the session.
 BGRFC_UNIT_KIND_QRFC_OUTBOUND = 1409196101
 BGRFC_UNIT_KIND_QRFC_INBOUND = 1409196102
 BGRFC_UNIT_KIND_TRFC_OUTBOUND = 1409196105
 BGRFC_UNIT_KIND_TRFC_INBOUND = 1409196106
 
-# A client submitting a unit into an SAP system is the inbound direction, so
-# those are the two this library sends. 'T' and 'Q' are the API's own spelling
-# of the distinction, not a wire value.
+# An external client sends the OUTBOUND values, not the inbound ones. That is
+# counter-intuitive -- the unit is going into the SAP system -- but it is what a
+# reference client puts on the wire: a captured type 'T' submit carries
+# UNIT_KIND 1409196105 (tRFC outbound), and its confirm for the same unit
+# carries the same value. Source: SDK trace, A4H kernel 793, 2026-09-07.
+#
+# Guessing inbound here is not caught by a state query, because
+# BGRFC_CHECK_UNIT_STATE_SERVER accepts all four values and answers NOT_FOUND for
+# a unit it cannot find. It selects on (unit_id, unit_kind), so the wrong kind
+# reports a real unit as missing -- which reads exactly like a unit that was
+# never submitted.
+#
+# 'Q' is [ASSUMED] to be the queued counterpart by symmetry; only the 'T' case
+# has been captured. A capture of a submit carrying queue names would settle it.
 _UNIT_KIND_BY_TYPE = {
-    _UNIT_TYPE_T: BGRFC_UNIT_KIND_TRFC_INBOUND,
-    _UNIT_TYPE_Q: BGRFC_UNIT_KIND_QRFC_INBOUND,
+    _UNIT_TYPE_T: BGRFC_UNIT_KIND_TRFC_OUTBOUND,
+    _UNIT_TYPE_Q: BGRFC_UNIT_KIND_QRFC_OUTBOUND,
 }
 
 
