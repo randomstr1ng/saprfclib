@@ -378,11 +378,47 @@ So the remaining unknown is the whole of it: `SDATA` is a serialized container h
 the buffered calls, and nothing can be submitted until its format is known. It is not
 the concatenated invoke TLV streams this library buffers today.
 
-**To close:** capture a reference client submitting a unit that carries real parameters,
-and compare its `SDATA` against what we build. The error messages are a usable
-discriminator now — the backend names what it rejects — but the payload format is not
-reachable by trying shapes against it, because an unparseable payload and a wrong one
-fail the same way.
+That capture has now been taken (SDK trace, A4H kernel 793, 2026-09-07: one type `T`
+unit carrying a single `STFC_CONNECTION` call with a marker string in `REQUTEXT`).
+
+### What a reference client actually sends
+
+| `SSTATE` field | Value observed | Note |
+|----------------|----------------|------|
+| `UNIT_ID` | 16 raw bytes | as issued by `BGRFC_GET_UNIT_ID` |
+| `UNIT_KIND` | `1409196105` | tRFC **outbound**, for a type `T` unit |
+| `DESTINATION` | the client's own hostname | *not* the inbound destination name |
+| `CALLER_CLIENT` | `"000"` | not the logon client |
+| `CALLER_USER` | the OS user | not the SAP user |
+| `CALLER_TCODE` | `"NW RFC Library 754"` | the library identifies itself here |
+| `CALLER_PROGRAM` | the executable name | |
+| `SENDING_TIME` | BCD `20260807082915` | |
+| `SENDING_INSTANCE` | the client hostname | |
+
+`UNIT_KIND` is the trap. An external client sends the **outbound** value even though the
+unit is going into the system, and a wrong choice is not reported: the state module
+accepts all four values and selects on `(unit_id, unit_kind)`, so the wrong kind makes a
+real unit read as `NOT_FOUND` — indistinguishable from one that was never submitted.
+
+### `SDATA` container
+
+    offset  size  content
+    0       8     FF 06 02 01 02 02 80 00      fixed header [ASSUMED constant]
+    8       4     "4103"                       codepage, single-byte ASCII
+    12      4     00 00 00 00
+    16      4     uncompressed length, LE uint32
+    20      1     0x12                         SAPCOMPRESS algorithm = LZH
+    21      ...   LZH-compressed payload
+
+The compressed block is ordinary SAPCOMPRESS: `sapcompress_decompress()` in `compress.py`
+decodes the captured payload exactly (410 bytes in, 1071 out). Inside is an RFC-recorder
+serialization — it opens with a `SER_UNIT_TAB` name, carries the called function name as
+`STFC_CONNECTION` blank-padded to 30 characters in UTF-16LE, a `basxml=0,` option string,
+and the call's parameter values.
+
+**Still open:** the recorder serialization itself, and whether an uncompressed payload is
+accepted (the library has a SAPCOMPRESS *decompressor* but no compressor). Both are now
+bounded problems with a reference payload to check against, rather than an unknown format.
 
 ### Backend tables (A4H, kernel 793, observed 2026-09-04)
 
