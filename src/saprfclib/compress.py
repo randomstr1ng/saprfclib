@@ -29,7 +29,9 @@ import struct
 from typing import Any
 
 __all__ = [
+    "CompressError",
     "DecompressError",
+    "sapcompress_compress_lzc",
     "sapcompress_decompress",
     "lz4_block_decompress",
     "sap_lz4_frame_decompress",
@@ -42,6 +44,10 @@ __all__ = [
 
 class DecompressError(Exception):
     """Raised on any decompression failure."""
+
+
+class CompressError(Exception):
+    """Raised on any compression failure."""
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +389,151 @@ class _LZCDecompress:
     @staticmethod
     def decompress_data(data: bytes, compat_mode: bool = False) -> bytes:
         return _LZCDecompress(data, compat_mode).decompress()
+
+
+# ---------------------------------------------------------------------------
+# LZC compressor
+# ---------------------------------------------------------------------------
+#
+# Written to mirror _LZCDecompress exactly, because the two have to agree on
+# more than the code values: LZC packs codes in groups of eight, each group
+# occupying `code_len` bytes, and a code-width increase abandons whatever is
+# left of the current group. Get the grouping wrong and the codes still decode
+# individually while landing at the wrong offsets, which is the kind of fault
+# that shows up as corrupt data rather than as an error.
+#
+# Only LZC is encoded. The reference client compresses a bgRFC payload with LZH
+# (algorithm 2), but LZH is Huffman-coded and much larger to write; LZC is the
+# same LZW the decompressor above already reads back. Whether a server accepts an
+# LZC-compressed payload where the reference client sends LZH is NOT established
+# -- see docs/protocol/trfc.md.
+
+
+class _LZCCompress:
+    """LZW compressor producing a stream _LZCDecompress reads back."""
+
+    def __init__(self, data: bytes, code_len_limit: int, block_mode: int) -> None:
+        if not (_LZC_MIN_CODE_LEN <= code_len_limit <= _LZC_MAX_CODE_LEN):
+            raise CompressError(f"code_len_limit {code_len_limit} out of range")
+        self._data = bytes(data)
+        self._code_len_limit = code_len_limit
+        self._code_limit = 1 << code_len_limit
+        self._block_mode = block_mode
+        self._out = bytearray()
+        self._group: list[int] = []
+        self._code_len = _LZC_MIN_CODE_LEN
+        self._max_code = (1 << _LZC_MIN_CODE_LEN) - 1
+
+    @property
+    def _first_seq_code(self) -> int:
+        return (
+            _LZC_LITERAL_COUNT if self._block_mode == _LZC_SINGLE_BLOCK else _LZC_LITERAL_COUNT + 1
+        )
+
+    def _set_code_len(self, n: int) -> None:
+        self._code_len = n
+        self._max_code = self._code_limit if n == self._code_len_limit else (1 << n) - 1
+
+    def _flush_group(self) -> None:
+        """Emit the pending codes as one `code_len`-byte group, LSB-first.
+
+        Always the full width even when fewer than eight codes are pending: the
+        decompressor reads a whole group and discards the remainder, so a short
+        one would put the next group at an offset it does not look at.
+        """
+        if not self._group:
+            return
+        bits = 0
+        nbits = 0
+        packed = bytearray()
+        for code in self._group:
+            bits |= code << nbits
+            nbits += self._code_len
+            while nbits >= 8:
+                packed.append(bits & 0xFF)
+                bits >>= 8
+                nbits -= 8
+        if nbits:
+            packed.append(bits & 0xFF)
+        packed.extend(b"\x00" * (self._code_len - len(packed)))
+        self._out.extend(packed[: self._code_len])
+        self._group.clear()
+
+    def _emit(self, code: int) -> None:
+        self._group.append(code)
+        if len(self._group) == 8:
+            self._flush_group()
+
+    def compress(self) -> bytes:
+        data = self._data
+        # Header: uncompressed length, algorithm and version, magic, config.
+        config = (self._block_mode << 7) | self._code_len_limit
+        header = struct.pack("<I", len(data)) + bytes([(1 << 4) | _HDR_ALG_LZC])
+        header += _HDR_MAGIC + bytes([config])
+
+        if not data:
+            return bytes(header)
+
+        table: dict[tuple[int, int], int] = {}
+        # next_free tracks the decompressor's own counter, which only advances
+        # from the second code onward: it creates an entry when it reads a code
+        # while holding a previous one, so the first code creates nothing.
+        # Advancing on the first code here widened the group one step early, and
+        # the codes then decoded individually while landing at wrong offsets.
+        next_free = self._first_seq_code
+        emitted = 0
+        pending: tuple[int, int] | None = None
+
+        def account_for(code: int) -> None:
+            """Do what the decompressor does after it reads ``code``."""
+            nonlocal next_free, pending, emitted
+            self._emit(code)
+            emitted += 1
+            if emitted >= 2 and pending is not None and next_free < self._code_limit:
+                table[pending] = next_free
+                next_free += 1
+                # Widen on exactly the decompressor's condition, with no extra
+                # guard of our own. At the default limit of 13 the two agree
+                # either way, but at a limit of 9 the reader still widens once
+                # -- its max_code starts at 511 while the code limit is 512 --
+                # and an encoder that declined would go out of step with it.
+                if next_free > self._max_code:
+                    self._flush_group()
+                    self._set_code_len(self._code_len + 1)
+            pending = None
+
+        prev = data[0]
+        for ch in data[1:]:
+            key = (prev, ch)
+            found = table.get(key)
+            if found is not None:
+                prev = found
+                continue
+            account_for(prev)
+            pending = key
+            prev = ch
+        account_for(prev)
+        self._flush_group()
+        return bytes(header) + bytes(self._out)
+
+
+def sapcompress_compress_lzc(
+    data: bytes,
+    *,
+    code_len_limit: int = _LZC_DEFAULT_CODE_LEN_LIMIT,
+    block_mode: int = _LZC_MULTI_BLOCK,
+) -> bytes:
+    """Compress ``data`` into a SAPCOMPRESS LZC block.
+
+    The result carries the 8-byte SAPCOMPRESS header, so it round-trips through
+    :func:`sapcompress_decompress` with ``out_length=len(data)``.
+
+    Correctness here means "this library reads back what it wrote". That is worth
+    having -- it is what a codec has to do before anything else -- but it is not
+    evidence that a server accepts the result. No capture shows a client sending
+    LZC; the one bgRFC payload captured uses LZH.
+    """
+    return _LZCCompress(data, code_len_limit, block_mode).compress()
 
 
 # ---------------------------------------------------------------------------
