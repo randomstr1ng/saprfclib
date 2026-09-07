@@ -27,7 +27,21 @@ import struct
 
 import pytest
 
+import saprfclib.connection as _conn_mod
 from saprfclib.connection import _build_ws_logon_message, _scramble_password_ws
+
+# The frame embeds the local hostname in tag 0x0008, so its total width varies
+# with the machine that builds it. Pin it: a byte-count assertion over a frame
+# containing an environment-derived field measures the build host, not the
+# fields. It passed on a developer machine whose hostname is five characters and
+# failed in CI on a runner whose name is eight longer.
+_PINNED_HOSTNAME = "titan"
+
+
+@pytest.fixture(autouse=True)
+def _pin_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_conn_mod.socket, "gethostname", lambda: _PINNED_HOSTNAME)
+
 
 # Tag order as observed in an accepted LOGON, with 0x0514 omitted -- see
 # test_the_session_token_record_is_not_sent.
@@ -230,11 +244,16 @@ def test_an_iso_language_code_becomes_one_byte() -> None:
         assert by_tag[0x0011] == b"E", given
 
 
-def test_the_frame_is_238_bytes_for_the_reference_inputs() -> None:
+def test_the_frame_width_is_fixed_for_the_reference_inputs() -> None:
     """Total width is the cheapest check that every field is the right size.
 
     A single field two bytes too wide moves this number, which is how the
     language bug was found after every structural assertion already passed.
+
+    216 rather than the 238 of the originally captured frame: that one carried a
+    0x0514 session token record, which was later shown to be optional and is no
+    longer sent. The hostname is pinned by the fixture above, or this measures
+    whichever machine happens to run it.
     """
     frame = _logon(
         user="Developer",
@@ -285,3 +304,23 @@ def test_ensure_ws_session_is_a_no_op_off_the_wrfc_path() -> None:
     assert conn._session.state is SessionState.READY
     conn._ensure_ws_session()
     assert conn._session.state is SessionState.READY
+
+
+def test_the_frame_carries_the_local_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tag 0x0008 is the client's own hostname, so the frame width is not fixed.
+
+    This is what made the width test above machine-dependent: it passed where the
+    hostname is five characters and failed on a CI runner whose name is thirteen,
+    producing a frame eight bytes longer. Asserting a total byte count over a
+    frame with an environment-derived field measures the build host.
+
+    The behaviour is correct -- a reference client sends its hostname here -- so
+    the test is what had to change, not the builder.
+    """
+    monkeypatch.setattr(_conn_mod.socket, "gethostname", lambda: "some-build-runner")
+    by_tag = dict(_records(_logon()))
+    assert by_tag[0x0008] == b"some-build-runner"
+
+    short = len(_logon())
+    monkeypatch.setattr(_conn_mod.socket, "gethostname", lambda: "some-build-runner-x" * 2)
+    assert len(_logon()) > short, "the hostname must reach the wire, not be padded away"
