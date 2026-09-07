@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-07
+
+A release about silence. Every defect below failed without raising: a reply thrown
+away, a test that could not fail, a method that quietly did nothing, parameters that
+did not exist, and a decoder that was written and never called. The bgRFC work drove
+most of them out, and the last one reaches well past bgRFC.
+
+### Added
+
+- `sapcompress_compress_lzc()` — a SAPCOMPRESS **encoder**. This package had only
+  decoders, and the bgRFC submit payload is a compressed block, so building one needed
+  an encoder. Written against `_LZCDecompress` rather than a description of LZW, because
+  the two must agree on more than code values: LZC packs codes eight to a group, each
+  group `code_len` bytes wide, and a width increase abandons the rest of the group. Two
+  places where getting that wrong is silent — the reader creates a dictionary entry only
+  from the *second* code, and it widens on `next_free > max_code` with no ceiling of its
+  own. An encoder out of step with either still emits decodable codes that land at
+  offsets the reader never reads, so data returns corrupt rather than raising. Caught by
+  round-tripping a real captured payload; every short synthetic case had passed.
+  What the tests establish is that the library reads back what it wrote. That is
+  necessary and not sufficient: no capture shows a client sending LZC.
+
+### Fixed
+
+- **Thirteen call sites sent a frame and threw the reply away.** `_submit_unit`,
+  `confirm_unit`, `rollback_unit`, `get_unit_state`, `call_transactional`, `confirm_tid`,
+  `retry_parked` and `retry_parked_unit`, across both connections, each called
+  `recv_message()` once and discarded the result. Two failures followed, neither visible:
+  a refusal read as success — an ABAP exception was indistinguishable from RFC_OK — and
+  the connection desynced, because every other path reassembles multi-frame replies and
+  these read one frame, leaving the remainder for the next call to misparse.
+  `call_transactional`'s own docstring promised `AbapApplicationError` "propagates on the
+  first occurrence"; while the reply was discarded, it could not. All thirteen now
+  reassemble and classify through `raise_for_rfc_error`.
+
+- **A gateway `*ERR*` frame is reported as one.** `parse_gateway_error()` and the branch
+  of `raise_for_rfc_error` that calls it already existed, and the docstring already named
+  the exact symptom: walking those bytes as TLV reads `*E` as a tag and `RR` as a length,
+  surfacing as `malformed TLV: tag 0x2a45 length 21074`. The handler was never reached —
+  `parse_invoke_response` parsed the TLV stream first, so it raised before the decoding
+  written for this case could run. Not a bgRFC problem: **any** ABAP short dump ends the
+  conversation, and every later call on that connection quoted a tag that never existed.
+
+- **`Connection._call_bootstrap` did not delegate to the async core.** Every sibling
+  method checks for `_async_conn` and hands over; this one ran its sync body against a
+  transport whose send and recv are coroutines, so no frame was sent and the "response"
+  was a coroutine object. The blast radius is the public `metadata.get_function_desc()`,
+  which reaches the backend through it — asking a classic connection for any function's
+  interface failed. Hidden because `call()` delegates before reaching the sync bootstrap.
+
+- **bgRFC confirm and state query use the real interface (#15).** The dictionary
+  describes `BGRFC_DEST_CONFIRM` and `BGRFC_CHECK_UNIT_STATE_SERVER` as ordinary modules
+  taking `UNIT_ID` as `BYTE(16)` and `UNIT_KIND` as `INT4`. The builders they replace
+  sent `BGRFC_UNIT_ID` as 32 hex characters in UTF-16LE and `BGRFC_UNIT_TYPE` as `'T'` or
+  `'Q'` — parameter names that do not exist, in types and widths that do not match. Both
+  now go through the ordinary call path.
+  - `UNIT_KIND` is not a small enum: the values sit above 1.4 billion, and small integers
+    do not fail cleanly — they terminate the work process with `ASSERTION_FAILED`, which
+    then poisons the session so every later call fails too.
+  - An external client sends the **outbound** value (`1409196105` for type `T`), not the
+    inbound one, even though the unit is going into the system. A first fix chose inbound
+    by reasoning; a capture of a reference client corrected it. Nothing catches this at
+    runtime: the state module accepts all four kinds and selects on
+    `(unit_id, unit_kind)`, so the wrong kind reports a real unit as `NOT_FOUND` — and a
+    caller answers `NOT_FOUND` by sending the unit again.
+  - `STATE` comes back as `22206` for a unit the backend has no record of. The parser
+    this replaces looked for the UTF-16LE strings `"0"`–`"4"` and fell back to
+    `NOT_FOUND` for anything else, so it would have answered `NOT_FOUND` to every real
+    reply. That fallback is gone: an unreadable answer now raises.
+  Verified live against A4H — both unit types, both calls, and malformed unit ids
+  rejected rather than resolved to a state.
+
+- **The live bgRFC gate can now fail.** It accepted `NOT_FOUND` as a successful state,
+  which is also what an unconfigured backend returns for a unit it was never given — so
+  the whole sequence passed on a system with bgRFC switched off, which is what it had
+  been doing. It now skips unless bgRFC is configured, rejects `NOT_FOUND` after a
+  submit, and requires the state to move across the confirm. The configuration check
+  reads `BGRFC_CUST_SUPER` and `BGRFC_MAIN_I_DST`; the obvious-looking
+  `BGRFC_CUST_I_SRV`/`BGRFC_CUST_I_DST` are per-server and per-destination scheduler
+  tuning that stay empty on a correctly configured system.
+
+- Evidence citations for the GW header constants. Around forty comments justified a wire
+  value by pointing at register names and struct offsets of a decompiled binary — the
+  weakest possible justification, and one this repository does not permit. Most of those
+  values had real evidence already in the tree and now cite it; `0x060F` has no committed
+  capture and says so. Dead code removed with them, including a function whose docstring
+  claimed the handshake blocks without it while nothing had ever sent it.
+
+### Documented
+
+- `BGRFC_DEST_SHIP`'s real interface, read from the dictionary: `SSTATE` (a 616-byte
+  `BGRFC_SRV_STATE` carrying the unit id as 16 raw bytes at offset 0), `SDATA`, and the
+  queue-name table. There is no `BGRFC_UNIT_ID` parameter.
+- The `SDATA` container, from a capture: a fixed 8-byte prefix, the codepage `"4103"`,
+  four zero bytes, then a SAPCOMPRESS block. The in-tree decompressor decodes it exactly.
+  Inside is an ordinary invoke TLV stream — the same tags `build_invoke_request` emits —
+  behind a logon-style preamble.
+- Three fields of the index section, decoded by differencing three captures that vary in
+  one way each: total length at `0x09`, call count at `0x7f`, first-record length at
+  `0xfa`. Records chain.
+- The submit remains **unimplemented**. It needs the descriptor grammar between `0x20`
+  and `0x100`, which one sample cannot settle, and it cannot be found by trying shapes
+  against the server: `BGRFC_DEST_SHIP` executes the unit inline, so a malformed payload
+  and a merely wrong one fail identically.
+
 ### Fixed
 
 - The message-server entry layout is corrected, and with it a latent bug. Three fields
@@ -1162,7 +1267,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.0...v0.1.1
