@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+Six gaps a downstream integration hit and had to work around. Source: porting the
+FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
+
+- **`FieldDesc` keeps the interface metadata it was already decoding.** `optional`,
+  `default_value` and `param_text` now reach the descriptor. The wire parser read all
+  twelve `RFC_GET_FUNCTION_INTERFACE` `PARAMS` columns and threw three away because the
+  codec has no use for them — but an integration rendering a form over a function's
+  interface needs exactly those three, so it had to call
+  `RFC_GET_FUNCTION_INTERFACE` itself and parse the rows again. A second round-trip for
+  data this library had already had in hand. Blank and absent both decode to `None`, so
+  "no default" stays distinguishable from "the default is empty".
+
+- **`connect(port=...)` and `connect_async(port=...)`.** `3300 + sysnr` is right for a
+  gateway reachable at its own address and does not survive NAT, a port-forward or a
+  jump host. There the caller knows the port and the library cannot derive it. Unset,
+  nothing changes — the SNC branch still defaults to 4800.
+
+- **`Connection` is a context manager.** `AsyncConnection` has had
+  `__aenter__`/`__aexit__` since it was written; the sync one had nothing, so every
+  caller wrote the same `try/finally` and whoever forgot leaked a connection and the
+  gateway conversation with it.
+
+- **`saprfclib.compat`** — `pyrfc` exception spellings for porting, never re-exported
+  from the package root. A missed rename is silent rather than an `ImportError`: with
+  `pyrfc` still installed alongside, which it is mid-migration, the old name resolves
+  against it and the `except` clause quietly stops matching. `ExternalRuntimeError` and
+  `LogonError` are documented as widened rather than exact — the first names a category
+  that cannot exist without an SDK, the second has no dedicated exception here. A
+  `LogonFailure` is deliberately *not* defined: an exception nothing raises is worse
+  than none, because every `except` written against it is dead code that reads as live.
+
+- **`saprfclib.jsonable()`** — one pass turning a decoded result into
+  JSON-serialisable values: dates and times to ISO-8601, `Decimal` to `str`, `bytes` to
+  hex, recursing through tables and structures. `Decimal` becomes a string, never a
+  float, for the same reason the codec refuses float in the first place. Offered as a
+  separate call rather than a `call(..., json_safe=True)` flag, which would put a
+  presentation concern in the protocol path.
+
+- **A `pyrfc` migration guide** in the docs, including the two traps that survive a
+  port: `conn.ping` is a method in both libraries, so `if conn.ping:` is a health check
+  that always passes; and `strict_params=False` drops an undeclared keyword with a
+  warning rather than raising.
+
+### Fixed
+
+- `RfcTrace` appeared twice in `saprfclib.__all__`.
+
 ## [0.1.4] - 2026-09-07
 
 A release about silence. Every defect below failed without raising: a reply thrown

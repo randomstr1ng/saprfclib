@@ -53,6 +53,7 @@ from saprfclib.exceptions import (
     TransactionalError,
     WebSocketError,
 )
+from saprfclib.jsonable import jsonable
 from saprfclib.language import language_iso_to_sap, language_sap_to_iso
 from saprfclib.pool import AsyncConnectionPool, ConnectionPool, PoolMetrics
 from saprfclib.server import AsyncRfcServer, RfcServer
@@ -85,6 +86,8 @@ __all__ = [
     # Logon language helpers (SDK parity: RfcLanguageIsoToSap / RfcLanguageSapToIso)
     "language_iso_to_sap",
     "language_sap_to_iso",
+    # Result post-processing
+    "jsonable",
     # Sync connection
     "connect",
     "ConnectionPool",
@@ -93,7 +96,6 @@ __all__ = [
     "AsyncConnection",
     "CallStats",
     "ConnectionMetrics",
-    "RfcTrace",
     "RfcTrace",
     "PoolMetrics",
     "AsyncConnectionPool",

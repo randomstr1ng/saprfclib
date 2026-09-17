@@ -57,6 +57,17 @@ class FieldDesc:
     type_desc: TypeDesc | None = None
     direction: int = RFC_IMPORT  # RFC_DIRECTION from PARAMCLASS (default: caller sends)
 
+    # Interface metadata the codec never reads. RFC_GET_FUNCTION_INTERFACE returns
+    # these three columns and the wire parser already decodes them; they were
+    # dropped on the way into the descriptor because nothing here needed them.
+    # Callers building a UI over a function's interface do: OPTIONAL decides whether
+    # a form field is required, DEFAULT prefills it, PARAMTEXT labels it. Without
+    # them an integration has to call RFC_GET_FUNCTION_INTERFACE itself and parse
+    # the rows again — a second round-trip for data already fetched and discarded.
+    optional: bool = False
+    default_value: str | None = None
+    param_text: str | None = None
+
 
 @dataclass
 class TypeDesc:

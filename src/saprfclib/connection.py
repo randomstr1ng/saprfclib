@@ -3368,6 +3368,20 @@ class Connection:
             return
         raise TransactionalError("retry_parked_unit is only available on classic TCP connections")
 
+    def __enter__(self) -> Connection:
+        """Enter a ``with`` block; the connection is already open.
+
+        AsyncConnection has had ``__aenter__``/``__aexit__`` since it was written.
+        Without the sync pair every caller writes the same ``try/finally: close()``,
+        and the one who forgets leaks a connection and the gateway conversation with
+        it. close() is idempotent, so an early close inside the block is harmless.
+        """
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close on the way out, whether or not the block raised."""
+        self.close()
+
     def close(self) -> None:
         """Close the connection; safe to call in ANY state including partial/error.
 
@@ -3623,6 +3637,7 @@ def connect(
     ms_use_http: bool = True,
     sysid: str | None = None,
     group: str | None = None,
+    port: int | None = None,
     wshost: str | None = None,
     wsport: int | None = None,
     ws_path: str | None = None,
@@ -3734,7 +3749,11 @@ def connect(
     # message server. Also confirmed live: the A4H message server reports
     # RFC=3300 and RFCS=4800 for a sysnr-00 application server.
     sysnr = _validate_sysnr(sysnr)
-    port = (4800 if snc_lib is not None else 3300) + sysnr
+    # An explicit port replaces the derivation entirely. The convention holds for a
+    # gateway reachable at its own address; it does not survive NAT, a port-forward
+    # or a jump host, and there the caller knows the port and the library cannot
+    # derive it. When None nothing changes, so the SNC branch still defaults to 4800.
+    port = port if port is not None else (4800 if snc_lib is not None else 3300) + sysnr
 
     # ------------------------------------------------------------------ #
     # Transport routing (Phase 7): wRFC first, then SNC, then plain TCP.  #
@@ -5002,6 +5021,7 @@ async def connect_async(
     mshost: str | None = None,
     sysid: str | None = None,
     group: str | None = None,
+    port: int | None = None,
     snc_lib: str | None = None,
     wshost: str | None = None,
     max_retries: int = 3,
@@ -5062,7 +5082,8 @@ async def connect_async(
 
         ashost, sysnr = await asyncio.to_thread(_ms_resolve)
 
-    port = 3300 + int(sysnr)
+    # See connect(): an explicit port replaces the derivation.
+    port = port if port is not None else 3300 + int(sysnr)
     transport = await connect_tcp_async(
         ashost, port, timeout=timeout, connect_timeout=connect_timeout
     )
