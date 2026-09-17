@@ -3672,10 +3672,24 @@ def connect(
         absent) → wrap the direct-TCP transport in an :class:`~saprfclib.snc.SncTransport`
         that drives the GSS-API handshake to COMPLETE before any data is sent
         (SEC-02/03/04/06, D-13). ``snc_lib`` presence is the activation switch —
-        there is no separate mode flag. ``snc_qop`` defaults to 3 (privacy) and
-        ``snc_sso`` to False (D-12). ``wshost`` takes precedence: SNC-over-wRFC
-        is out of scope for Phase 7.
-      - direct: ``port = 3300 + int(sysnr)`` (gateway port), connect_tcp, handshake.
+        there is no separate mode flag. ``snc_sso`` defaults to False (D-12).
+        ``wshost`` takes precedence: SNC-over-wRFC is out of scope for Phase 7.
+
+        ``snc_qop`` selects the protection level and defaults to 3. Accepted
+        values are 1 (authentication only), 2 (integrity), 3 (privacy),
+        8 (the system default) and 9 (the maximum available); anything else
+        raises ``ValueError`` rather than picking a level, because the value
+        decides whether payloads are encrypted.
+
+        **8 is an approximation.** SAP defines it as "apply the system's default
+        protection", which comes from the server's ``snc/data_protection/use``
+        profile parameter. This library does not read that parameter, so 8 is
+        treated exactly as 3. That errs toward more protection rather than less,
+        which is the only direction it is safe to approximate in — but it is an
+        approximation, not a negotiated answer. Pass 1, 2 or 3 if you need to know
+        precisely what is applied.
+      - direct: ``port = 3300 + int(sysnr)`` (gateway port unless ``port`` is
+        given), connect_tcp, handshake.
 
     ``lang`` is the logon language. Accepts the one-character SAP code ('E' English,
     'D' German, 'S' Spanish, …) or the two-character ISO code ('EN', 'DE', 'ES'); an

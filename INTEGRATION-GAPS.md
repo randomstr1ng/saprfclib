@@ -1,37 +1,48 @@
+# Integration gaps
+
+Things downstream integrations needed from `saprfclib` and could not get from the
+public API. Each entry records what was wanted, what had to be done instead, and a
+concrete proposal. This is a backlog note, not user documentation — it is deliberately
+outside `docs/` and not in the mkdocs nav.
+
+**Open: none.** The eight entries raised so far are closed; where each landed is below,
+so a downstream workaround can be retired against a specific release rather than
+guessed at.
+
+Add new entries above this line as they come up.
 
 ---
 
-## 8. `snc_qop` is unvalidated, and 8 / 9 are not distinguished
+## Closed
 
-Low severity, raised while confirming that dropping `snc_mode` costs nothing. It does
-not — `snc_mode` is SAP's 0/1 activation flag and `snc_lib` presence replaces it
-exactly. The protection *levels* live in `snc_qop`, which is fully plumbed:
-`connect()` → `SncTransport._qop` → the frame dispatch in `SncTransport.send_message`.
-Two rough edges in that dispatch:
+Source of entries 1–8: porting the FortiSOAR "SAP NetWeaver" connector (`sap-rfc`
+v2.0.0) off `pyrfc`.
 
-**No validation.** `connect()` applies `snc_qop or 3` and nothing else looks at the
-value again. The dispatch is `>= 3 → PRIVACY`, `== 2 → INTEGRITY`, `else → PLAIN`, so:
+| # | Gap | Closed by |
+|---|-----|-----------|
+| 1 | Function metadata dropped `OPTIONAL`, `DEFAULT`, `PARAMTEXT` | `FieldDesc.optional`, `.default_value`, `.param_text`; `get_function_desc()` exported from the package root |
+| 2 | No gateway port override | `port=` on `connect()` and `connect_async()` |
+| 3 | `Connection` had no sync context-manager protocol | `__enter__` / `__exit__` |
+| 4 | No pyrfc-compatible exception names | `saprfclib.compat` |
+| 5 | No `jsonable()` helper | `saprfclib.jsonable()` |
+| 6 | No pyrfc migration guide | `docs/getting-started/migrating-from-pyrfc.md` |
+| 7 | *(not a gap)* `strict_params=False` is the right default | unchanged, deliberately |
+| 8 | `snc_qop` unvalidated; `8`/`9` not distinguished | `validate_snc_qop()`, `SncQop.DEFAULT`/`MAXIMUM`, table dispatch |
 
-| value | result | |
-|---|---|---|
-| `1` | PLAIN | intended |
-| `2` | INTEGRITY | intended |
-| `3`–`9` | PRIVACY | `4`–`7` are not SAP QoP values but land on the safe side |
-| `0`, `None` | PRIVACY | via `or 3` |
-| negative | PLAIN | **unprotected, silently** |
+Two of these are worth remembering rather than just recording.
 
-Nothing here is a live security hole — every plausible typo lands on PRIVACY. But a
-setting that decides whether payloads are encrypted should not accept a value it does
-not recognise. Proposal: validate against `{1, 2, 3, 8, 9}` in `connect()` and raise
-`ValueError` on anything else, rather than letting an unrecognised value pick a
-protection level by falling through a comparison.
+**Entry 8 was the only one with a security edge.** The dispatch read
+`>= 3 → PRIVACY`, `== 2 → INTEGRITY`, `else → PLAIN`. Undefined values 4–7 landed on
+privacy — the safe side, and why it went unnoticed — but a negative number fell past
+both comparisons into the `else` and sent payloads **unprotected, silently**, on a
+connection the caller had asked to protect. The fix that matters is not the validation
+but the shape: the dispatch is now a table, and a table cannot fall through, so `PLAIN`
+is reachable only from QOP 1 rather than being the destination for anything
+unrecognised.
 
-**`8` and `9` collapse into `3`.** SAP defines `8` as "apply the default protection" and
-`9` as "apply the maximum protection". `9` → PRIVACY is right. `8` → PRIVACY is a
-reasonable guess, not a negotiated answer: the server's default comes from
-`snc/data_protection/use`, which the client does not consult. Worth either implementing
-the lookup or documenting `8` as an alias for `3` in the `connect()` docstring, so the
-approximation is stated rather than inferred from the source.
-
-The `SncQop` IntEnum (`AUTH_ONLY = 1`, `INTEGRITY = 2`, `PRIVACY = 3`) is the natural
-home for both — it has no members for `8` / `9` today.
+**`SncQop.DEFAULT` (8) remains an approximation, and is labelled `[ASSUMED]`.** SAP
+defines it as "the system's default protection", which lives in the server's
+`snc/data_protection/use` profile parameter. This library does not read that parameter,
+so 8 is treated as 3. It errs toward more protection, the only direction it is safe to
+approximate in, and the approximation is stated in `connect()`'s docstring rather than
+left to be inferred from the source. Reading that parameter over RFC would settle it.
