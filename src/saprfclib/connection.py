@@ -3797,7 +3797,7 @@ def connect(
         #
         # T-07-CRED: snc_lib / snc_partnername / snc_myname are passed
         # straight through — never placed into a log or an exception string.
-        from saprfclib.snc import SncTransport
+        from saprfclib.snc import SncTransport, validate_snc_qop
 
         _inner = connect_tcp(
             ashost,
@@ -3824,7 +3824,7 @@ def connect(
             snc_lib=snc_lib,
             snc_partnername=snc_partnername,  # type: ignore[arg-type]
             snc_myname=snc_myname,
-            snc_qop=snc_qop or 3,  # D-12: privacy is the default QOP
+            snc_qop=validate_snc_qop(snc_qop or 3),  # D-12: privacy is the default QOP
             snc_sso=snc_sso or False,  # D-12: SSO2 off by default (D-23 gap)
         )
 

@@ -294,3 +294,59 @@ def test_the_metadata_survives_the_whole_wire_path_not_just_a_hand_built_row() -
     assert sum(f.optional for f in fields) == 27
     assert not by_name["ADDRESS"].optional
     assert by_name["ADDRESS"].default_value is None
+
+
+# --------------------------------------------------------------------------- #
+# Gap 8: snc_qop must not accept a level it does not implement
+# --------------------------------------------------------------------------- #
+
+
+def test_every_implemented_qop_maps_to_a_protection_level() -> None:
+    """1, 2, 3 select directly; 8 and 9 are SAP's two indirect values."""
+    from saprfclib.snc import _QOP_PROTECTION, SncFrameType, SncQop
+
+    assert _QOP_PROTECTION[SncQop.AUTH_ONLY] is SncFrameType.PLAIN
+    assert _QOP_PROTECTION[SncQop.INTEGRITY] is SncFrameType.INTEGRITY
+    assert _QOP_PROTECTION[SncQop.PRIVACY] is SncFrameType.PRIVACY
+    assert _QOP_PROTECTION[SncQop.MAXIMUM] is SncFrameType.PRIVACY
+    # [ASSUMED]: the system default lives in snc/data_protection/use, which this
+    # library does not read. Treated as privacy because that errs toward more
+    # protection, which is the only safe direction to guess in.
+    assert _QOP_PROTECTION[SncQop.DEFAULT] is SncFrameType.PRIVACY
+
+
+@pytest.mark.parametrize("level", [1, 2, 3, 8, 9])
+def test_validate_snc_qop_accepts_the_levels_sap_defines(level: int) -> None:
+    from saprfclib.snc import validate_snc_qop
+
+    assert validate_snc_qop(level) == level
+
+
+@pytest.mark.parametrize("level", [-1, 0, 4, 5, 6, 7, 10, 99])
+def test_validate_snc_qop_refuses_anything_else(level: int) -> None:
+    """A setting that decides whether payloads are encrypted must not guess.
+
+    Every plausible typo landed on privacy, which is the safe side and is why
+    this went unnoticed. A negative number did not: it fell past the comparison
+    chain to the else branch and sent payloads PLAIN — unprotected, with no
+    error, on a connection the caller had explicitly asked to protect.
+    """
+    from saprfclib.snc import validate_snc_qop
+
+    with pytest.raises(ValueError, match="snc_qop"):
+        validate_snc_qop(level)
+
+
+def test_an_unrecognised_qop_can_never_reach_the_unprotected_branch() -> None:
+    """The dispatch is a table, so there is no fall-through to land on.
+
+    This is the property that matters, independent of validation: even if a value
+    reached the transport past the constructor, PLAIN must be something only
+    QOP 1 selects, never the default for anything unrecognised.
+    """
+    from saprfclib.snc import _QOP_PROTECTION, SncFrameType, SncQop
+
+    plain = [q for q, p in _QOP_PROTECTION.items() if p is SncFrameType.PLAIN]
+    assert plain == [SncQop.AUTH_ONLY]
+    for bad in (-1, 0, 4, 7, 10):
+        assert bad not in _QOP_PROTECTION

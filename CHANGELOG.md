@@ -54,6 +54,23 @@ FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
 
 ### Fixed
 
+- **`snc_qop` is validated, and the dispatch can no longer fall through to
+  unprotected.** `connect()` took the value, defaulted it with `or 3` and never looked
+  at it again; the transport then decided by comparison — `>= 3` privacy, `== 2`
+  integrity, *else* plain. Values SAP does not define (4–7) landed on privacy, which is
+  the safe side and is why this went unnoticed. A negative number did not: it fell past
+  both comparisons to the `else` and sent payloads **PLAIN, unprotected, with no error**,
+  on a connection the caller had explicitly asked to protect.
+  `SncQop` now carries SAP's two indirect levels — `MAXIMUM` (9) and `DEFAULT` (8) —
+  the dispatch is a table rather than a comparison chain, so an unrecognised value has
+  no branch to land on, and `validate_snc_qop()` refuses anything outside {1,2,3,8,9} at
+  both `connect()` and the transport constructor.
+  `DEFAULT` is labelled `[ASSUMED]`: the system's default protection lives in the
+  server's `snc/data_protection/use` profile parameter, which this library does not
+  read, so 8 is treated as privacy. That errs toward more protection, the only direction
+  it is safe to guess in — but it is a guess, and reading that parameter over RFC would
+  settle it.
+
 - `RfcTrace` appeared twice in `saprfclib.__all__`.
 
 ## [0.1.4] - 2026-09-07
