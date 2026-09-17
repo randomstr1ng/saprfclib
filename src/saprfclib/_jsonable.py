@@ -14,6 +14,12 @@ Deliberately a separate call rather than a ``call(..., json_safe=True)`` flag:
 the protocol path should not carry a presentation concern, and a caller that
 wants both the exact value and a serialisable one should not have to choose at
 call time.
+
+The module is private and the function is not: ``saprfclib.jsonable`` is the
+function. Naming the module the same thing made that attribute ambiguous --
+``from saprfclib._jsonable import jsonable`` rebinds it, so ``import
+saprfclib.jsonable`` would leave the name pointing at the function while the
+module sat in ``sys.modules`` under it.
 """
 
 from __future__ import annotations

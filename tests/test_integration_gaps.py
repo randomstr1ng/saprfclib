@@ -350,3 +350,29 @@ def test_an_unrecognised_qop_can_never_reach_the_unprotected_branch() -> None:
     assert plain == [SncQop.AUTH_ONLY]
     for bad in (-1, 0, 4, 7, 10):
         assert bad not in _QOP_PROTECTION
+
+
+def test_the_jsonable_docstring_example_is_true() -> None:
+    """Run the docstring's own example, because pytest does not collect doctests.
+
+    An unexecuted example is documentation that can rot without anything failing.
+    This is the cheapest way to keep it honest.
+    """
+    import doctest
+    import importlib
+
+    module = importlib.import_module("saprfclib._jsonable")
+    results = doctest.testmod(module, verbose=False)
+    assert results.failed == 0, f"{results.failed} of {results.attempted} examples failed"
+    assert results.attempted > 0, "the example vanished from the docstring"
+
+
+def test_get_function_desc_is_reachable_from_the_package_root() -> None:
+    """The entry point must be as public as the types it returns.
+
+    FunctionDesc and FieldDesc were exported while the function producing them was
+    not, so the documented way to fetch an interface reached into a submodule.
+    """
+    assert saprfclib.get_function_desc is not None
+    assert "get_function_desc" in saprfclib.__all__
+    assert {"FunctionDesc", "FieldDesc"} <= set(saprfclib.__all__)

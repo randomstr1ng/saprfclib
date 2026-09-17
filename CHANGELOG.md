@@ -52,6 +52,10 @@ FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
   that always passes; and `strict_params=False` drops an undeclared keyword with a
   warning rather than raising.
 
+- **`get_function_desc()` is exported from the package root.** `FunctionDesc` and
+  `FieldDesc` were public while the function producing them was not, so the documented
+  way to fetch an interface reached into a submodule for its entry point.
+
 ### Fixed
 
 - **`snc_qop` is validated, and the dispatch can no longer fall through to

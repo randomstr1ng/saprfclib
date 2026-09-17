@@ -30,7 +30,7 @@ The common connection parameters keep their names: `ashost`, `sysnr`, `client`, 
 | `conn.call("FM", **kw)` | `conn.call("FM", **kw)` | unchanged |
 | `conn.ping()` | `conn.ping()` | a method in both — **call it**, see below |
 | `conn.close()` | `conn.close()` | or use a `with` block |
-| `conn.get_function_description(f)` | `saprfclib.metadata.get_function_desc(conn, f)` | different shape, see below |
+| `conn.get_function_description(f)` | `saprfclib.get_function_desc(conn, f)` | different shape, see below |
 | `snc_mode="1"` | *(removed)* | passing `snc_lib` is the switch |
 | `snc_qop="3"` | `snc_qop=3` | `int`, not `str` |
 | `snc_sso="1"` | `snc_sso=True` | `bool`, not `str` |
@@ -107,9 +107,9 @@ six fields a dynamic UI needs.
 information under different names, plus the byte-layout numbers the codec uses:
 
 ```python
-from saprfclib.metadata import get_function_desc
+import saprfclib
 
-desc = get_function_desc(conn, "BAPI_USER_GET_DETAIL")
+desc = saprfclib.get_function_desc(conn, "BAPI_USER_GET_DETAIL")
 for field in desc.parameters:
     required = not field.optional
     label = field.param_text or field.name
@@ -148,10 +148,11 @@ if conn.ping():      # ← actually pings
 
 ### Undeclared keyword arguments are dropped, not raised
 
-`call()` defaults to `strict_params=False`: a keyword the function's interface does not
-declare is dropped with a warning rather than raising. This matches what pyrfc callers
-expect, and it is what makes calling the same function module across releases with
-differing interfaces survivable.
+`strict_params` is set on `connect()` and applies to every `call()` on that connection.
+It defaults to `False`: a keyword the function's interface does not declare is dropped
+with a warning rather than raising. This matches what pyrfc callers expect, and it is
+what makes calling the same function module across releases with differing interfaces
+survivable.
 
 If you would rather find out immediately, pass `strict_params=True` on `connect()`.
 
