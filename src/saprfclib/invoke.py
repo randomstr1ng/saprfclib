@@ -401,6 +401,15 @@ def build_invoke_request(
                     f"complete."
                 )
             all_row_bytes = encode(_RFCTYPE_TABLE, rows, field)
+            # [ASSUMED] The outbound width is the sum of the field widths, packed.
+            # Self-consistent -- the same number sets the stride and is written into
+            # 0x0302, so what we declare is what we send -- and no server has been
+            # observed rejecting it. It is nonetheless the padded-vs-packed question
+            # from the other side: a server that expected 4-byte-aligned rows would
+            # read these as misaligned, the mirror of the decode bug fixed by taking
+            # the width from 0x0302 rather than from here. Untested. Sending a table
+            # whose row type carries INT4 members to a live system, and reading back
+            # what it stored, would settle it.
             row_size = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
             row_count = len(rows)
             parts.append(tlv_record(_TAG_TABLE_NAME, field.name.encode("utf-16-le")))
@@ -1170,13 +1179,19 @@ def parse_invoke_response(
 
     result: dict[str, object] = {}
     basxml: dict[str, bytes] = {}
+    # Row widths the server declared per table (0x0302). Preferred over the
+    # descriptor's sum of field widths, which is right for a packed table and
+    # wrong for a padded one — see codec._decode_table.
+    row_sizes: dict[str, int] = {}
     # Walk the ordered tag list to pick up 0x0201+0x0203 pairs
-    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml):
+    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml, row_sizes):
         name_upper = name.upper()
         match_field: FieldDesc | None = param_map.get(name_upper)
         if match_field is None:
             continue  # unknown param name — ignore (defensive)
-        result[match_field.name] = decode(match_field.rfctype, value, match_field)
+        result[match_field.name] = decode(
+            match_field.rfctype, value, match_field, row_sizes.get(name)
+        )
 
     # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
     # bypass the codec entirely (see decode_basxml_table).
@@ -1474,6 +1489,7 @@ def _extract_name_value_pairs(
     data: bytes,
     dm_table_names: dict[int, str] | None = None,
     basxml_out: dict[str, bytes] | None = None,
+    row_sizes_out: dict[str, int] | None = None,
 ) -> list[tuple[str, bytes]]:
     """Walk TLV stream and return ordered (name_str, value_bytes) pairs.
 
@@ -1483,7 +1499,8 @@ def _extract_name_value_pairs(
 
     TABLE (CONFIRMED from the parameter serializer):
       0x0301(name)  ← combined name+begin; value is param name UTF-16LE
-      0x0302(info)  ← 8B [BE row_size][BE row_count] (informational; ignored here)
+      0x0302(info)  ← 8B [BE row_size][BE row_count]; row_size is reported via
+                      row_sizes_out and is what the rows are split by
       {0x0303|0x0304|0x0305}* rows  ← uncompressed or SAPCOMPRESS compressed
       0x0306(end)   ← yields (name, concatenated_row_bytes) pair
 
@@ -1605,7 +1622,17 @@ def _extract_name_value_pairs(
 
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
-            pass  # row_size / row_count already available from row data length
+            # The server states the row width here, and it is the only place it
+            # is stated. The descriptor cannot supply it: the same DDIC row type
+            # arrives packed on the uncompressed path and 4-byte aligned on the
+            # compressed one (RFC_FUNINT is 402 and 404 respectively), so no
+            # constant derived from the field list is right for both. This used
+            # to be discarded as "already available from row data length", which
+            # is true only when the buffer divides exactly.
+            if row_sizes_out is not None and current_name is not None and len(value) >= 8:
+                declared_size, _declared_count = struct.unpack_from(">II", value, 0)
+                if declared_size > 0:
+                    row_sizes_out[current_name] = declared_size
         elif tag in (_TAG_TABLE_CONTENT, _TAG_TABLE_CONTENT_ALT) and in_table:  # 0x0303/0x0304
             # CONFIRMED: both tags carry raw uncompressed row bytes (the deserializer path)
             table_rows.extend(value)

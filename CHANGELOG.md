@@ -58,6 +58,27 @@ FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
 
 ### Fixed
 
+- **TABLE rows are split by the width the server declares, not by the descriptor's.**
+  The same DDIC row type arrives at two widths: the uncompressed `0x0303` path packs
+  rows to the sum of their field widths, the compressed `0x0305` path pads each row to a
+  4-byte boundary. `RFC_FUNINT` is 402 packed and 404 padded, so no constant derived
+  from the field list is right for both — and `_decode_table` took it from
+  `TypeDesc.uc_size`, which is that sum.
+  Splitting a padded 17776-byte buffer by 402 does not raise. It returns the right
+  *number* of rows, each drifting one character further left than the last, so
+  `RFC_GET_FUNCTION_INTERFACE` for `BAPI_USER_GET_DETAIL` returned 44 rows of which 40
+  were corrupt: `PARAMCLASS` merged into `PARAMETER`, then NULs, then names eaten down
+  to `TADDS`, `TADD`, `TAD`, `TA`. `PARAMCLASS` and `EXID` read empty; `DEFAULT` filled
+  with binary.
+  The server states the real width in the `0x0302` record, which the parser discarded as
+  "already available from row data length" — true only when the buffer happens to divide
+  exactly. It is now read and preferred, with the descriptor as the fallback so
+  hand-built descriptors and the encode path are unaffected. A declared width narrower
+  than the layout is refused rather than decoded, since it arrives from the peer and
+  becomes a slice length (same trust boundary as T-02-06).
+  Rounding `uc_size` up to the alignment would not have fixed this: it corrects the
+  padded case and breaks the packed one.
+
 - **`snc_qop` is validated, and the dispatch can no longer fall through to
   unprotected.** `connect()` took the value, defaulted it with `or 3` and never looked
   at it again; the transport then decided by comparison — `>= 3` privacy, `== 2`

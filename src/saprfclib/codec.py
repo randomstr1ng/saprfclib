@@ -546,15 +546,44 @@ def _decode_structure(
 def _decode_table(
     data: bytes | bytearray | memoryview,
     field: FieldDesc,
+    row_size: int | None = None,
 ) -> list[dict[str, Any]]:
     """Decode a TABLE into a list of row dicts via zero-copy memoryview slices.
 
     Row count is ``len(data) // row_size`` — bounded by the actual buffer, never
     by an attacker-controlled count (threat T-02-06). Each row is decoded as a
     STRUCTURE over its memoryview slice (Pattern 3, D-11 zero-copy).
+
+    ``row_size`` is the width the server declared for this table, from the 0x0302
+    record. Prefer it: the descriptor cannot supply it, because the same DDIC row
+    type arrives at two different widths depending on how the server sent it. The
+    uncompressed 0x0303 path packs rows to the sum of their field widths; the
+    compressed 0x0305 path pads each row to a 4-byte boundary. RFC_FUNINT is 402
+    packed and 404 padded, and no constant derived from the field list is right
+    for both — splitting a padded 17776-byte buffer by 402 yields rows that drift
+    one character further left each time until the names are eaten.
+
+    Rounding the descriptor's size up to the alignment is not the fix either: it
+    corrects the padded case and breaks the packed one.
+
+    Falls back to the descriptor when no width is given, which keeps synthetic
+    descriptors and the encode path working.
     """
     type_desc = _require_type_desc(field, "decode")
-    row_size = _row_size(type_desc, field.unicode_mode)
+    declared = _row_size(type_desc, field.unicode_mode)
+    if row_size is None:
+        row_size = declared
+    elif row_size < declared:
+        # The width arrives from the peer and becomes a slice length, so it is
+        # attacker-influenced input on the same trust boundary as T-02-06. A row
+        # narrower than the layout cannot be decoded — every field past the cut
+        # would read from the next row — so refuse rather than produce plausible
+        # rows built from misaligned bytes.
+        raise ValueError(
+            f"TABLE {field.name!r}: server declared row_size {row_size}, which is "
+            f"narrower than the {declared}-byte layout its descriptor requires; "
+            "refusing to decode rows from misaligned bytes"
+        )
     if row_size <= 0:
         raise ValueError(f"TABLE row size must be positive, got {row_size}")
     mv = memoryview(_as_bytes(data))
@@ -645,7 +674,12 @@ def _encode_table(value: list[dict[str, Any]], field: FieldDesc) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
-def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc) -> Any:
+def decode(
+    rfctype: int,
+    data: bytes | bytearray | memoryview,
+    field: FieldDesc,
+    row_size: int | None = None,
+) -> Any:
     """Decode wire bytes into a Python value for the given RFCTYPE.
 
     Args:
@@ -708,7 +742,7 @@ def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc)
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
             return _decode_structure(buf, _require_type_desc(field, "decode"), field.unicode_mode)
         case rfctype if rfctype == RFCTYPE_TABLE:
-            return _decode_table(buf, field)
+            return _decode_table(buf, field, row_size)
         case _:
             raise ValueError(f"unknown RFCTYPE {rfctype}")
 
