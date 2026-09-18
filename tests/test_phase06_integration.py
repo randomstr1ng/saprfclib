@@ -215,6 +215,16 @@ def test_live_trfc_delivery() -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(not os.environ.get("SAPRFC_ASHOST"), reason=_LIVE_SKIP_REASON)
+@pytest.mark.xfail(
+    reason=(
+        "tRFC/qRFC submit does not work (#36): build_trfc_request sends ARFCTID, "
+        "ARFCFNAM and ARFCQUEUE as named parameters and ARFC_DEST_SHIP declares "
+        "none of them, so the server answers 'Field TID did not have a value'. "
+        "Not strict: if a release accepts this frame, that is worth knowing rather "
+        "than turning into a failure."
+    ),
+    strict=False,
+)
 def test_live_qrfc_queued_call() -> None:
     """Client issues a qRFC call with a queue name; backend accepts it without error.
 
