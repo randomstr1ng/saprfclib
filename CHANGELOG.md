@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-18
+
+The release that came out of putting the library in front of a real integration.
+Every fix below was found by someone trying to use it, not by reading it — six API
+gaps a downstream connector had to work around, and three wire bugs that were
+returning wrong data or claiming success while doing nothing.
+
+The through-line is the same as 0.1.4's: failures that do not announce themselves.
+A TABLE decoded at the wrong stride returns the right *number* of rows with the
+wrong contents. A `snc_qop` the dispatch does not recognise falls through to
+unprotected. A submit whose reply is discarded reports success whatever the server
+said. None of these raise, and none of them were caught by a green test suite.
+
+Two of them are recorded rather than fixed: the tRFC and bgRFC submits do not work,
+they never did, and they now say so loudly instead of quietly.
+
 ### Added
 
 Six gaps a downstream integration hit and had to work around. Source: porting the
@@ -1394,7 +1410,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...v0.1.2
