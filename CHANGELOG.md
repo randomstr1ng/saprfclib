@@ -77,6 +77,16 @@ FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
   widths coincide, and the test for the packed path reached it through the no-count
   fallback rather than the production shape. Both directions are now pinned.
 
+- **tRFC/qRFC submit is known not to work (#36), and now says so.** Reading the reply
+  surfaced it: `ARFC_DEST_SHIP` answers *"Field TID did not have a value"*, because
+  `build_trfc_request` sends `ARFCTID`, `ARFCFNAM` and `ARFCQUEUE` as named parameters
+  and the module declares none of them — the TID travels in its `state` TABLE, split
+  across four `ARFCRSTATE` columns. The builder's claim that a live qRFC gate had
+  confirmed the encoding was the same false confirmation the discarded reply produced
+  for bgRFC. The docstring now records what the dictionary says; the frame still goes
+  out, because the server's refusal names the missing field better than a local error
+  would.
+
 - **No per-function-module constants in the table reader.** `_GFI_ROW_BYTES = 402` and
   `_DFIES_ROW_BYTES = 138` were the row widths of two specific modules' result tables,
   used as a slicing floor for any table. The stride now comes from the row count the

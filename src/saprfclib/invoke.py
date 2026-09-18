@@ -520,8 +520,25 @@ def build_trfc_request(
     Security: validates TID length and alphabet, queue name length before encoding
     (T-06-C02 / RESEARCH V5).
 
-    OG-06-01 CONFIRMED (2026-08-05): named-param encoding confirmed via live qRFC gate.
-    TID as ARFCTID param works; no raw ARFCSSTATE field decomposition needed.
+    OG-06-01 NOT CONFIRMED. This block claimed the named-param encoding was
+    confirmed by a live qRFC gate on 2026-08-05. It was not: that gate discarded
+    the server's reply, so a refusal was indistinguishable from success. With the
+    reply read, the same call answers
+
+        Field TID did not have a value when ARFC_DEST_SHIP was called
+
+    and the dictionary says why. ARFC_DEST_SHIP takes sender_id,
+    supportability_info and unit_id -- all OPTIONAL -- plus two TABLES, data
+    (ARFCRDATA) and state (ARFCRSTATE). There is no ARFCTID parameter, no
+    ARFCFNAM and no ARFCQUEUE; the TID lives in the state table's rows, split
+    across ARFCIPID, ARFCPID, ARFCTIME and ARFCTIDCNT.
+
+    So this frame cannot work, and the parameters below are named after fields of
+    a structure rather than after anything the module declares. Kept sending
+    rather than raising, because the server's refusal names the missing field
+    precisely and that is more useful than a local error -- but it is a refusal
+    every time. Tracked as its own issue; the shape of the fix is the same as the
+    bgRFC submit's, and needs the same evidence.
 
     Args:
         tid:       24-char TID from the RFC TID alphabet.
