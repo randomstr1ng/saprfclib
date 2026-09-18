@@ -1179,18 +1179,18 @@ def parse_invoke_response(
 
     result: dict[str, object] = {}
     basxml: dict[str, bytes] = {}
-    # Row widths the server declared per table (0x0302). Preferred over the
-    # descriptor's sum of field widths, which is right for a packed table and
-    # wrong for a padded one — see codec._decode_table.
-    row_sizes: dict[str, int] = {}
+    # Row counts the server declared per table (0x0302). The width is derived
+    # from these and the buffer, because neither the descriptor nor 0x0302's own
+    # row_size is right on both serialization paths — see codec._decode_table.
+    row_counts: dict[str, int] = {}
     # Walk the ordered tag list to pick up 0x0201+0x0203 pairs
-    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml, row_sizes):
+    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml, row_counts):
         name_upper = name.upper()
         match_field: FieldDesc | None = param_map.get(name_upper)
         if match_field is None:
             continue  # unknown param name — ignore (defensive)
         result[match_field.name] = decode(
-            match_field.rfctype, value, match_field, row_sizes.get(name)
+            match_field.rfctype, value, match_field, row_counts.get(name)
         )
 
     # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
@@ -1489,7 +1489,7 @@ def _extract_name_value_pairs(
     data: bytes,
     dm_table_names: dict[int, str] | None = None,
     basxml_out: dict[str, bytes] | None = None,
-    row_sizes_out: dict[str, int] | None = None,
+    row_counts_out: dict[str, int] | None = None,
 ) -> list[tuple[str, bytes]]:
     """Walk TLV stream and return ordered (name_str, value_bytes) pairs.
 
@@ -1499,8 +1499,8 @@ def _extract_name_value_pairs(
 
     TABLE (CONFIRMED from the parameter serializer):
       0x0301(name)  ← combined name+begin; value is param name UTF-16LE
-      0x0302(info)  ← 8B [BE row_size][BE row_count]; row_size is reported via
-                      row_sizes_out and is what the rows are split by
+      0x0302(info)  ← 8B [BE row_size][BE row_count]; the COUNT is reported via
+                      row_counts_out, and the width is measured from the buffer
       {0x0303|0x0304|0x0305}* rows  ← uncompressed or SAPCOMPRESS compressed
       0x0306(end)   ← yields (name, concatenated_row_bytes) pair
 
@@ -1622,17 +1622,16 @@ def _extract_name_value_pairs(
 
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
-            # The server states the row width here, and it is the only place it
-            # is stated. The descriptor cannot supply it: the same DDIC row type
-            # arrives packed on the uncompressed path and 4-byte aligned on the
-            # compressed one (RFC_FUNINT is 402 and 404 respectively), so no
-            # constant derived from the field list is right for both. This used
-            # to be discarded as "already available from row data length", which
-            # is true only when the buffer divides exactly.
-            if row_sizes_out is not None and current_name is not None and len(value) >= 8:
-                declared_size, _declared_count = struct.unpack_from(">II", value, 0)
-                if declared_size > 0:
-                    row_sizes_out[current_name] = declared_size
+            # The row COUNT is what is worth carrying out of here, not the row
+            # size beside it. The size reports the padded DDIC width on both
+            # serialization paths, so it is wrong whenever the server packed the
+            # rows instead; the count is a tally of what was actually sent and
+            # cannot disagree with the serializer. The width is then measured
+            # from the buffer -- see codec._decode_table.
+            if row_counts_out is not None and current_name is not None and len(value) >= 8:
+                _declared_size, declared_count = struct.unpack_from(">II", value, 0)
+                if declared_count > 0:
+                    row_counts_out[current_name] = declared_count
         elif tag in (_TAG_TABLE_CONTENT, _TAG_TABLE_CONTENT_ALT) and in_table:  # 0x0303/0x0304
             # CONFIRMED: both tags carry raw uncompressed row bytes (the deserializer path)
             table_rows.extend(value)

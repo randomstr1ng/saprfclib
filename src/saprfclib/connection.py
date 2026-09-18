@@ -774,12 +774,7 @@ def _filter_call_params(
     return drop_unknown_parameters(desc, params)
 
 
-_DFIES_ROW_BYTES = 138  # wire-confirmed DFIES row layout; the stride may be 140
-_GFI_ROW_BYTES = 402  # the documented 12-column PARAMS layout; the wire stride may
-# exceed it (alignment padding), so it is a minimum, never the stride itself.
-
-
-def _table_row_buffers(response: bytes, min_row_bytes: int, table: str = "") -> list[bytes]:
+def _table_row_buffers(response: bytes, table: str = "") -> list[bytes]:
     """Split a fixed-width result table out of a response into row buffers.
 
     Shared by every reader of a fixed-width result table — the GFI PARAMS table and
@@ -807,6 +802,7 @@ def _table_row_buffers(response: bytes, min_row_bytes: int, table: str = "") -> 
     descriptor and no diagnostic.
     """
     row_size = 0
+    row_count = 0
     per_record: list[bytes] = []
     lz_chunks: list[bytes] = []
 
@@ -831,7 +827,7 @@ def _table_row_buffers(response: bytes, min_row_bytes: int, table: str = "") -> 
             pos += 2
 
         if tag == 0x0302 and length == 8:
-            row_size = struct.unpack_from(">I", data, 0)[0]
+            row_size, row_count = struct.unpack_from(">II", data, 0)
         elif tag in (0x0303, 0x0304):
             per_record.append(data)
         elif tag == 0x0305:
@@ -847,11 +843,28 @@ def _table_row_buffers(response: bytes, min_row_bytes: int, table: str = "") -> 
                 exc,
             )
             return []
-        stride = row_size if row_size >= min_row_bytes else min_row_bytes
+        # Stride from the row COUNT, not the row_size beside it. row_size carries
+        # the DDIC layout width and can exceed what was actually serialized -- the
+        # structure-definition case above declared 140 over 138-byte records --
+        # so dividing the blob by the number of rows in it is the only figure
+        # that cannot disagree with the serializer.
+        if row_count > 0 and len(blob) % row_count == 0:
+            stride = len(blob) // row_count
+        elif row_size > 0:
+            stride = row_size
+        else:
+            _logger.warning(
+                "the %s result table gave neither a usable row count nor a row "
+                "size; metadata unavailable",
+                table or "result",
+            )
+            return []
         return [blob[i : i + stride] for i in range(0, len(blob) - stride + 1, stride)]
 
-    # Per-row records: one row each, at whatever width the server used.
-    return [r for r in per_record if len(r) >= min_row_bytes]
+    # Per-row records: one row each, at whatever width the server used. No width
+    # arithmetic at all -- the record boundaries are the row boundaries. A short
+    # or malformed record is dropped by the row parser, which guards each row.
+    return [r for r in per_record if r]
 
 
 def _parse_gfi_params_rows(
@@ -896,7 +909,7 @@ def _parse_gfi_params_rows(
     _CHAR_LIKE_EXID = frozenset("CDTNg")
 
     rows: list[dict[str, Any]] = []
-    for data in _table_row_buffers(response, _GFI_ROW_BYTES, "PARAMS"):
+    for data in _table_row_buffers(response, "PARAMS"):
         try:
             off = 0
 
@@ -1004,7 +1017,7 @@ def _parse_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
     response = _strip_gw_header(response)
 
     rows: list[tuple[Any, ...]] = []
-    for data in _table_row_buffers(response, _DFIES_ROW_BYTES, "FIELDS"):
+    for data in _table_row_buffers(response, "FIELDS"):
         try:
             fieldname = data[60:120].decode("utf-16-le").rstrip(" \x00")
             position = struct.unpack_from("<H", data, 120)[0]

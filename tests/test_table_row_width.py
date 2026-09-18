@@ -1,24 +1,34 @@
 # SPDX-License-Identifier: MPL-2.0
-"""A TABLE's row width comes from the server, not from the descriptor.
+"""A TABLE's row width is measured, not declared.
 
-The same DDIC row type reaches the client at two different widths. The
-uncompressed 0x0303 path packs rows to the sum of their field widths; the
-compressed 0x0305 path pads each row to a 4-byte boundary. ``RFC_FUNINT`` is 402
-packed and 404 padded, because it carries INT4 members.
+The same DDIC row type reaches the client at two widths. The uncompressed 0x0303
+path packs rows to the sum of their field widths; the compressed 0x0305 path pads
+each row to a 4-byte boundary. ``RFC_FUNINT`` is 402 packed and 404 padded,
+because it carries INT4 members.
 
-``_decode_table`` used to take the width from ``TypeDesc.uc_size``, which is that
-sum — right for one path and wrong for the other. Splitting a padded 17776-byte
-buffer by 402 does not raise: it yields 44 row-shaped slices that drift one
-character further left each time, so the names decay through ``'EADMINDATA'`` and
-``'\\x00EALIAS'`` to ``'TADDS'``, ``'TADD'``, ``'TAD'``, ``'TA'`` as the walk runs
-off the end. PARAMCLASS and EXID read empty; DEFAULT fills with binary.
+Both obvious sources are wrong on one path:
 
-The server states the real width in the 0x0302 record, which the parser
-discarded as "already available from row data length" — true only when the
-buffer happens to divide exactly.
+* ``TypeDesc.uc_size`` is that sum -- 402. Right packed, wrong padded.
+* ``0x0302``'s ``row_size`` reports 404 on **both** paths. It carries the DDIC
+  layout width and does not track how the rows were serialized. Right padded,
+  wrong packed.
 
-Source: tests/golden/framing/gfi_compressed_params_response.bin —
-BAPI_USER_GET_DETAIL's interface, whose 0x0302 reads row_size=404 row_count=44.
+Picking either moves the bug rather than fixing it, and it moves silently:
+splitting a 404-wide buffer by 402, or a 402-wide buffer by 404, returns the
+right *number* of row-shaped slices, each drifting further out of alignment.
+
+``row_count`` is a tally of what the server actually sent, so it cannot disagree
+with the serializer. The width falls out of the buffer: ``len(buf) // row_count``.
+
+This file covers both directions deliberately. An earlier version reached the
+packed path only through the no-count fallback, never the production shape where
+a 0x0302 declares 404 over 402-byte rows -- and that gap is why trusting
+``row_size`` shipped. Every table fixture in this tree is one where the two
+widths coincide, so the corpus cannot discriminate on its own.
+
+Sources: tests/golden/framing/gfi_compressed_params_response.bin (padded, real);
+the packed cases are synthetic, pinning the rule rather than a captured sequence,
+because no uncompressed-GFI capture exists in this tree.
 """
 
 from __future__ import annotations
@@ -126,13 +136,13 @@ def test_the_server_declares_a_width_the_descriptor_cannot_derive() -> None:
     assert len(rows) % 402 == 88
 
 
-def test_rows_decode_cleanly_at_the_declared_width() -> None:
-    """44 rows, every one intact — the fix.
+def test_rows_decode_cleanly_from_the_declared_count() -> None:
+    """44 rows, every one intact.
 
-    Before, this produced 44 slices whose PARAMCLASS was empty from row 1 on.
+    The width is 17776 // 44 = 404, measured rather than declared.
     """
-    row_size, _count, rows = _capture_records()
-    decoded = _decode_table(rows, _params_field(), row_size)
+    _row_size, count, rows = _capture_records()
+    decoded = _decode_table(rows, _params_field(), count)
 
     assert len(decoded) == 44
     assert all(r["PARAMCLASS"].strip() for r in decoded), "a row lost its PARAMCLASS"
@@ -155,7 +165,7 @@ def test_the_descriptor_width_is_what_corrupted_them() -> None:
     downstream integration rather than a test.
     """
     _row_size, _count, rows = _capture_records()
-    wrong = _decode_table(rows, _params_field())  # no override: falls back to 402
+    wrong = _decode_table(rows, _params_field())  # no count: falls back to 402
 
     assert len(wrong) == 44, "the row count is right even when the rows are not"
     assert not all(r["PARAMCLASS"].strip() for r in wrong), (
@@ -166,8 +176,8 @@ def test_the_descriptor_width_is_what_corrupted_them() -> None:
     assert wrong[1]["PARAMETER"].strip() != "ADMINDATA", "row 1 is where the drift starts"
 
 
-def test_a_narrower_declared_width_is_refused() -> None:
-    """A width from the peer becomes a slice length — same trust boundary as T-02-06.
+def test_a_row_narrower_than_the_layout_is_refused() -> None:
+    """The derived width becomes a slice length — same trust boundary as T-02-06.
 
     A row narrower than the layout cannot be decoded: every field past the cut
     reads from the next row. Refuse rather than return plausible rows built from
@@ -175,26 +185,56 @@ def test_a_narrower_declared_width_is_refused() -> None:
     """
     _row_size, _count, rows = _capture_records()
     with pytest.raises(ValueError, match="narrower than"):
-        _decode_table(rows, _params_field(), 200)
+        # 17776 / 88 = 202, which divides exactly and is still narrower than the
+        # 402-byte layout, so this reaches the trust-boundary guard rather than
+        # the divisibility one.
+        _decode_table(rows, _params_field(), 88)
 
 
-def test_a_non_positive_declared_width_is_refused() -> None:
-    _row_size, _count, rows = _capture_records()
-    with pytest.raises(ValueError):
-        _decode_table(rows, _params_field(), 0)
+def test_a_buffer_that_does_not_divide_by_the_count_is_refused() -> None:
+    """Every row is the same width, so a remainder means a number is lying.
 
-
-def test_the_packed_path_still_decodes_at_the_descriptor_width() -> None:
-    """Rounding uc_size up to the alignment would have broken this case.
-
-    RFC_READ_TABLE's interface arrives uncompressed and packed: 402 exactly, no
-    remainder. A fix that padded the descriptor to 404 would corrupt it in the
-    mirror image of the bug it set out to fix.
+    Rounding it away would decode rows that are quietly misaligned, which is the
+    failure mode this whole area keeps producing.
     """
-    packed = b"\x00" * (402 * 3)
-    decoded = _decode_table(packed, _params_field(), 402)
-    assert len(decoded) == 3
-    # And with no server width at all, the descriptor is still the right answer.
+    _row_size, _count, rows = _capture_records()
+    with pytest.raises(ValueError, match="does not divide"):
+        _decode_table(rows, _params_field(), 43)
+
+
+def test_an_empty_table_is_not_an_error() -> None:
+    assert _decode_table(b"", _params_field(), 0) == []
+    assert _decode_table(b"", _params_field(), None) == []
+
+
+def test_the_packed_path_decodes_when_0x0302_declares_the_padded_width() -> None:
+    """The production shape of the uncompressed path, and the case 485907f broke.
+
+    RFC_READ_TABLE's own interface arrives uncompressed: 17 rows of 402 bytes,
+    6834 in total — while its 0x0302 declares row_size 404, the padded DDIC
+    width, exactly as the compressed capture does. Trusting that number splits a
+    402-wide buffer by 404 and yields drifting rows.
+
+    The earlier version of this test reached the packed path through the
+    *fallback*, with no 0x0302 at all, so it never exercised this. That gap is
+    why the regression shipped: every fixture in the tree is a table where the
+    two widths coincide.
+
+    Synthetic buffer, deliberately: it pins the rule rather than a captured byte
+    sequence, and no uncompressed-GFI capture exists in this tree to pin.
+    """
+    packed = bytes(17 * 402)
+    decoded = _decode_table(packed, _params_field(), 17)
+    assert len(decoded) == 17, "17 packed rows must decode as 17"
+
+    # The mirror, so neither direction can regress again.
+    padded = bytes(44 * 404)
+    assert len(_decode_table(padded, _params_field(), 44)) == 44
+
+
+def test_the_descriptor_is_still_the_fallback_without_a_count() -> None:
+    """Hand-built descriptors and the encode path have no 0x0302 to read."""
+    packed = bytes(402 * 3)
     assert len(_decode_table(packed, _params_field())) == 3
 
 

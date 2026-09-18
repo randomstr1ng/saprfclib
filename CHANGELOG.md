@@ -58,7 +58,33 @@ FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
 
 ### Fixed
 
-- **TABLE rows are split by the width the server declares, not by the descriptor's.**
+- **TABLE rows are split by a width measured from the buffer, not declared anywhere.**
+  This supersedes the fix released moments earlier in this same section, which trusted
+  `0x0302`'s `row_size` and moved the bug rather than removing it.
+  Neither candidate width works on both serialization paths. `TypeDesc.uc_size` is the
+  sum of the field widths — right for the packed `0x0303` path, wrong for the padded
+  `0x0305` one. `0x0302`'s `row_size` reports the padded DDIC width on **both** paths —
+  right for the compressed one, wrong for the uncompressed one. Trusting it fixed
+  `BAPI_USER_GET_DETAIL` and broke `RFC_READ_TABLE`, whose interface ships 402-byte rows
+  under a declared 404.
+  The width is now `len(buffer) // row_count`. `row_count` is a tally of what the server
+  actually sent, so it cannot disagree with the serializer, and the width falls out of
+  the bytes that arrived. A remainder is refused rather than rounded away, a row
+  narrower than the layout is refused (T-02-06: the value is peer-derived and becomes a
+  slice length), and an absent count falls back to the descriptor so hand-built
+  descriptors and the encode path are unaffected.
+  The regression shipped because every table fixture in the tree is one where the two
+  widths coincide, and the test for the packed path reached it through the no-count
+  fallback rather than the production shape. Both directions are now pinned.
+
+- **No per-function-module constants in the table reader.** `_GFI_ROW_BYTES = 402` and
+  `_DFIES_ROW_BYTES = 138` were the row widths of two specific modules' result tables,
+  used as a slicing floor for any table. The stride now comes from the row count the
+  server declared, and uncompressed records keep their own boundaries — no width
+  arithmetic at all. A constant that is right for the module it was measured against is
+  wrong for the next one, and wrong silently.
+
+- ~~**TABLE rows are split by the width the server declares, not by the descriptor's.**~~
   The same DDIC row type arrives at two widths: the uncompressed `0x0303` path packs
   rows to the sum of their field widths, the compressed `0x0305` path pads each row to a
   4-byte boundary. `RFC_FUNINT` is 402 packed and 404 padded, so no constant derived
