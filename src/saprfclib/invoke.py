@@ -401,6 +401,15 @@ def build_invoke_request(
                     f"complete."
                 )
             all_row_bytes = encode(_RFCTYPE_TABLE, rows, field)
+            # [ASSUMED] The outbound width is the sum of the field widths, packed.
+            # Self-consistent -- the same number sets the stride and is written into
+            # 0x0302, so what we declare is what we send -- and no server has been
+            # observed rejecting it. It is nonetheless the padded-vs-packed question
+            # from the other side: a server that expected 4-byte-aligned rows would
+            # read these as misaligned, the mirror of the decode bug fixed by taking
+            # the width from 0x0302 rather than from here. Untested. Sending a table
+            # whose row type carries INT4 members to a live system, and reading back
+            # what it stored, would settle it.
             row_size = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
             row_count = len(rows)
             parts.append(tlv_record(_TAG_TABLE_NAME, field.name.encode("utf-16-le")))
@@ -511,8 +520,25 @@ def build_trfc_request(
     Security: validates TID length and alphabet, queue name length before encoding
     (T-06-C02 / RESEARCH V5).
 
-    OG-06-01 CONFIRMED (2026-08-05): named-param encoding confirmed via live qRFC gate.
-    TID as ARFCTID param works; no raw ARFCSSTATE field decomposition needed.
+    OG-06-01 NOT CONFIRMED. This block claimed the named-param encoding was
+    confirmed by a live qRFC gate on 2026-08-05. It was not: that gate discarded
+    the server's reply, so a refusal was indistinguishable from success. With the
+    reply read, the same call answers
+
+        Field TID did not have a value when ARFC_DEST_SHIP was called
+
+    and the dictionary says why. ARFC_DEST_SHIP takes sender_id,
+    supportability_info and unit_id -- all OPTIONAL -- plus two TABLES, data
+    (ARFCRDATA) and state (ARFCRSTATE). There is no ARFCTID parameter, no
+    ARFCFNAM and no ARFCQUEUE; the TID lives in the state table's rows, split
+    across ARFCIPID, ARFCPID, ARFCTIME and ARFCTIDCNT.
+
+    So this frame cannot work, and the parameters below are named after fields of
+    a structure rather than after anything the module declares. Kept sending
+    rather than raising, because the server's refusal names the missing field
+    precisely and that is more useful than a local error -- but it is a refusal
+    every time. Tracked as its own issue; the shape of the fix is the same as the
+    bgRFC submit's, and needs the same evidence.
 
     Args:
         tid:       24-char TID from the RFC TID alphabet.
@@ -1170,13 +1196,19 @@ def parse_invoke_response(
 
     result: dict[str, object] = {}
     basxml: dict[str, bytes] = {}
+    # Row counts the server declared per table (0x0302). The width is derived
+    # from these and the buffer, because neither the descriptor nor 0x0302's own
+    # row_size is right on both serialization paths — see codec._decode_table.
+    row_counts: dict[str, int] = {}
     # Walk the ordered tag list to pick up 0x0201+0x0203 pairs
-    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml):
+    for name, value in _extract_name_value_pairs(resp, dm_table_names, basxml, row_counts):
         name_upper = name.upper()
         match_field: FieldDesc | None = param_map.get(name_upper)
         if match_field is None:
             continue  # unknown param name — ignore (defensive)
-        result[match_field.name] = decode(match_field.rfctype, value, match_field)
+        result[match_field.name] = decode(
+            match_field.rfctype, value, match_field, row_counts.get(name)
+        )
 
     # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
     # bypass the codec entirely (see decode_basxml_table).
@@ -1474,6 +1506,7 @@ def _extract_name_value_pairs(
     data: bytes,
     dm_table_names: dict[int, str] | None = None,
     basxml_out: dict[str, bytes] | None = None,
+    row_counts_out: dict[str, int] | None = None,
 ) -> list[tuple[str, bytes]]:
     """Walk TLV stream and return ordered (name_str, value_bytes) pairs.
 
@@ -1483,7 +1516,8 @@ def _extract_name_value_pairs(
 
     TABLE (CONFIRMED from the parameter serializer):
       0x0301(name)  ← combined name+begin; value is param name UTF-16LE
-      0x0302(info)  ← 8B [BE row_size][BE row_count] (informational; ignored here)
+      0x0302(info)  ← 8B [BE row_size][BE row_count]; the COUNT is reported via
+                      row_counts_out, and the width is measured from the buffer
       {0x0303|0x0304|0x0305}* rows  ← uncompressed or SAPCOMPRESS compressed
       0x0306(end)   ← yields (name, concatenated_row_bytes) pair
 
@@ -1605,7 +1639,16 @@ def _extract_name_value_pairs(
 
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
-            pass  # row_size / row_count already available from row data length
+            # The row COUNT is what is worth carrying out of here, not the row
+            # size beside it. The size reports the padded DDIC width on both
+            # serialization paths, so it is wrong whenever the server packed the
+            # rows instead; the count is a tally of what was actually sent and
+            # cannot disagree with the serializer. The width is then measured
+            # from the buffer -- see codec._decode_table.
+            if row_counts_out is not None and current_name is not None and len(value) >= 8:
+                _declared_size, declared_count = struct.unpack_from(">II", value, 0)
+                if declared_count > 0:
+                    row_counts_out[current_name] = declared_count
         elif tag in (_TAG_TABLE_CONTENT, _TAG_TABLE_CONTENT_ALT) and in_table:  # 0x0303/0x0304
             # CONFIRMED: both tags carry raw uncompressed row bytes (the deserializer path)
             table_rows.extend(value)

@@ -168,6 +168,9 @@ _COL_INTLENGTH = "INTLENGTH"  # unicode byte length (confirmed from live capture
 _COL_OFFSET = "OFFSET"  # unicode byte offset (confirmed from live capture)
 _COL_DECIMALS = "DECIMALS"  # BCD decimal places
 _COL_TABNAME = "TABNAME"  # structure/table type name
+_COL_DEFAULT = "DEFAULT"  # default value, as text
+_COL_PARAMTEXT = "PARAMTEXT"  # human-readable parameter description
+_COL_OPTIONAL = "OPTIONAL"  # 'X' when the parameter may be omitted
 
 # PARAMCLASS single-char code → RFC_DIRECTION integer (caller perspective, confirmed
 # from captures/phase03_metadata_STFC_CONNECTION.json: REQUTEXT='I', ECHOTEXT='E').
@@ -248,6 +251,21 @@ def _coerce_int(row: dict[str, Any], column: str) -> int:
         ) from exc
 
 
+def _text_or_none(row: dict[str, Any], column: str) -> str | None:
+    """Return a stripped string column, or None when it is absent or blank.
+
+    Blank and absent are reported the same way on purpose: the wire pads these
+    columns with spaces, so "" means the server sent nothing, not that the value
+    is an empty string. A caller prefilling a form wants to tell "no default"
+    from "default is empty", and only None says the first.
+    """
+    value = row.get(column)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
 def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
     """Map one RFC_GET_FUNCTION_INTERFACE PARAMS row to a FieldDesc (META-01).
 
@@ -313,6 +331,9 @@ def _parse_params_row(row: dict[str, Any]) -> FieldDesc:
         uc_offset=offset,
         decimals=decimals,
         direction=direction,
+        optional=str(row.get(_COL_OPTIONAL, "")).strip().upper() == "X",
+        default_value=_text_or_none(row, _COL_DEFAULT),
+        param_text=_text_or_none(row, _COL_PARAMTEXT),
     )
 
 

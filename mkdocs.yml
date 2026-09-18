@@ -56,6 +56,7 @@ nav:
     - Quick Start: getting-started/quick-start.md
     - Connection Options: getting-started/connection-options.md
     - Error Handling: getting-started/error-handling.md
+    - Migrating from pyrfc: getting-started/migrating-from-pyrfc.md
   - Cookbook:
     - Overview: cookbook/index.md
     - TABLE Parameters: cookbook/table-parameters.md

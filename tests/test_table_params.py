@@ -774,11 +774,15 @@ def test_compressed_params_rows_all_parse_into_field_descs() -> None:
     assert {d.name for d in descs} >= {"ADDRESS", "ADMINDATA", "ALIAS", "COMPANY"}
 
 
-def test_compressed_rows_are_sliced_by_the_declared_stride() -> None:
-    """0x0302 declares 404 for a 402-byte layout; the stride comes from the wire."""
-    from saprfclib.connection import _GFI_ROW_BYTES, _table_row_buffers
+def test_compressed_rows_are_sliced_by_the_measured_stride() -> None:
+    """17776 bytes over the 44 rows 0x0302 counts gives 404, not the documented 402.
 
-    buffers = _table_row_buffers(_gfi_fixture(), _GFI_ROW_BYTES, "PARAMS")
+    The stride is measured from the blob rather than taken from 0x0302's row_size,
+    which happens to agree here and does not on the uncompressed path.
+    """
+    from saprfclib.connection import _table_row_buffers
+
+    buffers = _table_row_buffers(_gfi_fixture(), "PARAMS")
     assert len(buffers) == 44
     assert len(buffers[0]) == 404  # not the documented 402
     assert sum(len(b) for b in buffers) == 404 * 44
@@ -806,7 +810,7 @@ def test_per_row_records_are_not_resliced() -> None:
     A structure-definition response declared row_size 140 with 138-byte records;
     re-slicing by the stride would misalign everything after the first row.
     """
-    from saprfclib.connection import _GFI_ROW_BYTES, _table_row_buffers
+    from saprfclib.connection import _table_row_buffers
     from saprfclib.invoke import tlv_record
 
     row = b"\x00" * 402
@@ -818,7 +822,7 @@ def test_per_row_records_are_not_resliced() -> None:
         + tlv_record(0x0303, row)
         + struct.pack(">HH", 0xFFFF, 0)
     )
-    buffers = _table_row_buffers(stream, _GFI_ROW_BYTES, "PARAMS")
+    buffers = _table_row_buffers(stream, "PARAMS")
     assert [len(b) for b in buffers] == [402, 402, 402]
 
 

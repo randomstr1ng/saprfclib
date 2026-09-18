@@ -1,0 +1,57 @@
+{
+  "message_type": "RFC_GET_FUNCTION_INTERFACE_RESPONSE",
+  "capture_source": "live capture 2026-09-18; SAP A4H kernel 793, sysnr 00, client 001; GFI for RFC_READ_TABLE",
+  "evidence": "The uncompressed counterpart of gfi_compressed_params_response.bin. Proves 0x0302's row_size is not the serialized width.",
+  "ni_header_length": 0,
+  "notes": [
+    "0x0302 declares row_size=404, row_count=17 - the padded DDIC layout width.",
+    "The 17 0x0303 records are 402 bytes each; 17 x 402 = 6834. The declared 404 is NOT what was sent.",
+    "This is the case that discriminates between the two candidate row-width rules: splitting this buffer by the declared 404 misaligns every row after the first, while len(buffer) // row_count gives 402 and decodes cleanly.",
+    "Committed because every other table fixture in this tree is one where the declared and actual widths coincide, so the corpus could not tell a correct implementation from an incorrect one.",
+    "Sanitised: the 16-byte 0x0514 session token is replaced with 00112233445566778899aabbccddeeff, same length. No credentials or hostnames appear in a GFI response.",
+    "A second 0x0302 with row_size=62 row_count=0 belongs to the empty EXCEPTION_LIST table."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "table_name": "PARAMS",
+    "declared_row_size": 404,
+    "declared_row_count": 17,
+    "actual_record_width": 402,
+    "uncompressed_records": 17,
+    "total_row_bytes": 6834,
+    "parameters_parsed": 17,
+    "first_parameters": [
+      "ET_DATA",
+      "DELIMITER",
+      "GET_SORTED",
+      "NO_DATA",
+      "QUERY_TABLE"
+    ]
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 80,
+      "name": "gw_header",
+      "value": "",
+      "type": "fixed",
+      "note": "80-byte GW header; the TLV stream follows"
+    },
+    {
+      "offset": 0,
+      "length": 0,
+      "name": "tag_0x0302",
+      "value": "row_size=404 row_count=17",
+      "type": "derived",
+      "note": "declared width 404 vs actual record width 402"
+    },
+    {
+      "offset": 0,
+      "length": 0,
+      "name": "tag_0x0303",
+      "value": "17 records x 402 bytes",
+      "type": "derived",
+      "note": "one row per record; boundaries are authoritative"
+    }
+  ]
+}

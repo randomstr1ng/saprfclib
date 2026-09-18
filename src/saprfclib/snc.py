@@ -52,6 +52,7 @@ __all__ = [
     "parse_snc_frame",
     "SncFrameType",
     "SncQop",
+    "validate_snc_qop",
     "GssBinding",
     "SncTransport",
     "connect_snc",
@@ -170,11 +171,67 @@ class SncFrameType(IntEnum):
 
 
 class SncQop(IntEnum):
-    """SNC quality-of-protection level (D-08)."""
+    """SNC quality-of-protection level (D-08).
+
+    1-3 select a protection level directly. 8 and 9 are the two indirect values
+    SAP defines: 9 asks for the maximum the connection supports, 8 for whatever
+    the system's own default protection is.
+
+    ``DEFAULT`` is [ASSUMED] to mean privacy here. The real answer lives in the
+    server's ``snc/data_protection/use`` profile parameter, which this library
+    never reads, so 8 is treated as 3. That errs toward more protection rather
+    than less, which is the only direction it is safe to guess in -- but it is a
+    guess. Reading that parameter over RFC (it is exposed through
+    ``RFC_READ_PROFILE_PARAMETER``) would settle it.
+    """
 
     AUTH_ONLY = 1
     INTEGRITY = 2
     PRIVACY = 3
+    DEFAULT = 8  # [ASSUMED] treated as PRIVACY -- see the class docstring
+    MAXIMUM = 9
+
+
+#: Which frame protection each accepted QOP selects.
+#:
+#: Explicit rather than a ``>=`` comparison. The dispatch used to read
+#: ``qop >= PRIVACY`` / ``== INTEGRITY`` / else PLAIN, which meant any value the
+#: library did not recognise fell through to the ``else``: a negative number sent
+#: payloads unprotected, silently, on a connection the caller had asked to
+#: protect. A table cannot fall through.
+_QOP_PROTECTION: dict[int, SncFrameType] = {
+    SncQop.AUTH_ONLY: SncFrameType.PLAIN,
+    SncQop.INTEGRITY: SncFrameType.INTEGRITY,
+    SncQop.PRIVACY: SncFrameType.PRIVACY,
+    SncQop.DEFAULT: SncFrameType.PRIVACY,
+    SncQop.MAXIMUM: SncFrameType.PRIVACY,
+}
+
+
+def validate_snc_qop(value: int) -> int:
+    """Return ``value`` if it is a QOP level this library implements, else raise.
+
+    A setting that decides whether payloads are encrypted must not accept a value
+    it does not recognise. Every plausible typo used to land on privacy, which is
+    the safe side and is why this went unnoticed -- but a negative number landed
+    on PLAIN, and nothing said so.
+
+    Raises:
+        ValueError: if ``value`` is not one of 1, 2, 3, 8 or 9.
+    """
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"snc_qop must be an integer, got {value!r}") from None
+    if level not in _QOP_PROTECTION:
+        accepted = ", ".join(str(int(q)) for q in sorted(_QOP_PROTECTION))
+        raise ValueError(
+            f"snc_qop={level} is not a protection level this library implements "
+            f"(accepted: {accepted}). 1=authentication only, 2=integrity, "
+            f"3=privacy, 8=system default, 9=maximum. Refusing rather than "
+            f"guessing: the value decides whether payloads are encrypted."
+        )
+    return level
 
 
 def build_snc_frame(
@@ -429,7 +486,7 @@ class GssBinding:
         self._myname = (
             _strip_snc_prefix(_strip_quotes(snc_myname)) if snc_myname is not None else None
         )
-        self._qop = snc_qop
+        self._qop = validate_snc_qop(snc_qop)
 
         # Load the lib (D-06). Kept in a local first so a failing load never
         # leaves a half-initialised binding.
@@ -765,7 +822,7 @@ class SncTransport:
                 "SNC SSO2 extension headers are not reverse-engineered (D-23)"
             )
         self._inner = inner
-        self._qop = snc_qop
+        self._qop = validate_snc_qop(snc_qop)
         self._established = False  # SEC-06 gate; set by _handshake()
         # D-24 (live pyrfc capture): ctx_id=3 in all SNC frames.
         self._ctx_id = _SNC_CTX_ID
@@ -943,18 +1000,23 @@ class SncTransport:
         if not self._established:
             self._inner.send_message(payload)
             return
-        if self._qop >= int(SncQop.PRIVACY):
-            # QOP 3: gss_wrap → PRIVACY (type 9). Encrypted token goes in the
-            # gss_token field (token_len), not app_data — confirmed from proxy
-            # capture (PRIVACY frame has token_len=320, data_len=0). SEC-04.
+        # Table lookup, not a comparison chain: an unrecognised value must not be
+        # able to reach the unprotected branch. validate_snc_qop() has already
+        # rejected anything outside the table, so a KeyError here means a caller
+        # reached past the constructor.
+        protection = _QOP_PROTECTION[self._qop]
+        if protection is SncFrameType.PRIVACY:
+            # gss_wrap → PRIVACY (type 9). Encrypted token goes in the gss_token
+            # field (token_len), not app_data — confirmed from proxy capture
+            # (PRIVACY frame has token_len=320, data_len=0). SEC-04.
             wrapped = self._gss.wrap(payload)
             self._send_snc_frame(SncFrameType.PRIVACY, gss_token=wrapped)
-        elif self._qop == int(SncQop.INTEGRITY):
-            # QOP 2: gss_get_mic → INTEGRITY (type 8), payload followed by MIC.
+        elif protection is SncFrameType.INTEGRITY:
+            # gss_get_mic → INTEGRITY (type 8), payload followed by MIC.
             mic = self._gss.get_mic(payload)
             self._send_snc_frame(SncFrameType.INTEGRITY, gss_token=mic, app_data=payload)
         else:
-            # QOP 1: PLAIN (type 7), no data protection.
+            # QOP 1 only: PLAIN (type 7), no data protection.
             self._send_snc_frame(SncFrameType.PLAIN, app_data=payload)
 
     def recv_message(self) -> bytes:

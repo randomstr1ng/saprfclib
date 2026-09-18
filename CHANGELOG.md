@@ -7,6 +7,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-18
+
+The release that came out of putting the library in front of a real integration.
+Every fix below was found by someone trying to use it, not by reading it — six API
+gaps a downstream connector had to work around, and three wire bugs that were
+returning wrong data or claiming success while doing nothing.
+
+The through-line is the same as 0.1.4's: failures that do not announce themselves.
+A TABLE decoded at the wrong stride returns the right *number* of rows with the
+wrong contents. A `snc_qop` the dispatch does not recognise falls through to
+unprotected. A submit whose reply is discarded reports success whatever the server
+said. None of these raise, and none of them were caught by a green test suite.
+
+Two of them are recorded rather than fixed: the tRFC and bgRFC submits do not work,
+they never did, and they now say so loudly instead of quietly.
+
+### Added
+
+Six gaps a downstream integration hit and had to work around. Source: porting the
+FortiSOAR "SAP NetWeaver" connector off `pyrfc`.
+
+- **`FieldDesc` keeps the interface metadata it was already decoding.** `optional`,
+  `default_value` and `param_text` now reach the descriptor. The wire parser read all
+  twelve `RFC_GET_FUNCTION_INTERFACE` `PARAMS` columns and threw three away because the
+  codec has no use for them — but an integration rendering a form over a function's
+  interface needs exactly those three, so it had to call
+  `RFC_GET_FUNCTION_INTERFACE` itself and parse the rows again. A second round-trip for
+  data this library had already had in hand. Blank and absent both decode to `None`, so
+  "no default" stays distinguishable from "the default is empty".
+
+- **`connect(port=...)` and `connect_async(port=...)`.** `3300 + sysnr` is right for a
+  gateway reachable at its own address and does not survive NAT, a port-forward or a
+  jump host. There the caller knows the port and the library cannot derive it. Unset,
+  nothing changes — the SNC branch still defaults to 4800.
+
+- **`Connection` is a context manager.** `AsyncConnection` has had
+  `__aenter__`/`__aexit__` since it was written; the sync one had nothing, so every
+  caller wrote the same `try/finally` and whoever forgot leaked a connection and the
+  gateway conversation with it.
+
+- **`saprfclib.compat`** — `pyrfc` exception spellings for porting, never re-exported
+  from the package root. A missed rename is silent rather than an `ImportError`: with
+  `pyrfc` still installed alongside, which it is mid-migration, the old name resolves
+  against it and the `except` clause quietly stops matching. `ExternalRuntimeError` and
+  `LogonError` are documented as widened rather than exact — the first names a category
+  that cannot exist without an SDK, the second has no dedicated exception here. A
+  `LogonFailure` is deliberately *not* defined: an exception nothing raises is worse
+  than none, because every `except` written against it is dead code that reads as live.
+
+- **`saprfclib.jsonable()`** — one pass turning a decoded result into
+  JSON-serialisable values: dates and times to ISO-8601, `Decimal` to `str`, `bytes` to
+  hex, recursing through tables and structures. `Decimal` becomes a string, never a
+  float, for the same reason the codec refuses float in the first place. Offered as a
+  separate call rather than a `call(..., json_safe=True)` flag, which would put a
+  presentation concern in the protocol path.
+
+- **A `pyrfc` migration guide** in the docs, including the two traps that survive a
+  port: `conn.ping` is a method in both libraries, so `if conn.ping:` is a health check
+  that always passes; and `strict_params=False` drops an undeclared keyword with a
+  warning rather than raising.
+
+- **`get_function_desc()` is exported from the package root.** `FunctionDesc` and
+  `FieldDesc` were public while the function producing them was not, so the documented
+  way to fetch an interface reached into a submodule for its entry point.
+
+### Fixed
+
+- **TABLE rows are split by a width measured from the buffer, not declared anywhere.**
+  This supersedes the fix released moments earlier in this same section, which trusted
+  `0x0302`'s `row_size` and moved the bug rather than removing it.
+  Neither candidate width works on both serialization paths. `TypeDesc.uc_size` is the
+  sum of the field widths — right for the packed `0x0303` path, wrong for the padded
+  `0x0305` one. `0x0302`'s `row_size` reports the padded DDIC width on **both** paths —
+  right for the compressed one, wrong for the uncompressed one. Trusting it fixed
+  `BAPI_USER_GET_DETAIL` and broke `RFC_READ_TABLE`, whose interface ships 402-byte rows
+  under a declared 404.
+  The width is now `len(buffer) // row_count`. `row_count` is a tally of what the server
+  actually sent, so it cannot disagree with the serializer, and the width falls out of
+  the bytes that arrived. A remainder is refused rather than rounded away, a row
+  narrower than the layout is refused (T-02-06: the value is peer-derived and becomes a
+  slice length), and an absent count falls back to the descriptor so hand-built
+  descriptors and the encode path are unaffected.
+  The regression shipped because every table fixture in the tree is one where the two
+  widths coincide, and the test for the packed path reached it through the no-count
+  fallback rather than the production shape. Both directions are now pinned.
+
+- **tRFC/qRFC submit is known not to work (#36), and now says so.** Reading the reply
+  surfaced it: `ARFC_DEST_SHIP` answers *"Field TID did not have a value"*, because
+  `build_trfc_request` sends `ARFCTID`, `ARFCFNAM` and `ARFCQUEUE` as named parameters
+  and the module declares none of them — the TID travels in its `state` TABLE, split
+  across four `ARFCRSTATE` columns. The builder's claim that a live qRFC gate had
+  confirmed the encoding was the same false confirmation the discarded reply produced
+  for bgRFC. The docstring now records what the dictionary says; the frame still goes
+  out, because the server's refusal names the missing field better than a local error
+  would.
+
+- **No per-function-module constants in the table reader.** `_GFI_ROW_BYTES = 402` and
+  `_DFIES_ROW_BYTES = 138` were the row widths of two specific modules' result tables,
+  used as a slicing floor for any table. The stride now comes from the row count the
+  server declared, and uncompressed records keep their own boundaries — no width
+  arithmetic at all. A constant that is right for the module it was measured against is
+  wrong for the next one, and wrong silently.
+
+- ~~**TABLE rows are split by the width the server declares, not by the descriptor's.**~~
+  The same DDIC row type arrives at two widths: the uncompressed `0x0303` path packs
+  rows to the sum of their field widths, the compressed `0x0305` path pads each row to a
+  4-byte boundary. `RFC_FUNINT` is 402 packed and 404 padded, so no constant derived
+  from the field list is right for both — and `_decode_table` took it from
+  `TypeDesc.uc_size`, which is that sum.
+  Splitting a padded 17776-byte buffer by 402 does not raise. It returns the right
+  *number* of rows, each drifting one character further left than the last, so
+  `RFC_GET_FUNCTION_INTERFACE` for `BAPI_USER_GET_DETAIL` returned 44 rows of which 40
+  were corrupt: `PARAMCLASS` merged into `PARAMETER`, then NULs, then names eaten down
+  to `TADDS`, `TADD`, `TAD`, `TA`. `PARAMCLASS` and `EXID` read empty; `DEFAULT` filled
+  with binary.
+  The server states the real width in the `0x0302` record, which the parser discarded as
+  "already available from row data length" — true only when the buffer happens to divide
+  exactly. It is now read and preferred, with the descriptor as the fallback so
+  hand-built descriptors and the encode path are unaffected. A declared width narrower
+  than the layout is refused rather than decoded, since it arrives from the peer and
+  becomes a slice length (same trust boundary as T-02-06).
+  Rounding `uc_size` up to the alignment would not have fixed this: it corrects the
+  padded case and breaks the packed one.
+
+- **`snc_qop` is validated, and the dispatch can no longer fall through to
+  unprotected.** `connect()` took the value, defaulted it with `or 3` and never looked
+  at it again; the transport then decided by comparison — `>= 3` privacy, `== 2`
+  integrity, *else* plain. Values SAP does not define (4–7) landed on privacy, which is
+  the safe side and is why this went unnoticed. A negative number did not: it fell past
+  both comparisons to the `else` and sent payloads **PLAIN, unprotected, with no error**,
+  on a connection the caller had explicitly asked to protect.
+  `SncQop` now carries SAP's two indirect levels — `MAXIMUM` (9) and `DEFAULT` (8) —
+  the dispatch is a table rather than a comparison chain, so an unrecognised value has
+  no branch to land on, and `validate_snc_qop()` refuses anything outside {1,2,3,8,9} at
+  both `connect()` and the transport constructor.
+  `DEFAULT` is labelled `[ASSUMED]`: the system's default protection lives in the
+  server's `snc/data_protection/use` profile parameter, which this library does not
+  read, so 8 is treated as privacy. That errs toward more protection, the only direction
+  it is safe to guess in — but it is a guess, and reading that parameter over RFC would
+  settle it.
+
+- `RfcTrace` appeared twice in `saprfclib.__all__`.
+
 ## [0.1.4] - 2026-09-07
 
 A release about silence. Every defect below failed without raising: a reply thrown
@@ -1267,7 +1410,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.1...v0.1.2

@@ -546,15 +546,72 @@ def _decode_structure(
 def _decode_table(
     data: bytes | bytearray | memoryview,
     field: FieldDesc,
+    row_count: int | None = None,
 ) -> list[dict[str, Any]]:
     """Decode a TABLE into a list of row dicts via zero-copy memoryview slices.
 
-    Row count is ``len(data) // row_size`` — bounded by the actual buffer, never
-    by an attacker-controlled count (threat T-02-06). Each row is decoded as a
-    STRUCTURE over its memoryview slice (Pattern 3, D-11 zero-copy).
+    The row width is ``len(data) // row_count`` — measured from what the server
+    actually sent, divided by how many rows it said it sent. Each row is decoded
+    as a STRUCTURE over its memoryview slice (Pattern 3, D-11 zero-copy).
+
+    Neither obvious source for the width is usable, because the same DDIC row
+    type reaches the client at two widths:
+
+    * ``TypeDesc.uc_size`` is the sum of the field widths. The uncompressed
+      0x0303 path packs rows to exactly that; the compressed 0x0305 path pads
+      each row to a 4-byte boundary. RFC_FUNINT is 402 packed and 404 padded.
+    * ``0x0302``'s ``row_size`` reports the padded width on **both** paths. It
+      carries the DDIC layout width and does not track how the rows were
+      actually serialized.
+
+    So each is right on one path and wrong on the other, and picking either moves
+    the bug rather than fixing it: splitting a 404-wide buffer by 402, or a
+    402-wide buffer by 404, does not raise. It yields the right *number* of
+    row-shaped slices, each drifting further out of alignment than the last,
+    until names are eaten from the end.
+
+    ``row_count`` is different in kind. It counts things the server actually
+    sent, so it cannot disagree with the serializer, and the width falls out of
+    the buffer it produced.
+
+    Rounding ``uc_size`` up to the structure alignment is not the fix either: it
+    corrects the padded case and breaks the packed one, the same inversion
+    reached by another route.
+
+    Falls back to the descriptor width when no count is available, which keeps
+    hand-built descriptors and the encode path working.
     """
     type_desc = _require_type_desc(field, "decode")
-    row_size = _row_size(type_desc, field.unicode_mode)
+    declared = _row_size(type_desc, field.unicode_mode)
+    length = len(_as_bytes(data)) if not isinstance(data, memoryview) else len(data)
+
+    if row_count is None or row_count <= 0:
+        # No count to divide by: an absent 0x0302, a synthetic descriptor, or an
+        # empty table. An empty buffer with no rows is not an error.
+        if length == 0:
+            return []
+        row_size = declared
+    else:
+        if length % row_count:
+            # Every row is the same width, so a remainder means one of the two
+            # numbers is not what it claims. Refusing beats rounding it away and
+            # decoding rows that are quietly misaligned.
+            raise ValueError(
+                f"TABLE {field.name!r}: {length} bytes does not divide into the "
+                f"{row_count} rows the server declared (remainder "
+                f"{length % row_count}); refusing to guess the row width"
+            )
+        row_size = length // row_count
+        if row_size < declared:
+            # The width is derived from peer-supplied numbers and becomes a slice
+            # length, so it sits on the same trust boundary as T-02-06. A row
+            # narrower than the layout cannot be decoded -- every field past the
+            # cut would read from the next row.
+            raise ValueError(
+                f"TABLE {field.name!r}: {length} bytes over {row_count} rows gives "
+                f"a {row_size}-byte row, narrower than the {declared}-byte layout "
+                "its descriptor requires; refusing to decode misaligned bytes"
+            )
     if row_size <= 0:
         raise ValueError(f"TABLE row size must be positive, got {row_size}")
     mv = memoryview(_as_bytes(data))
@@ -645,7 +702,12 @@ def _encode_table(value: list[dict[str, Any]], field: FieldDesc) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
-def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc) -> Any:
+def decode(
+    rfctype: int,
+    data: bytes | bytearray | memoryview,
+    field: FieldDesc,
+    row_count: int | None = None,
+) -> Any:
     """Decode wire bytes into a Python value for the given RFCTYPE.
 
     Args:
@@ -708,7 +770,7 @@ def decode(rfctype: int, data: bytes | bytearray | memoryview, field: FieldDesc)
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
             return _decode_structure(buf, _require_type_desc(field, "decode"), field.unicode_mode)
         case rfctype if rfctype == RFCTYPE_TABLE:
-            return _decode_table(buf, field)
+            return _decode_table(buf, field, row_count)
         case _:
             raise ValueError(f"unknown RFCTYPE {rfctype}")
 

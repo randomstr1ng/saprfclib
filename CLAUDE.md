@@ -70,6 +70,29 @@ label says what would settle it, and the PR or commit message says so plainly. A
 unlabelled guess is the one thing that must not get through, because it is
 indistinguishable from a confirmed fact six months later.
 
+### Never hardcode anything per function module
+
+A function module's name, its parameter names, its row widths, its field offsets — none
+of these may be baked into the library. The protocol is generic; every one of these
+facts is either declared on the wire or derivable from what the server sent, and the
+implementation must get it from there.
+
+This is not a style preference. A constant that happens to be right for the function
+module it was measured against is wrong for the next one, and wrong silently: the values
+are plausible, so the result is corrupt data rather than an error. Two examples this
+repository has already produced:
+
+- `_GFI_ROW_BYTES = 402` and `_DFIES_ROW_BYTES = 138` — the row widths of two specific
+  modules' result tables, used as a floor for slicing any table. Removed: the width now
+  comes from the buffer and the row count the server declared.
+- A TABLE's row width taken from `TypeDesc.uc_size`, then from `0x0302`'s `row_size`.
+  Each is right for one serialization path and wrong for the other, and picking either
+  returns the right *number* of rows with the wrong contents.
+
+If a value cannot be derived generically, that is a gap to document, not a constant to
+add. The test for whether an implementation is generic is simple: would it still be
+correct for a function module nobody has run yet?
+
 ### What "document the gap" means
 
 Leave the code path raising a clear error naming what is unknown, add the open question
