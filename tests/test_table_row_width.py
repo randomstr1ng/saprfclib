@@ -125,6 +125,56 @@ def _capture_records() -> tuple[int, int, bytes]:
     return row_size, row_count, decompress_table_stream(chunks, "PARAMS")
 
 
+UNCOMPRESSED = GOLDEN / "gfi_uncompressed_params_response.bin"
+
+
+def _uncompressed_capture() -> tuple[int, int, list[int], int]:
+    """Return (declared row_size, row_count, record widths, total bytes)."""
+    raw = _strip_gw_header(UNCOMPRESSED.read_bytes())
+    pos, n = 0, len(raw)
+    row_size = row_count = 0
+    widths: list[int] = []
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", raw, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            length = struct.unpack_from(">I", raw, pos)[0]
+            pos += 4
+        value = raw[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", raw, pos)[0] == tag:
+            pos += 2
+        if tag == 0x0302 and not row_count:
+            row_size, row_count = struct.unpack_from(">II", value, 0)
+        elif tag == 0x0303:
+            widths.append(length)
+    return row_size, row_count, widths, sum(widths)
+
+
+def _uncompressed_rows() -> bytes:
+    """The concatenated row buffer, as parse_invoke_response assembles it."""
+    raw = _strip_gw_header(UNCOMPRESSED.read_bytes())
+    pos, n = 0, len(raw)
+    out = bytearray()
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", raw, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            length = struct.unpack_from(">I", raw, pos)[0]
+            pos += 4
+        value = raw[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", raw, pos)[0] == tag:
+            pos += 2
+        if tag == 0x0303:
+            out.extend(value)
+    return bytes(out)
+
+
 def test_the_server_declares_a_width_the_descriptor_cannot_derive() -> None:
     """0x0302 says 404; the sum of the field widths says 402. Both are real."""
     row_size, row_count, rows = _capture_records()
@@ -207,29 +257,56 @@ def test_an_empty_table_is_not_an_error() -> None:
     assert _decode_table(b"", _params_field(), None) == []
 
 
-def test_the_packed_path_decodes_when_0x0302_declares_the_padded_width() -> None:
-    """The production shape of the uncompressed path, and the case 485907f broke.
+def test_the_uncompressed_capture_declares_a_width_it_does_not_send() -> None:
+    """The load-bearing fact, read off a real response rather than reasoned about.
 
-    RFC_READ_TABLE's own interface arrives uncompressed: 17 rows of 402 bytes,
-    6834 in total — while its 0x0302 declares row_size 404, the padded DDIC
-    width, exactly as the compressed capture does. Trusting that number splits a
-    402-wide buffer by 404 and yields drifting rows.
-
-    The earlier version of this test reached the packed path through the
-    *fallback*, with no 0x0302 at all, so it never exercised this. That gap is
-    why the regression shipped: every fixture in the tree is a table where the
-    two widths coincide.
-
-    Synthetic buffer, deliberately: it pins the rule rather than a captured byte
-    sequence, and no uncompressed-GFI capture exists in this tree to pin.
+    RFC_READ_TABLE's own interface arrives uncompressed. Its 0x0302 declares
+    row_size 404 — the padded DDIC width, the same number the compressed capture
+    declares — while the 17 0x0303 records it actually sends are 402 bytes each.
+    The declared width is not the serialized width.
     """
-    packed = bytes(17 * 402)
-    decoded = _decode_table(packed, _params_field(), 17)
-    assert len(decoded) == 17, "17 packed rows must decode as 17"
+    row_size, row_count, widths, buffer_len = _uncompressed_capture()
+    assert (row_size, row_count) == (404, 17)
+    assert set(widths) == {402}, "every record is the packed width"
+    assert buffer_len == 6834 == 17 * 402
+    assert buffer_len % row_size != 0, "the declared width does not even divide it"
 
-    # The mirror, so neither direction can regress again.
-    padded = bytes(44 * 404)
-    assert len(_decode_table(padded, _params_field(), 44)) == 44
+
+def test_the_uncompressed_capture_decodes_cleanly_from_its_count() -> None:
+    """6834 // 17 = 402, and the rows come out intact. The case 485907f broke.
+
+    Trusting 0x0302's 404 here splits a 402-wide buffer by 404 and drifts every
+    row after the first, which is how 'DELIMITER' became
+    'ELIMITER                     S'.
+    """
+    _row_size, row_count, _widths, _len = _uncompressed_capture()
+    rows = _uncompressed_rows()
+    decoded = _decode_table(rows, _params_field(), row_count)
+
+    assert len(decoded) == 17
+    assert all(r["PARAMCLASS"].strip() for r in decoded)
+    names = [r["PARAMETER"].strip() for r in decoded]
+    assert names[:5] == ["ET_DATA", "DELIMITER", "GET_SORTED", "NO_DATA", "QUERY_TABLE"]
+
+
+def test_trusting_the_declared_width_corrupts_the_uncompressed_capture() -> None:
+    """Pin the regression itself, so neither direction can come back.
+
+    Decoding the same real buffer at the declared 404 must still produce drift.
+    If it stops doing so, this test is asserting nothing.
+    """
+    rows = _uncompressed_rows()
+    # 6834 / 404 is not whole, so reach _decode_structure directly at that stride.
+    from saprfclib.codec import _decode_structure
+
+    desc = _funint_type_desc()
+    drifted = [
+        _decode_structure(memoryview(rows)[i : i + 404], desc, True)
+        for i in range(0, len(rows) - 404 + 1, 404)
+    ]
+    names = [r["PARAMETER"].strip() for r in drifted]
+    assert names[0] == "ET_DATA", "row 0 is aligned either way"
+    assert names[1] != "DELIMITER", "row 1 is where trusting 404 starts to drift"
 
 
 def test_the_descriptor_is_still_the_fallback_without_a_count() -> None:
