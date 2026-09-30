@@ -309,3 +309,46 @@ def test_struct_bootstrap_falls_back_to_rsd_when_ddif_is_empty() -> None:
     sent = b"".join(conn._transport.sent)  # type: ignore[attr-defined]
     assert "DDIF_FIELDINFO_GET".encode("utf-16-le") in sent
     assert "RFC_GET_STRUCTURE_DEFINITION".encode("utf-16-le") in sent
+
+
+def test_ddif_builder_types_integers_from_datatype_not_inttype() -> None:
+    """INT4/INT2/INT1/RAW all share INTTYPE 'X'; DATATYPE must disambiguate them.
+
+    On a live system (confirmed against DD03L and a 29k-structure export) an INT4
+    field reports INTTYPE 'X', identical to RAW. Typing by INTTYPE alone decodes
+    every integer as raw bytes. _build_type_desc_from_ddif types from the DDIC
+    DATATYPE instead. Rows are (fieldname, position, leng, intlen, decimals,
+    datatype); widths: char doubles (UC = 2*LENG), binary/int keep INTLEN.
+    """
+    from saprfclib.codec import (
+        RFCTYPE_BYTE,
+        RFCTYPE_CHAR,
+        RFCTYPE_FLOAT,
+        RFCTYPE_INT,
+        RFCTYPE_INT2,
+    )
+    from saprfclib.connection import _build_type_desc_from_ddif
+
+    rows = [
+        ("NAME", 1, 10, 20, 0, "CHAR"),  # 10 chars -> 20 UC bytes
+        ("COUNT", 2, 10, 4, 0, "INT4"),  # integer, 4 bytes, INTTYPE would be 'X'
+        ("SHORT", 3, 5, 2, 0, "INT2"),  # 2 bytes
+        ("RATE", 4, 16, 8, 0, "FLTP"),  # float, 8 bytes
+        ("BLOB", 5, 8, 8, 0, "RAW"),  # raw, 8 bytes — also INTTYPE 'X'
+    ]
+    td = _build_type_desc_from_ddif("ZTEST", rows)
+    by = {f.name: f for f in td.fields}
+
+    assert by["COUNT"].rfctype == RFCTYPE_INT  # not RFCTYPE_BYTE
+    assert by["SHORT"].rfctype == RFCTYPE_INT2
+    assert by["RATE"].rfctype == RFCTYPE_FLOAT
+    assert by["BLOB"].rfctype == RFCTYPE_BYTE
+    assert by["NAME"].rfctype == RFCTYPE_CHAR
+
+    # Widths and packed UC offsets.
+    assert by["NAME"].uc_length == 20 and by["NAME"].uc_offset == 0
+    assert by["COUNT"].uc_length == 4 and by["COUNT"].uc_offset == 20
+    assert by["SHORT"].uc_length == 2 and by["SHORT"].uc_offset == 24
+    assert by["RATE"].uc_length == 8 and by["RATE"].uc_offset == 26
+    assert by["BLOB"].uc_length == 8 and by["BLOB"].uc_offset == 34
+    assert td.uc_size == 42
