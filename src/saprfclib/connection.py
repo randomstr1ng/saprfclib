@@ -1106,54 +1106,50 @@ def _build_type_desc_from_dfies(tabname: str, dfies_rows: list[tuple[Any, ...]])
 # a field are read. Byte offsets into the row:
 #   [60:120]   FIELDNAME  C(30)
 #   [122:130]  POSITION   N(4)   1-based field index (as text)
+#   [130:142]  OFFSET     N(6)   field offset in the structure, reply's own unit
 #   [322:334]  LENG       N(6)   EXTERNAL length: character count for char types,
 #                                byte count for binary types
 #   [334:346]  INTLEN     N(6)   INTERNAL byte length in the reply's own unit
 #   [358:370]  DECIMALS   N(6)
 #   [370:378]  DATATYPE   C(4)   DDIC data type name: CHAR/INT4/DATS/DEC/FLTP/...
-#   [378:380]  INTTYPE    C(1)   ABAP internal type code (kept only as a width-unit
-#                                hint; NOT sufficient to type a field -- see below)
+#   [378:380]  INTTYPE    C(1)   ABAP internal type code (not used to type a field)
 #
 # WHY WE TYPE FROM DATATYPE, NOT INTTYPE
 # --------------------------------------
-# INTTYPE (the single-char ABAP internal type) is ambiguous: on a live system
-# INT4, INT2, INT1 and RAW all report INTTYPE 'X' (confirmed against DD03L and a
-# 29,454-structure export). Typing a field by INTTYPE alone therefore decodes
-# every integer as raw bytes. The 4-character DATATYPE disambiguates them, so the
-# rfctype comes from _DATATYPE_TO_RFCTYPE.
+# INTTYPE is ambiguous: DD03L and a 29,454-structure export report INT4/INT2/INT1
+# and RAW all as INTTYPE 'X' (a live DDIF reply happens to use 'I' for INT4, but
+# the two conventions disagree and DATATYPE is the one that is always right).
+# Typing by INTTYPE would decode integers as raw bytes. The 4-character DATATYPE
+# disambiguates them, via _DATATYPE_TO_RFCTYPE.
 #
-# WHY WE DO NOT TRUST THE OFFSET/INTLEN COLUMNS AS UNICODE BYTES
-# --------------------------------------------------------------
-# The unit of OFFSET/INTLEN is not fixed across replies. Of 36 structures captured
-# from one live endpoint, 35 report NUC (single-byte) internal lengths and offsets,
-# and one (RFCSI) reports Unicode (doubled) ones -- same row layout, same
-# connection. Reading INTLEN as a Unicode byte length is right for RFCSI and wrong
-# for the other 35: it yields a half-width descriptor (a DATS field 8 bytes instead
-# of 16, contradicting the SAP_UC rule that RFC_DATE[8] is 8 code units = 16
-# bytes), which silently mis-slices every field after it.
+# HOW THE LAYOUT IS BUILT
+# -----------------------
+# ALL_TYPES='X' makes the server FLATTEN nested substructures into DFIES_TAB as
+# leaf fields with absolute offsets (verified: SYST comes back as 171 leaf rows,
+# no STRU/TTYP markers), so no client-side recursion into nested types is needed.
 #
-# So the width is derived from unit-invariant quantities:
-#   - DATATYPEs in _DOUBLED_DATATYPES (CHAR/NUMC/DATS/TIMS/CLNT/LANG/CUKY/UNIT/
-#     LCHR/ACCP): NUC width = LENG (a character count); UC width = 2 * LENG
-#   - every other DATATYPE (INT*/FLTP/DEC/RAW/STRG/RSTR/decfloat/...): NUC = UC =
-#     INTLEN (a byte count, the same in both unit conventions)
-# Offsets are packed in POSITION order. This reproduces the RFCSI layout exactly
-# (UC size 490, RFCDEST at UC offset 26), verified end to end: the TypeDesc decodes
-# the RFCSI_EXPORT value of a live RFC_SYSTEM_INFO reply correctly. Widths were
-# cross-checked against the 29,454-structure DDIC export (binary/packed/float/int8
-# match INTLEN exactly; char/numc/date/time are 2 x LENG).
+# A live DDIF reply carries the true offsets INCLUDING alignment padding -- on
+# SYST, MODNO (INT4) sits at 204 though LANGU ends at 202 (2 bytes to reach a
+# 4-byte boundary), and DEBUG (char) at 194 though the previous field ends at 193.
+# So when the reply is in Unicode units (a char field's INTLEN == 2 x LENG), the
+# server OFFSET/INTLEN are used directly: they already encode alignment and the
+# flattened nested layout, and matched the server on all 171 SYST fields.
 #
-# [ASSUMED] Tight packing (no inter-field alignment padding). Every captured
-# structure packs tight, but none yet contains an INT2/INT4/INT8/FLOAT field, which
-# SAP may align to its width. Not yet covered by a capture; RFC_GET_STRUCTURE_
-# DEFINITION remains the fallback. Tracked as a known gap.
-# Source: live DDIF_FIELDINFO_GET captures + DD03L / Z_HONEYSAP_EXPORT DDIC dump
-# 2026-09-30; golden fixtures tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin
-# (UC unit) and ddif_fieldinfo_bapilogond_response.bin (NUC unit).
+# The one wrinkle is the length UNIT. Most replies are Unicode, but a
+# non-conformant peer (the HoneySAP emulator) sent NUC (single-byte) lengths for
+# 35 of 36 structures. Since saprfclib only supports Unicode connections and that
+# emulator never returns populated structure VALUES to decode, the NUC branch just
+# packs widths derived from LENG (char -> 2 x LENG, else INTLEN) without alignment
+# -- correct enough for a descriptor that is never used to slice real bytes, while
+# the Unicode branch is exact for every real system.
+# Source: live DDIF_FIELDINFO_GET (SYST, BAPI_USER_GET_DETAIL) + DD03L + the
+# Z_HONEYSAP_EXPORT dump, 2026-09-30. Golden fixtures ..._rfcsi_response.bin
+# (UC) and ..._bapilogond_response.bin (NUC).
 # --------------------------------------------------------------------------- #
 
 _DDIF_FIELDNAME = slice(60, 120)
 _DDIF_POSITION = slice(122, 130)
+_DDIF_OFFSET = slice(130, 142)
 _DDIF_LENG = slice(322, 334)
 _DDIF_INTLEN = slice(334, 346)
 _DDIF_DECIMALS = slice(358, 370)
@@ -1205,13 +1201,12 @@ def _slice_named_table(response: bytes, name: str) -> bytes:
 def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
     """Parse the DFIES_TAB rows of a DDIF_FIELDINFO_GET reply.
 
-    Returns (fieldname, position, leng, intlen, decimals, datatype) per field.
-    ``leng`` is the external length (character count for char types, byte count
-    for binary), ``intlen`` the internal byte length in the reply's own unit, and
-    ``datatype`` the DDIC data type name that types the field (INTTYPE is not
-    enough -- INT4/INT2/INT1/RAW all share INTTYPE 'X'). _build_type_desc_from_ddif
-    turns these into a layout; see the module comment above for why OFFSET/INTLEN
-    are not trusted as Unicode bytes. A row whose DATATYPE is unknown is skipped.
+    Returns (fieldname, position, offset, leng, intlen, decimals, datatype) per
+    field. ``offset``/``intlen`` are the server's field placement in the reply's
+    own length unit; ``leng`` is the external length (character count for char
+    types); ``datatype`` is the DDIC type name that types the field (INTTYPE is not
+    enough -- INT4/RAW share it). _build_type_desc_from_ddif turns these into a
+    layout. A row whose DATATYPE is unknown is skipped.
     """
     body = _strip_gw_header(response)
     segment = _slice_named_table(body, "DFIES_TAB")
@@ -1222,6 +1217,7 @@ def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
         try:
             fieldname = data[_DDIF_FIELDNAME].decode("utf-16-le").rstrip(" \x00")
             position = int(data[_DDIF_POSITION].decode("utf-16-le").strip() or "0")
+            offset = int(data[_DDIF_OFFSET].decode("utf-16-le").strip() or "0")
             leng = int(data[_DDIF_LENG].decode("utf-16-le").strip() or "0")
             intlen = int(data[_DDIF_INTLEN].decode("utf-16-le").strip() or "0")
             decimals = int(data[_DDIF_DECIMALS].decode("utf-16-le").strip() or "0")
@@ -1230,39 +1226,50 @@ def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
             continue
         if not fieldname or datatype not in _DATATYPE_TO_RFCTYPE:
             continue
-        rows.append((fieldname, position, leng, intlen, decimals, datatype))
+        rows.append((fieldname, position, offset, leng, intlen, decimals, datatype))
     return rows
 
 
 def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -> TypeDesc:
-    """Build a TypeDesc from DDIF_FIELDINFO_GET DFIES rows, unit-agnostically.
+    """Build a TypeDesc from DDIF_FIELDINFO_GET DFIES rows.
 
-    The field type comes from the DDIC DATATYPE (INTTYPE is ambiguous -- INT4 and
-    RAW both report 'X'). Widths come from LENG or INTLEN, not from the reply's
-    OFFSET/INTLEN-as-Unicode, whose unit varies between replies -- see the module
-    comment. A DATATYPE in _DOUBLED_DATATYPES is LENG characters (NUC = LENG, UC =
-    2 * LENG bytes); every other type is INTLEN bytes in both. Offsets are packed
-    in POSITION order. [ASSUMED] tight packing: no capture yet contains an
-    INT/FLOAT field to show whether the server aligns it.
+    Types come from the DDIC DATATYPE (INTTYPE is ambiguous -- INT4 and RAW share
+    it). Layout: a Unicode reply (a char field's INTLEN == 2 x LENG) carries the
+    true offsets, including alignment padding and the flattened nested layout that
+    ALL_TYPES='X' produces, so its OFFSET/INTLEN are used directly. A NUC reply
+    (only the HoneySAP emulator, which never returns structure values to decode)
+    has no such offsets, so widths are derived from LENG and packed tight. See the
+    module comment for the evidence.
     """
     if not ddif_rows:
         raise ValueError(f"no DFIES rows for {tabname!r}")
 
+    rows = sorted(ddif_rows, key=lambda r: r[1])
+
+    # Reply length unit: a doubled-type field whose INTLEN is twice its LENG is a
+    # Unicode reply (CHAR1 -> 2 bytes). Otherwise treat it as NUC.
+    unicode_reply = True
+    for _fn, _pos, _off, leng, intlen, _dec, datatype in rows:
+        if datatype in _DOUBLED_DATATYPES and leng > 0:
+            unicode_reply = intlen == leng * 2
+            break
+
     fields: list[FieldDesc] = []
-    nuc_off = 0
-    uc_off = 0
-    for fieldname, _position, leng, intlen, decimals, datatype in sorted(
-        ddif_rows, key=lambda r: r[1]
-    ):
+    packed_nuc = 0
+    packed_uc = 0
+    max_end = 0
+    for fieldname, _position, offset, leng, intlen, decimals, datatype in rows:
         rfctype = _DATATYPE_TO_RFCTYPE[datatype]
-        if datatype in _DOUBLED_DATATYPES:
-            nuc_len = leng
-            uc_len = leng * 2
+        doubled = datatype in _DOUBLED_DATATYPES
+        nuc_len = leng if doubled else intlen
+        uc_len = leng * 2 if doubled else intlen
+        if unicode_reply:
+            # The server placed the field (alignment + flattened nesting included).
+            uc_off = offset
+            nuc_off = packed_nuc  # NUC layout is not used on a Unicode connection.
         else:
-            # Binary, packed, float, int, decfloat, and STRING/XSTRING (a handle
-            # slot): the byte width is unit-invariant, so INTLEN serves both.
-            nuc_len = intlen
-            uc_len = intlen
+            uc_off = packed_uc
+            nuc_off = packed_nuc
         fields.append(
             FieldDesc(
                 name=fieldname,
@@ -1276,10 +1283,12 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
                 direction=RFC_IMPORT,
             )
         )
-        nuc_off += nuc_len
-        uc_off += uc_len
+        packed_nuc += nuc_len
+        packed_uc += uc_len
+        max_end = max(max_end, uc_off + uc_len)
 
-    return TypeDesc(name=tabname, fields=fields, nuc_size=nuc_off, uc_size=uc_off)
+    uc_size = max_end if unicode_reply else packed_uc
+    return TypeDesc(name=tabname, fields=fields, nuc_size=packed_nuc, uc_size=uc_size)
 
 
 def _build_ddif_fieldinfo_desc(unicode_mode: bool) -> FunctionDesc:
