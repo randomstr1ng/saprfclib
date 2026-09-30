@@ -362,6 +362,18 @@ def _decode_uc_fixed(data: bytes, field: FieldDesc) -> str:
     return data.decode(_uc_encoding(field))
 
 
+def _decode_initial_or(value: str) -> str:
+    """Map an ABAP initial DATE/TIME (all zeros or all blanks) to "", else keep it.
+
+    The wire never carries an empty DATS/TIMS; an unset one is all '0' (or, less
+    often, all blank). The reference client reports that as "" so callers can tell
+    "no date" from a real value, and matching it keeps decoded results identical.
+    A real date such as "20260930" contains a non-zero, non-blank character and is
+    returned unchanged.
+    """
+    return "" if not value.strip("0 ") else value
+
+
 def _encode_uc_fixed(value: str, field: FieldDesc, *, pad: str) -> bytes:
     """Encode a fixed-width SAP_UC field, padding to the field's char width.
 
@@ -758,9 +770,13 @@ def decode(
         case rfctype if rfctype == RFCTYPE_NUM:
             return _decode_uc_fixed(buf, field)
         case rfctype if rfctype == RFCTYPE_DATE:
-            return _decode_uc_fixed(buf, field)  # str "YYYYMMDD" — NOT datetime (D-13)
+            # str "YYYYMMDD" — NOT datetime (D-13). The ABAP initial date is all
+            # zeros (or all blanks); the reference client (pyrfc) surfaces that as
+            # "" rather than "00000000", so a caller can tell "no date" from a real
+            # one. Match that: only an all-zero/all-blank field becomes "".
+            return _decode_initial_or(_decode_uc_fixed(buf, field))
         case rfctype if rfctype == RFCTYPE_TIME:
-            return _decode_uc_fixed(buf, field)  # str "HHMMSS" — NOT time (D-13)
+            return _decode_initial_or(_decode_uc_fixed(buf, field))  # "HHMMSS" (D-13)
         case rfctype if rfctype == RFCTYPE_BYTE:
             return buf
         case rfctype if rfctype == RFCTYPE_STRING:
