@@ -38,15 +38,22 @@ def _tlv(tag: int, value: bytes) -> bytes:
     return struct.pack(">HH", tag, len(value)) + value
 
 
-def _logon_response(rc: int = 0) -> bytes:
+def _logon_response(rc: int = 0, *, with_sys_id: bool = True) -> bytes:
     """Build a synthetic server logon-response TLV payload (frame 15).
 
     RE truth (Task 3 live capture): error is signaled by presence of tag 0x0402
     (error message text).  On success, 0x0402 is absent.  Tag 0x0420 does NOT
     appear in live logon-response captures — it is RFCPING-specific.
+
+    ``with_sys_id`` controls tag 0x0450 (the SAP system id). It is present when
+    authentication SUCCEEDS (issue #38): a logon that authenticated but whose
+    embedded RFCPING was rejected still carries 0x0450, so 0x0450's presence
+    distinguishes a real auth failure from a function-authorization denial.
     """
-    parts: list[bytes] = [
-        _tlv(0x0450, b"A4H"),  # SAP System ID
+    parts: list[bytes] = []
+    if with_sys_id:
+        parts.append(_tlv(0x0450, b"A4H"))  # SAP System ID (present when auth OK)
+    parts += [
         _tlv(0x0452, b"00"),  # System number
         _tlv(0x0453, b"vhcala4hci"),  # Application server host
         _tlv(0x0012, b"758"),  # SAP release
@@ -59,6 +66,30 @@ def _logon_response(rc: int = 0) -> bytes:
         parts.append(_tlv(0x0402, f"logon error rc={rc}".encode()))  # error text
     parts.append(_tlv(0xFFFF, b""))  # Terminator
     return b"".join(parts)
+
+
+def _authz_denied_logon_response() -> bytes:
+    """A logon reply that AUTHENTICATED but whose embedded RFCPING was S_RFC-denied.
+
+    Byte-shaped after a live capture (issue #38): the system id (0x0450) is present
+    alongside the ABAP exception tags — 0x0417 message number, 0x0403 exception key
+    RFC_NO_AUTHORITY, 0x0415/0x0416 message class/type, and 0x0402 the message text.
+    """
+    return b"".join(
+        [
+            _tlv(0x0450, b"A4H"),  # sys id present -> authentication succeeded
+            _tlv(0x0452, b"00"),
+            _tlv(0x0453, b"vhcala4hci"),
+            _tlv(0x0012, b"758"),
+            _tlv(0x0013, b"793"),
+            _tlv(0x0415, b"00"),  # message class
+            _tlv(0x0416, b"X"),  # message type
+            _tlv(0x0417, b"341"),  # message number (also the exception marker)
+            _tlv(0x0403, b"RFC_NO_AUTHORITY"),  # exception key
+            _tlv(0x0402, b"No RFC authorization for function module RFCPING."),
+            _tlv(0xFFFF, b""),
+        ]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -125,21 +156,60 @@ def test_attributes_after_handshake() -> None:
     assert attrs.partner_rel == "758"
 
 
-def test_logon_failure_nonzero_rc_raises() -> None:
-    """A logon-response containing tag 0x0402 (error text) raises ValueError
-    'logon failed' and does NOT reach READY."""
+def _drive_to_logon(sess: Session) -> None:
     ni_resp = load_fixture(HANDSHAKE_DIR, "ni_version_response")
     gw_conn = load_fixture(HANDSHAKE_DIR, "gw_connect_response")
     gw_done = load_fixture(HANDSHAKE_DIR, "gw_done_server")
-
-    sess = Session()
     sess.start()
     sess.feed(ni_resp.payload_bytes)
     sess.feed(gw_conn.payload_bytes)
     sess.feed(gw_done.payload_bytes)
+
+
+def test_authentication_failure_raises_logon_failed() -> None:
+    """No system id (0x0450) + an error text (0x0402) is a real auth failure."""
+    sess = Session()
+    _drive_to_logon(sess)
     with pytest.raises(ValueError, match="logon failed"):
-        sess.feed(_logon_response(rc=2))
+        sess.feed(_logon_response(rc=2, with_sys_id=False))
     assert sess.state is not SessionState.READY
+
+
+def test_authz_denied_rfcping_raises_rfc_no_authority_not_logon_failed() -> None:
+    """Auth OK (0x0450 present) but embedded RFCPING S_RFC-denied → the ABAP exception.
+
+    Issue #38: this must NOT be reported as a generic 'logon failed'. It is a
+    function-authorization denial; the reference client (pyrfc) raises the ABAP
+    exception RFC_NO_AUTHORITY here, and so do we — with its real key and text,
+    not a garbled message. Verified against a live capture on kernel 793.
+    """
+    from saprfclib.exceptions import AbapApplicationError
+
+    sess = Session()
+    _drive_to_logon(sess)
+    with pytest.raises(AbapApplicationError) as ei:
+        sess.feed(_authz_denied_logon_response())
+    exc = ei.value
+    assert exc.key == "RFC_NO_AUTHORITY"
+    assert exc.message == "No RFC authorization for function module RFCPING."
+    assert exc.msg_class == "00" and exc.msg_type == "X" and exc.msg_number == "341"
+    assert sess.state is not SessionState.READY
+
+
+def test_allow_restricted_logon_opens_despite_authz_denial() -> None:
+    """With allow_restricted_logon, an S_RFC-denied RFCPING yields a usable session.
+
+    Issue #38: a security tool enumerating low-privilege destinations wants the
+    connection opened so it can make its own authorized calls. The reply carries
+    the full attributes and the byte stream is in sync, so the session reaches
+    READY and its attributes are populated.
+    """
+    sess = Session(allow_restricted_logon=True)
+    _drive_to_logon(sess)
+    sess.feed(_authz_denied_logon_response())
+    assert sess.state is SessionState.READY
+    assert sess.attributes is not None
+    assert sess.attributes.sys_id == "A4H"
 
 
 def test_feed_before_start_raises() -> None:

@@ -350,3 +350,43 @@ def test_live_stfc_structure_roundtrips_all_scalar_types() -> None:
     assert bytes.fromhex(echo["RFCHEX3"]) if isinstance(echo["RFCHEX3"], str) else echo["RFCHEX3"]
     assert echo["RFCCHAR4"] == "WXYZ"
     assert echo["RFCDATA1"].startswith("hello")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not os.environ.get("SAPRFC_ASHOST") or not os.environ.get("SAPRFC_RESTRICTED_USER"),
+    reason="needs SAPRFC_ASHOST + SAPRFC_RESTRICTED_USER/_PASSWD (a user that "
+    "authenticates but lacks S_RFC for RFCPING)",
+)
+def test_live_restricted_logon_s_rfc_denied() -> None:
+    """A user that authenticates but lacks S_RFC for RFCPING (issue #38).
+
+    Default: connect() raises AbapApplicationError with key RFC_NO_AUTHORITY (the
+    reference client raises the same and does not open the connection — confirmed
+    by wire capture: it embeds RFCPING too and gets the identical reply). With
+    allow_restricted_logon=True the connection opens and its attributes are
+    populated, ready for the caller's own authorized calls.
+
+    Env: SAPRFC_ASHOST/SYSNR/CLIENT, SAPRFC_RESTRICTED_USER, SAPRFC_RESTRICTED_PASSWD.
+    """
+    from saprfclib import connect
+    from saprfclib.exceptions import AbapApplicationError
+
+    params = {
+        "ashost": os.environ["SAPRFC_ASHOST"],
+        "sysnr": os.environ.get("SAPRFC_SYSNR", "00"),
+        "client": os.environ.get("SAPRFC_CLIENT", "001"),
+        "user": os.environ["SAPRFC_RESTRICTED_USER"],
+        "passwd": os.environ["SAPRFC_RESTRICTED_PASSWD"],
+    }
+
+    with pytest.raises(AbapApplicationError) as ei:
+        connect(**params)
+    assert ei.value.key == "RFC_NO_AUTHORITY"
+
+    conn = connect(**params, allow_restricted_logon=True)
+    try:
+        attrs = conn.get_connection_attributes()
+        assert attrs.sys_id  # populated — the session authenticated and is usable
+    finally:
+        conn.close()

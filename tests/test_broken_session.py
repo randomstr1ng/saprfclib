@@ -263,6 +263,7 @@ def test_the_sync_facade_and_its_async_core_share_one_session() -> None:
             self._cache = None
             self._struct_desc_cache = None
             self._strict_params = False
+            self._allow_restricted_logon = False
             self._dropped_params_seen: set[object] = set()
 
     core = FakeAsyncConn()
