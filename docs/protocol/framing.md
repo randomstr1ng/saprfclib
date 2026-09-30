@@ -1005,7 +1005,17 @@ also carries a second table (`FIXED_VALUES`), so the `DFIES_TAB` byte range must
 | 322 | `LENG` | N(6) | external length: character count for char types, byte count for binary |
 | 334 | `INTLEN` | N(6) | internal byte length — **unit varies per reply** |
 | 358 | `DECIMALS` | N(6) | decimals |
-| 378 | `INTTYPE` | C(1) | ABAP internal type code — same alphabet as the DFIES `EXID` that `_EXID_TO_RFCTYPE` maps |
+| 370 | `DATATYPE` | C(4) | DDIC data type name (`CHAR`/`INT4`/`DATS`/`DEC`/`FLTP`/…) — **types the field** |
+| 378 | `INTTYPE` | C(1) | ABAP internal type code — width-unit hint only, **not** enough to type a field |
+
+!!! warning "Type from DATATYPE, not INTTYPE"
+    `INTTYPE` is ambiguous: on a live system (confirmed against `DD03L` and a
+    29,454-structure export) `INT4`, `INT2`, `INT1` and `RAW` all report `INTTYPE`
+    `'X'`. Typing a field by `INTTYPE` alone decodes every integer as raw bytes.
+    The 4-character `DATATYPE` disambiguates them, so the RFCTYPE comes from
+    `_DATATYPE_TO_RFCTYPE` (`INT4`→INT, `INT2`→INT2, `RAW`→BYTE, `FLTP`→FLOAT,
+    `DEC`/`CURR`/`QUAN`→BCD, `STRG`/`SSTR`→STRING, `RSTR`→XSTRING, `D16*`/`D34*`→
+    DECFLOAT16/34, …).
 
 !!! warning "OFFSET/INTLEN unit is not fixed — do not read them as Unicode bytes"
     The unit of `OFFSET`/`INTLEN` is **not constant across replies**. Of 36 structures

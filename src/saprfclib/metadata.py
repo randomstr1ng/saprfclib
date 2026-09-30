@@ -62,6 +62,69 @@ RFCTYPE_DECF34 = 24
 RFCTYPE_STRING = 29
 RFCTYPE_XSTRING = 30
 RFCTYPE_INT8 = 31
+RFCTYPE_UTCLONG = 32
+
+
+# DDIC DATATYPE (the 4-char type name, DFIES column DATATYPE) -> RFCTYPE.
+#
+# The DFIES INTTYPE column (single char) is NOT sufficient to type a field: on a
+# live system INT4, INT2, INT1 and RAW all report INTTYPE 'X', so an integer is
+# indistinguishable from raw bytes by INTTYPE alone. DATATYPE disambiguates them.
+# Derived from 29,454 structures exported from a live system (Z_HONEYSAP_EXPORT):
+# every DATATYPE below was observed with the INTTYPE and width shown in the
+# analysis, and cross-checked against DD03L on the same system (e.g. INT4 =>
+# INTTYPE 'X', LENG 10, INTLEN 4).
+_DATATYPE_TO_RFCTYPE: dict[str, int] = {
+    # character / text
+    "CHAR": RFCTYPE_CHAR,
+    "CLNT": RFCTYPE_CHAR,  # client (3 chars)
+    "LANG": RFCTYPE_CHAR,  # language key
+    "CUKY": RFCTYPE_CHAR,  # currency key
+    "UNIT": RFCTYPE_CHAR,  # unit of measure
+    "LCHR": RFCTYPE_CHAR,  # long char
+    "NUMC": RFCTYPE_NUM,
+    "ACCP": RFCTYPE_NUM,  # posting period YYYYMM, numeric text
+    "DATS": RFCTYPE_DATE,
+    "TIMS": RFCTYPE_TIME,
+    # packed decimal
+    "DEC": RFCTYPE_BCD,
+    "CURR": RFCTYPE_BCD,
+    "QUAN": RFCTYPE_BCD,
+    # binary integers / float
+    "INT1": RFCTYPE_INT1,
+    "INT2": RFCTYPE_INT2,
+    "INT4": RFCTYPE_INT,
+    "INT8": RFCTYPE_INT8,
+    "FLTP": RFCTYPE_FLOAT,
+    # raw / byte
+    "RAW": RFCTYPE_BYTE,
+    "LRAW": RFCTYPE_BYTE,
+    "PREC": RFCTYPE_BYTE,  # precision field, 2-byte binary
+    # deep / variable-length (fixed handle slot in a structure)
+    "STRG": RFCTYPE_STRING,
+    "SSTR": RFCTYPE_STRING,  # short string
+    "RSTR": RFCTYPE_XSTRING,
+    # decimal floating point
+    "D16D": RFCTYPE_DECF16,
+    "D16R": RFCTYPE_DECF16,
+    "D16N": RFCTYPE_DECF16,
+    "D34D": RFCTYPE_DECF34,
+    "D34R": RFCTYPE_DECF34,
+    "D34N": RFCTYPE_DECF34,
+    # timestamp
+    "UTCL": RFCTYPE_UTCLONG,
+    # nested — typed so the field is recognised; the row layout is a separate
+    # lookup (see the nested-resolution gap tracked as an issue).
+    "STRU": RFCTYPE_STRUCTURE,
+    "TTYP": RFCTYPE_TABLE,
+}
+
+# DDIC DATATYPEs whose Unicode byte width is 2x their character LENG. Every other
+# type's width is a byte count taken from INTLEN (unit-invariant for binary,
+# packed, float, string-handle and decfloat types).
+_DOUBLED_DATATYPES = frozenset(
+    {"CHAR", "CLNT", "LANG", "CUKY", "UNIT", "LCHR", "NUMC", "ACCP", "DATS", "TIMS"}
+)
 
 # Tampering guard (threat T-03-META): cap result-table size and recursion depth
 # so a malicious peer cannot exhaust memory / blow the stack via crafted metadata.
