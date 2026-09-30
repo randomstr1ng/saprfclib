@@ -1017,26 +1017,30 @@ also carries a second table (`FIXED_VALUES`), so the `DFIES_TAB` byte range must
     `DEC`/`CURR`/`QUAN`→BCD, `STRG`/`SSTR`→STRING, `RSTR`→XSTRING, `D16*`/`D34*`→
     DECFLOAT16/34, …).
 
-!!! warning "OFFSET/INTLEN unit is not fixed — do not read them as Unicode bytes"
-    The unit of `OFFSET`/`INTLEN` is **not constant across replies**. Of 36 structures
-    captured from one live endpoint, 35 report NUC (single-byte) lengths and offsets and one
-    (`RFCSI`) reports Unicode (doubled) ones — same row layout, same connection. Reading
-    `INTLEN` as a Unicode byte length is right for `RFCSI` and wrong for the other 35: a
-    `CHAR1` reads as 1 byte instead of 2, a `DATS` as 8 instead of 16, and every field after
-    it is mis-sliced.
+##### Layout: trust the server's OFFSET on a Unicode reply — CONFIRMED (2026-09-30, live)
 
-    So the layout is derived from the **unit-invariant** columns `LENG` + `INTTYPE`, not from
-    `OFFSET`/`INTLEN`: char-like types are `LENG` characters (NUC = `LENG`, UC = 2 × `LENG`
-    bytes); every other type is `INTLEN` bytes in both units (a binary byte count is the same
-    either way, so its unit ambiguity does not matter). Offsets are packed in `POSITION` order.
-    `_build_type_desc_from_ddif` does this; it reproduces the `RFCSI` layout exactly (UC size
-    490, `RFCDEST` at UC offset 26 — verified end to end against a live `RFCSI_EXPORT`) and
-    yields correct Unicode widths for the NUC-unit structures.
+A live `DDIF_FIELDINFO_GET` reply carries the field placement the kernel actually uses,
+including **alignment padding** and the **flattened nested layout** that `ALL_TYPES='X'`
+produces. Verified against a live SAP kernel for `SYST` (`DDIF_FIELDINFO_GET(TABNAME='SYST',
+ALL_TYPES='X')` → 171 leaf rows, no `STRU`/`TTYP` markers — nesting is flattened, so no
+client-side recursion is needed):
 
-    **[ASSUMED]** tight packing (no inter-field alignment padding). Every captured structure
-    packs tight, but none contains an `INT2`/`INT4`/`INT8`/`FLOAT` field, which SAP may align
-    to its width. Such a structure is not yet covered by a capture, so its offsets are assumed
-    tight until one lands; `RFC_GET_STRUCTURE_DEFINITION` remains the fallback.
+- `LANGU` (CHAR1) ends at 202, but `MODNO` (INT4) is at **204** — 2 bytes padding to a 4-byte
+  boundary.
+- a `DEC` field ends at 193, but `DEBUG` (CHAR1) is at **194** — 2-byte alignment.
+
+A tight packer misplaces `MODNO` (and everything after it). So on a **Unicode reply** — one
+where a char field's `INTLEN` is `2 × LENG` — `_build_type_desc_from_ddif` takes the server
+`OFFSET`/`INTLEN` verbatim; it reproduced all 171 `SYST` offsets exactly, and
+`BAPI_USER_GET_DETAIL` decoded identically to the reference client (pyrfc) across 220 fields.
+
+!!! note "The one caveat: reply length unit"
+    Most systems reply in Unicode units. One non-conformant peer (the HoneySAP emulator) sent
+    **NUC** (single-byte) lengths for 35 of 36 structures. Since saprfclib only supports
+    Unicode connections and that emulator never returns populated structure *values*, the NUC
+    branch just derives widths from `LENG` (char → `2 × LENG`, else `INTLEN`) and packs them —
+    enough for a descriptor that is never used to slice real bytes, while the Unicode branch is
+    exact for every real system. Type always comes from `DATATYPE`.
 
 Golden fixtures: `tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin` (Unicode-unit reply),
 `ddif_fieldinfo_bapilogond_response.bin` (NUC-unit reply), and

@@ -317,8 +317,10 @@ def test_ddif_builder_types_integers_from_datatype_not_inttype() -> None:
     On a live system (confirmed against DD03L and a 29k-structure export) an INT4
     field reports INTTYPE 'X', identical to RAW. Typing by INTTYPE alone decodes
     every integer as raw bytes. _build_type_desc_from_ddif types from the DDIC
-    DATATYPE instead. Rows are (fieldname, position, leng, intlen, decimals,
-    datatype); widths: char doubles (UC = 2*LENG), binary/int keep INTLEN.
+    DATATYPE instead. Rows are (fieldname, position, offset, leng, intlen,
+    decimals, datatype). This is a Unicode reply (CHAR INTLEN == 2*LENG), so the
+    server's OFFSET column is used verbatim -- including the alignment padding it
+    encodes (RATE, an 8-byte float, sits at 32 though SHORT ends at 26).
     """
     from saprfclib.codec import (
         RFCTYPE_BYTE,
@@ -330,11 +332,12 @@ def test_ddif_builder_types_integers_from_datatype_not_inttype() -> None:
     from saprfclib.connection import _build_type_desc_from_ddif
 
     rows = [
-        ("NAME", 1, 10, 20, 0, "CHAR"),  # 10 chars -> 20 UC bytes
-        ("COUNT", 2, 10, 4, 0, "INT4"),  # integer, 4 bytes, INTTYPE would be 'X'
-        ("SHORT", 3, 5, 2, 0, "INT2"),  # 2 bytes
-        ("RATE", 4, 16, 8, 0, "FLTP"),  # float, 8 bytes
-        ("BLOB", 5, 8, 8, 0, "RAW"),  # raw, 8 bytes — also INTTYPE 'X'
+        # (name, position, OFFSET, LENG, INTLEN, decimals, DATATYPE)
+        ("NAME", 1, 0, 10, 20, 0, "CHAR"),  # 0..20
+        ("COUNT", 2, 20, 10, 4, 0, "INT4"),  # 20..24 ; INTTYPE would be 'X'
+        ("SHORT", 3, 24, 5, 2, 0, "INT2"),  # 24..26
+        ("RATE", 4, 32, 16, 8, 0, "FLTP"),  # 32..40 ; 6 bytes align padding before it
+        ("BLOB", 5, 40, 8, 8, 0, "RAW"),  # 40..48 ; RAW also INTTYPE 'X'
     ]
     td = _build_type_desc_from_ddif("ZTEST", rows)
     by = {f.name: f for f in td.fields}
@@ -345,10 +348,44 @@ def test_ddif_builder_types_integers_from_datatype_not_inttype() -> None:
     assert by["BLOB"].rfctype == RFCTYPE_BYTE
     assert by["NAME"].rfctype == RFCTYPE_CHAR
 
-    # Widths and packed UC offsets.
-    assert by["NAME"].uc_length == 20 and by["NAME"].uc_offset == 0
-    assert by["COUNT"].uc_length == 4 and by["COUNT"].uc_offset == 20
-    assert by["SHORT"].uc_length == 2 and by["SHORT"].uc_offset == 24
-    assert by["RATE"].uc_length == 8 and by["RATE"].uc_offset == 26
-    assert by["BLOB"].uc_length == 8 and by["BLOB"].uc_offset == 34
-    assert td.uc_size == 42
+    # Server OFFSET used verbatim, alignment gap preserved.
+    assert by["NAME"].uc_offset == 0 and by["NAME"].uc_length == 20
+    assert by["COUNT"].uc_offset == 20 and by["COUNT"].uc_length == 4
+    assert by["SHORT"].uc_offset == 24 and by["SHORT"].uc_length == 2
+    assert by["RATE"].uc_offset == 32 and by["RATE"].uc_length == 8  # aligned, not 26
+    assert by["BLOB"].uc_offset == 40 and by["BLOB"].uc_length == 8
+    assert td.uc_size == 48
+
+
+def test_ddif_builder_uses_server_offsets_with_real_alignment() -> None:
+    """A Unicode reply's server OFFSET is authoritative — alignment padding included.
+
+    Real fields from a live DDIF_FIELDINFO_GET(TABNAME='SYST', ALL_TYPES='X')
+    reply (SAP kernel, Unicode). LANGU (CHAR1) ends at 202, but MODNO (INT4) is at
+    204 — the server pads 2 bytes to reach a 4-byte boundary. DEBUG (CHAR1) is at
+    194 though the DEC field before it ends at 193 (2-byte alignment). A tight
+    packer would place MODNO at 202 and mis-slice everything after it, so the
+    builder must take the server's OFFSET verbatim. Rows are (name, position,
+    offset, leng, intlen, decimals, datatype).
+    """
+    from saprfclib.codec import RFCTYPE_BCD, RFCTYPE_CHAR, RFCTYPE_INT
+    from saprfclib.connection import _build_type_desc_from_ddif
+
+    rows = [
+        ("CCURT", 50, 188, 9, 5, 0, "DEC"),
+        ("DEBUG", 51, 194, 1, 2, 0, "CHAR"),  # 194, not 193 (2-byte align)
+        ("CTYPE", 52, 196, 1, 2, 0, "CHAR"),
+        ("INPUT", 53, 198, 1, 2, 0, "CHAR"),
+        ("LANGU", 54, 200, 1, 2, 0, "LANG"),  # ends at 202
+        ("MODNO", 55, 204, 10, 4, 0, "INT4"),  # 204, not 202 (4-byte align)
+        ("BATCH", 56, 208, 1, 2, 0, "CHAR"),
+    ]
+    td = _build_type_desc_from_ddif("SYST", rows)
+    by = {f.name: f for f in td.fields}
+
+    assert by["MODNO"].uc_offset == 204  # alignment padding preserved, not 202
+    assert by["MODNO"].rfctype == RFCTYPE_INT
+    assert by["DEBUG"].uc_offset == 194  # not 193
+    assert by["DEBUG"].rfctype == RFCTYPE_CHAR
+    assert by["CCURT"].rfctype == RFCTYPE_BCD
+    assert by["LANGU"].uc_offset == 200
