@@ -1,0 +1,21 @@
+{
+  "message_type": "DDIF_FIELDINFO_GET_RESPONSE_NUC_UNIT",
+  "capture_source": "live capture 2026-09-30 against a HoneySAP endpoint on gateway port 3300 (unicode, codepage 4103), from the pyrfc reference-client add-user run. Reply to DDIF_FIELDINFO_GET(TABNAME=BAPILOGOND, ALL_TYPES=X). Sanitised preserving byte length: GW conversation handle at [40:48] zeroed and the 16-byte 0x0514 session token zeroed. No NI length prefix.",
+  "evidence": "return code 0; the DFIES_TAB carries 14 field rows for BAPILOGOND. Unlike the RFCSI reply, this one reports NUC (single-byte) internal lengths and offsets (a CHAR1 field's INTLEN is 1, not 2; a DATS field's is 8, not 16). Of 36 structures captured from this endpoint, 35 are NUC like this and only RFCSI is Unicode — so the builder must derive Unicode widths from LENG + type, not from the reply's INTLEN column.",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {"offset": 0, "length": 2, "name": "gw_frame_type", "value": "0x06cb", "note": "GW/RFC data frame type; 80-byte GW header precedes the TLV stream."},
+    {"offset": 40, "length": 8, "name": "gw_conversation_handle", "note": "sanitised: zeroed, byte length preserved."}
+  ],
+  "notes": [
+    "This is the NUC-unit counterpart to ddif_fieldinfo_rfcsi_response.bin (Unicode-unit). Same 1350-byte DFIES row layout, different length unit. The regression it guards: reading INTLEN as Unicode bytes gives BAPILOGOND a 379-byte descriptor instead of 730 and an 8-byte DATS instead of 16, silently mis-slicing the decode.",
+    "BAPILOGOND fields and correct Unicode widths: GLTGV/GLTGB DATS (16), USTYP CHAR1 (2), CLASS/ACCNT CHAR12 (24), TZONE CHAR6 (12), LTIME TIMS (12), BCODE RAW8 (8), CODVN CHAR1 (2), PASSCODE RAW20 (20), CODVC CHAR1 (2), PWDSALTEDHASH CHAR255 (510), CODVS CHAR1 (2), SECURITY_POLICY CHAR40 (80). Total 730."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "table_name": "DFIES_TAB",
+    "fields_parsed": 14,
+    "unit": "NUC",
+    "typedesc_uc_size": 730
+  }
+}

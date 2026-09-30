@@ -215,26 +215,56 @@ def test_a_reply_that_did_not_succeed_still_warns() -> None:
 
 
 def test_ddif_dfies_row_layout_parses_from_capture() -> None:
-    """The DDIF_FIELDINFO_GET DFIES_TAB row layout, parsed from a live reply.
+    """The DDIF_FIELDINFO_GET DFIES_TAB layout for a UC-unit reply (RFCSI).
 
-    DDIF_FIELDINFO_GET is the RFC the reference library uses to resolve a DDIC
-    structure's field layout; its DFIES_TAB rows are 1350 bytes and arrive
-    compressed. This checks the byte-offset layout the parser reads: RFCDEST is a
-    CHAR32 field, so 64 UC bytes at UC offset 26 (0 + 6 + 8 + 6 + 6 for the four
-    fields before it).
+    RFCSI's reply reports Unicode-unit lengths. The type-driven builder derives
+    the layout from LENG + type rather than trusting the reply's offset column, so
+    RFCDEST (CHAR32) lands at UC offset 26 with 64 UC bytes and the structure is
+    490 UC bytes -- the layout verified end to end against a live RFCSI_EXPORT.
     """
-    from saprfclib.connection import _build_type_desc_from_dfies, _parse_ddif_dfies_rows
+    from saprfclib.connection import _build_type_desc_from_ddif, _parse_ddif_dfies_rows
 
     raw = (GOLDEN / "ddif_fieldinfo_rfcsi_response.bin").read_bytes()
     rows = _parse_ddif_dfies_rows(raw)
     assert len(rows) == 20
 
-    td = _build_type_desc_from_dfies("RFCSI", rows)
+    td = _build_type_desc_from_ddif("RFCSI", rows)
     assert td.uc_size == 490
     by_name = {f.name: f for f in td.fields}
     assert by_name["RFCDEST"].uc_offset == 26
     assert by_name["RFCDEST"].uc_length == 64
     assert by_name["RFCIPV6ADDR"].uc_offset == 400
+
+
+def test_ddif_nuc_unit_reply_builds_unicode_widths() -> None:
+    """A NUC-unit DFIES reply must still yield Unicode widths (regression).
+
+    35 of 36 captured structures report NUC (single-byte) internal lengths; only
+    RFCSI reports Unicode ones. Trusting the reply's INTLEN column as Unicode bytes
+    (the first cut of this code) produced half-width descriptors for the 35 —
+    BAPILOGOND at 379 UC bytes instead of 730, its leading DATS field 8 bytes
+    instead of 16 — which silently corrupts the decode of every field after it. The
+    type-driven builder derives widths from LENG + type, so a char field is 2 bytes
+    per character and a DATS is 16 bytes regardless of the reply's unit.
+    """
+    from saprfclib.connection import _build_type_desc_from_ddif, _parse_ddif_dfies_rows
+
+    raw = (GOLDEN / "ddif_fieldinfo_bapilogond_response.bin").read_bytes()
+    rows = _parse_ddif_dfies_rows(raw)
+    assert len(rows) == 14
+
+    td = _build_type_desc_from_ddif("BAPILOGOND", rows)
+    assert td.uc_size == 730  # not 379 (the half-width NUC-as-UC bug)
+    by_name = {f.name: f for f in td.fields}
+    # DATS: 8 characters => 16 Unicode bytes, per the SAP_UC rule.
+    assert by_name["GLTGV"].uc_length == 16
+    assert by_name["GLTGV"].nuc_length == 8
+    # CHAR1 => 2 Unicode bytes; a RAW field is a byte count, not doubled.
+    assert by_name["USTYP"].uc_length == 2
+    assert by_name["BCODE"].uc_length == 8  # RAW(8) — binary, same in both units
+    # Fields pack tightly and in position order.
+    assert by_name["GLTGB"].uc_offset == 16
+    assert by_name["USTYP"].uc_offset == 32
 
 
 def test_struct_bootstrap_resolves_rfcsi_via_ddif_fieldinfo() -> None:
