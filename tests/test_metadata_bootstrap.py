@@ -159,6 +159,40 @@ def test_a_parameterless_interface_does_not_warn(caplog: pytest.LogCaptureFixtur
     assert _metadata_reply_succeeded(success) is True
 
 
+def test_parameterless_ping_reply_with_gw_header_does_not_crash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """RFC_PING's live reply still carries its GW header; the bootstrap must strip it.
+
+    A live GFI reply begins with the 80-byte GW header (type 0x06CB). RFC_PING
+    declares no parameters, so no PARAMS rows are parsed and the reply reaches
+    _metadata_reply_succeeded. That helper walked the TLV stream from byte 0 and
+    read the header type 0x06CB with the following 0x0200 as a bogus tag/length,
+    raising "malformed TLV: tag 0x06cb length 512". Stripping the header first
+    fixes it; this drives the real captured reply through the whole bootstrap.
+    """
+    reply = (GOLDEN / "ping_gfi_reply.bin").read_bytes()
+    assert reply[:2] == b"\x06\xcb", "fixture must retain the live GW header"
+
+    conn = _conn_with(reply)
+    with caplog.at_level(logging.WARNING):
+        desc = conn._call_bootstrap("RFC_PING")
+
+    assert desc.name == "RFC_PING"
+    assert desc.parameters == []
+    # The reply reported success (0x0420 == 0, 0x0503 present), so no warning.
+    assert "malformed TLV" not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_metadata_reply_succeeded_strips_the_live_gw_header() -> None:
+    """The direct unit: the raw captured reply, header and all, reads as success."""
+    from saprfclib.connection import _metadata_reply_succeeded
+
+    reply = (GOLDEN / "ping_gfi_reply.bin").read_bytes()
+    assert _metadata_reply_succeeded(reply) is True
+
+
 def test_a_reply_that_did_not_succeed_still_warns() -> None:
     """The complement: silencing the warning must not silence the real case."""
     import struct
