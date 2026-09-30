@@ -1001,16 +1001,35 @@ also carries a second table (`FIXED_VALUES`), so the `DFIES_TAB` byte range must
 |--------|--------|-------|---------|
 | 60 | `FIELDNAME` | C(30) | field name |
 | 122 | `POSITION` | N(4) | 1-based field index |
-| 130 | `OFFSET` | N(6) | **Unicode byte offset** of the field in the structure |
-| 334 | `INTLEN` | N(6) | **Unicode byte length** of the field (= 2 × char length for CHAR) |
+| 130 | `OFFSET` | N(6) | field offset in the structure — **unit varies per reply** (see below) |
+| 322 | `LENG` | N(6) | external length: character count for char types, byte count for binary |
+| 334 | `INTLEN` | N(6) | internal byte length — **unit varies per reply** |
 | 358 | `DECIMALS` | N(6) | decimals |
 | 378 | `INTTYPE` | C(1) | ABAP internal type code — same alphabet as the DFIES `EXID` that `_EXID_TO_RFCTYPE` maps |
 
-The server sends UC `OFFSET`/`INTLEN` directly, so no NUC arithmetic is needed on a Unicode
-connection; `_build_type_desc_from_dfies` derives the NUC values. End-to-end verified: the
-`TypeDesc` built from the `RFCSI` DFIES rows (UC size 490) decodes the `RFCSI_EXPORT` value of
-a live `RFC_SYSTEM_INFO` reply correctly. Golden fixtures
-`tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin` (DDIF reply) and
+!!! warning "OFFSET/INTLEN unit is not fixed — do not read them as Unicode bytes"
+    The unit of `OFFSET`/`INTLEN` is **not constant across replies**. Of 36 structures
+    captured from one live endpoint, 35 report NUC (single-byte) lengths and offsets and one
+    (`RFCSI`) reports Unicode (doubled) ones — same row layout, same connection. Reading
+    `INTLEN` as a Unicode byte length is right for `RFCSI` and wrong for the other 35: a
+    `CHAR1` reads as 1 byte instead of 2, a `DATS` as 8 instead of 16, and every field after
+    it is mis-sliced.
+
+    So the layout is derived from the **unit-invariant** columns `LENG` + `INTTYPE`, not from
+    `OFFSET`/`INTLEN`: char-like types are `LENG` characters (NUC = `LENG`, UC = 2 × `LENG`
+    bytes); every other type is `INTLEN` bytes in both units (a binary byte count is the same
+    either way, so its unit ambiguity does not matter). Offsets are packed in `POSITION` order.
+    `_build_type_desc_from_ddif` does this; it reproduces the `RFCSI` layout exactly (UC size
+    490, `RFCDEST` at UC offset 26 — verified end to end against a live `RFCSI_EXPORT`) and
+    yields correct Unicode widths for the NUC-unit structures.
+
+    **[ASSUMED]** tight packing (no inter-field alignment padding). Every captured structure
+    packs tight, but none contains an `INT2`/`INT4`/`INT8`/`FLOAT` field, which SAP may align
+    to its width. Such a structure is not yet covered by a capture, so its offsets are assumed
+    tight until one lands; `RFC_GET_STRUCTURE_DEFINITION` remains the fallback.
+
+Golden fixtures: `tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin` (Unicode-unit reply),
+`ddif_fieldinfo_bapilogond_response.bin` (NUC-unit reply), and
 `struct_definition_empty_response.bin` (the empty `RFC_GET_STRUCTURE_DEFINITION` reply that
 triggers the fallback).
 
