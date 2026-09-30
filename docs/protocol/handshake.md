@@ -252,6 +252,39 @@ token unique to the connection in that case (`Connection._metadata_cache_key`): 
 calls on one connection still skip the round-trip, and nothing is shared between systems
 that never identified themselves.
 
+### Authentication vs. RFCPING authorization — CONFIRMED (2026-09-30, live)
+
+The logon TLV embeds `RFCPING`, so the logon response can report an error that belongs to
+that call rather than to authentication. `0x0450` (the system id) tells the two apart: it is
+present precisely when **authentication succeeded**, and the server appends the RFCPING
+outcome after it.
+
+A user who authenticates but lacks `S_RFC` for `RFCPING` (common for restricted destination
+users such as `TMSADM`) gets a reply that carries **both** the auth tags and an ABAP
+exception:
+
+| tag | value |
+|-----|-------|
+| `0x0450` | `A4H` — system id (auth succeeded) |
+| `0x0417` | `341` — message number / exception marker |
+| `0x0403` | `RFC_NO_AUTHORITY` — exception key |
+| `0x0415` / `0x0416` | `00` / `X` — message class / type |
+| `0x0402` | `No RFC authorization for function module RFCPING.` — message text (UTF-16LE) |
+
+So the logon-response handler classifies by `0x0450`:
+
+- **`0x0450` present + error** → *function-authorization* failure, not an auth failure.
+  `_handle_logon_response` raises the ABAP exception (`AbapApplicationError`, key
+  `RFC_NO_AUTHORITY`) with its real text — matching the reference client, which embeds
+  `RFCPING` too, receives the identical reply, and raises `RFC_NO_AUTHORITY` rather than
+  opening the connection. With `allow_restricted_logon=True` the session is returned instead
+  (authentication and function authorization are separate; the byte stream is in sync and the
+  caller can make its own authorized calls — issue #38).
+- **`0x0450` absent + `0x0402`** → real *authentication* failure; surfaced as `logon failed`.
+
+The message text (`0x0402`) is UTF-16LE on a live kernel; decoding it as UTF-8 yields a
+NUL-interleaved string, so it is decoded width-aware like every other exception field.
+
 Deriving a SID from `0x0008` by splitting on `_` is **not** done: the three-part shape of
 `vhcala4hci_A4H_00` is a naming convention, not a protocol guarantee, and inventing a
 system identity from it would be an unsourced inference of exactly the kind this project

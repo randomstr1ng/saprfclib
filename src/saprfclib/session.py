@@ -142,12 +142,17 @@ class Session:
     logon-response return-code TLV 0x0420 == 0.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_restricted_logon: bool = False) -> None:
         self._state = SessionState.DISCONNECTED
         self._broken_reason: str = ""
         self._attributes: ConnectionAttributes | None = None
         self._codepage: str | None = None
         self._handle: bytes | None = None  # 8-byte ASCII GW connection handle
+        # When True, a logon that AUTHENTICATED (sys id present) but whose embedded
+        # RFCPING was rejected -- typically S_RFC (RFC_NO_AUTHORITY) for a
+        # low-privilege user -- returns a usable session instead of raising. See
+        # _handle_logon_response and issue #38.
+        self._allow_restricted_logon = allow_restricted_logon
 
     # ----------------------------------------------------------------- #
     # Public read-only surface
@@ -288,16 +293,46 @@ class Session:
         tlv_data = data[self._GW_RFC_PREAMBLE :] if is_live else data
         tags = self._parse_tlv(tlv_data)
 
-        # Error is signaled by tag 0x0402 (error message text). Tag 0x0420 is not
-        # sent by live SAP NW 7.x servers — confirmed by wire capture.
+        # An error is signalled by tag 0x0402 (error message text). What KIND of
+        # error it is depends on whether the system id (0x0450) is present:
+        #
+        #  * 0x0450 present  -> AUTHENTICATION SUCCEEDED. The error belongs to the
+        #    RFCPING that the logon frame embeds, not to the logon. The common case
+        #    is S_RFC (RFC_NO_AUTHORITY) for a low-privilege user. The reference
+        #    client (pyrfc) raises the ABAP exception here and does not open the
+        #    connection -- verified live: it embeds RFCPING too, gets the same reply
+        #    (0x0450 + 0x0417/0x0403 RFC_NO_AUTHORITY + 0x0402), and raises
+        #    RFC_NO_AUTHORITY. So by default classify and raise that exception with
+        #    its real key/text, rather than a generic "logon failed" with a garbled
+        #    message. With allow_restricted_logon, return the usable session instead
+        #    -- the reply carries the full attributes and the byte stream is in sync,
+        #    so the caller can make its own authorized calls (issue #38).
+        #
+        #  * 0x0450 absent   -> AUTHENTICATION FAILED. Surface "logon failed".
+        #
+        # Never echo credential tags (T-03-CRED); the decoders below read only the
+        # error/attribute tags.
         err_bytes = tags.get(_TAG_ERROR_MSG)
         if err_bytes is not None:
-            # Surface the message but never echo credential tags (T-03-CRED).
-            try:
-                msg = err_bytes.decode("utf-8", errors="replace")
-            except Exception:
-                msg = err_bytes.hex()
-            raise ValueError(f"logon failed: {msg}")
+            auth_ok = bool(tags.get(_TAG_SYS_ID))  # 0x0450
+            if auth_ok and not self._allow_restricted_logon:
+                # Classify the embedded-call failure (RFC_NO_AUTHORITY etc.) the same
+                # way an ordinary invoke response is classified.
+                from saprfclib.invoke import _decode_error_text, raise_for_rfc_error
+
+                raise_for_rfc_error(tlv_data, _tags=tags)
+                # No structured exception tags, but an error text is present: surface
+                # it as a function error rather than swallowing it.
+                from saprfclib.exceptions import AbapApplicationError
+
+                raise AbapApplicationError(
+                    message=_decode_error_text(err_bytes) or "connect-time RFC call failed"
+                )
+            if not auth_ok:
+                from saprfclib.invoke import _decode_error_text
+
+                raise ValueError(f"logon failed: {_decode_error_text(err_bytes)}")
+            # auth_ok and allow_restricted_logon: fall through and build attributes.
 
         codepage = self._codepage or ""
         unicode_mode = codepage == _CODEPAGE_UTF16LE

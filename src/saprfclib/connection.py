@@ -1774,6 +1774,7 @@ class Connection:
         transport: Transport,
         *,
         strict_params: bool = False,
+        allow_restricted_logon: bool = False,
         metadata_cache: MetadataCache | None = None,
         metadata_cache_key: str | None = None,
     ) -> None:
@@ -1782,8 +1783,9 @@ class Connection:
         # porting from pyrfc expect; set True to have call() reject an argument the
         # function interface does not declare.
         self._strict_params = strict_params
+        self._allow_restricted_logon = allow_restricted_logon
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
-        self._session = Session()
+        self._session = Session(allow_restricted_logon=allow_restricted_logon)
         self._lock = threading.Lock()
         # A descriptor describes the system, not this socket, so the cache can be
         # shared: a pool passes one in and its connections stop each paying for
@@ -1832,6 +1834,7 @@ class Connection:
         inst._async_conn = async_conn
         inst._loop_thread = loop_thread
         inst._strict_params = async_conn._strict_params
+        inst._allow_restricted_logon = async_conn._allow_restricted_logon
         inst._dropped_params_seen = async_conn._dropped_params_seen
         return inst
 
@@ -3947,6 +3950,7 @@ def connect(
     *,
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
+    allow_restricted_logon: bool = False,
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float | None = DEFAULT_READ_TIMEOUT,
@@ -4032,6 +4036,15 @@ def connect(
     superset of kwargs across differing SAP releases. Set True to raise ValueError
     instead — worth doing when a dropped argument would change the result, since the
     server has no way to tell you an argument never arrived.
+
+    ``allow_restricted_logon`` (default False) governs a logon that AUTHENTICATED
+    but whose embedded RFCPING the server rejected — typically S_RFC
+    (``RFC_NO_AUTHORITY``) for a low-privilege user (e.g. ``TMSADM``). By default
+    that raises :class:`~saprfclib.exceptions.AbapApplicationError` with the
+    server's exception, matching the reference client. Set True to return a usable
+    connection instead: authentication and function authorization are separate, and
+    the session is ready for the caller's own authorized calls. Intended for tools
+    that enumerate restricted RFC destinations (issue #38).
 
     ``trace`` attaches an :class:`~saprfclib.trace.RfcTrace`, which writes an
     SDK-format trace file of every frame. It is a parameter rather than an
@@ -4122,6 +4135,7 @@ def connect(
         conn = Connection(
             transport,  # type: ignore[arg-type]
             strict_params=strict_params,
+            allow_restricted_logon=allow_restricted_logon,
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
@@ -4145,7 +4159,7 @@ def connect(
         )
 
         # Step 1: NI version exchange on the plain inner transport.
-        _snc_sess = Session()
+        _snc_sess = Session(allow_restricted_logon=allow_restricted_logon)
         try:
             _snc_lip = _inner._sock.getsockname()[0]
         except Exception:
@@ -4169,6 +4183,7 @@ def connect(
         conn = Connection(
             transport,  # type: ignore[arg-type]
             strict_params=strict_params,
+            allow_restricted_logon=allow_restricted_logon,
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
@@ -4198,6 +4213,7 @@ def connect(
         _passwd = passwd
         _lang = lang
         _strict = strict_params
+        _allow_restricted = allow_restricted_logon
         _sysnr = int(sysnr)
         _max_retries = max_retries
         _retry_delay = retry_delay
@@ -4227,6 +4243,7 @@ def connect(
                 tid_store=_tid_store,
                 unit_store=_unit_store,
                 strict_params=_strict,
+                allow_restricted_logon=_allow_restricted,
                 metadata_cache=_metadata_cache,
                 metadata_cache_key=_metadata_cache_key,
             )
@@ -4458,17 +4475,19 @@ class AsyncConnection:
         tid_store: TidStore | None = None,
         unit_store: UnitStore | None = None,
         strict_params: bool = False,
+        allow_restricted_logon: bool = False,
         metadata_cache: MetadataCache | None = None,
         metadata_cache_key: str | None = None,
     ) -> None:
         self._transport = transport
-        self._session = Session()
+        self._session = Session(allow_restricted_logon=allow_restricted_logon)
         self._lock = asyncio.Lock()
         # Server-reported duration of the most recent call (tag 0x0667, seconds),
         # handed to CallStats by call(). None until a response carries one.
         self._last_server_duration_s: float | None = None
         # Unknown-parameter policy (issue #24) - see Connection.__init__.
         self._strict_params = strict_params
+        self._allow_restricted_logon = allow_restricted_logon
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self.metrics = ConnectionMetrics()
         # Shareable across connections to one system — see Connection.__init__.
@@ -5386,6 +5405,7 @@ async def connect_async(
     *,
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
+    allow_restricted_logon: bool = False,
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     metadata_cache: MetadataCache | None = None,
@@ -5472,6 +5492,7 @@ async def connect_async(
         tid_store=tid_store,
         unit_store=unit_store,
         strict_params=strict_params,
+        allow_restricted_logon=allow_restricted_logon,
         metadata_cache=metadata_cache,
         metadata_cache_key=metadata_cache_key,
     )
