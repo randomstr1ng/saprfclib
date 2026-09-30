@@ -1,0 +1,19 @@
+{
+  "message_type": "PING_GFI_REPLY",
+  "capture_source": "live capture 2026-09-30, RFC_PING integration run against a HoneySAP endpoint on gateway port 3300 (sysnr 00, unicode, codepage 4103). This is the server reply to the combined LOGON + RFC_GET_FUNCTION_INTERFACE(FUNCNAME=RFC_PING) frame. Captured from the pyrfc reference-client conversation (ping frame 15) so the bytes are exactly what a real NW RFC server emits; saprfclib produced the identical exchange. Sanitised preserving byte length: the GW conversation handle at [40:48] zeroed, the 16-byte 0x0514 session token zeroed, and the internal hostname 'sapnw702_PRD_00' replaced with 'sanitizedPRD_00' (same 15 chars). No NI length prefix (the transport strips the 4-byte BE prefix before the session sees the frame).",
+  "evidence": "return code 0x0420 == 0 and success marker 0x0503 present; RFC_PING declares no parameters, so the PARAMS table is empty and _parse_gfi_params_rows yields no rows. The reply therefore reaches _metadata_reply_succeeded, which must strip the 80-byte GW header (76B header + 4B RFC marker) before walking the TLV stream.",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {"offset": 0, "length": 2, "name": "gw_frame_type", "value": "0x06cb", "note": "GW/RFC data frame type; the 80-byte GW header (76B header + 4B RFC marker) precedes the TLV stream and must be stripped before parsing."},
+    {"offset": 40, "length": 8, "name": "gw_conversation_handle", "note": "sanitised: zeroed, byte length preserved."}
+  ],
+  "notes": [
+    "Regression fixture for the RFC_PING (any parameterless function) crash: the reply begins 06cb 0200 ffff (GW frame type 0x06CB). _parse_tlv fed this raw read tag=0x06cb length=0x0200 (512) and raised 'malformed TLV: tag 0x06cb length 512 exceeds remaining payload'. The fix strips the GW header first, matching _parse_gfi_params_rows which already did.",
+    "Only parameterless function modules hit this path: a function with parameters yields PARAMS rows, short-circuits before _metadata_reply_succeeded, and never triggered the bug."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "success_marker_0x0503": true,
+    "parameters_parsed": 0
+  }
+}

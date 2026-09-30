@@ -598,8 +598,19 @@ def _metadata_reply_succeeded(response: bytes) -> bool:
     0x0503 marks a result, 0x0417 marks an exception, and 0x0420 carries the
     return code. Asking those separates "this function takes no arguments" from
     "we could not read the answer", which a row count cannot.
+
+    A live reply still carries its 80-byte GW header (76B header + 4B RFC
+    marker); its first byte is 0x06, so _parse_tlv would read the header type
+    0x06CB with the following 0x0200 as a bogus tag/length and raise
+    "malformed TLV". Strip it first. _strip_gw_header is a no-op on the bare TLV
+    that the row parser and the unit tests pass, so the same call serves both.
+    This mirrors _parse_gfi_params_rows, which already strips before parsing;
+    this path was the one that forgot, so a parameterless function (RFC_PING)
+    crashed here rather than returning an empty descriptor.
+    Source: pyrfc/saprfclib RFC_PING captures, server GFI reply frame begins
+    00000203 06cb 0200 ... (NI len prefix removed by transport, GW header next).
     """
-    tags = Session._parse_tlv(response)
+    tags = Session._parse_tlv(_strip_gw_header(response))
     if 0x0417 in tags:
         return False
     rc_raw = tags.get(0x0420)
@@ -2410,7 +2421,9 @@ class Connection:
         # 0x0417 marks an exception and 0x0420 carries the return code. Ask those
         # rather than inferring from the row count.
         if _ws_pending_path and not rows:
-            _tlv_map = Session._parse_tlv(response)
+            # Strip the live GW header before walking TLV, as above: a raw reply
+            # begins 0x06CB and _parse_tlv would misread the header as a record.
+            _tlv_map = Session._parse_tlv(_strip_gw_header(response))
             _rc_raw = _tlv_map.get(0x0420) or b""
             _rc = struct.unpack(">I", _rc_raw)[0] if len(_rc_raw) == 4 else 0
             _is_exception = 0x0417 in _tlv_map
