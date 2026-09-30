@@ -81,6 +81,7 @@ from saprfclib.metadata import (
     _CHAR_LIKE_TYPES,
     _EXID_TO_RFCTYPE,
     RFCTYPE_CHAR,
+    RFCTYPE_STRING,
     RFCTYPE_STRUCTURE,
     RFCTYPE_TABLE,
     MetadataCache,
@@ -1152,6 +1153,12 @@ _DDIF_DECIMALS = slice(358, 370)
 _DDIF_INTTYPE = slice(378, 380)
 _DDIF_MIN_ROW = 380  # a row shorter than this cannot hold INTTYPE
 
+# Fixed-width text types whose Unicode byte width is 2x their character length.
+# _CHAR_LIKE_TYPES also lists RFCTYPE_STRING, but a STRING/XSTRING field is a
+# reference (a fixed handle slot, not 2x its LENG -- LENG is 0 for a string), so
+# its width comes from the DFIES INTLEN like any other non-doubled type.
+_DDIF_DOUBLED_TYPES = _CHAR_LIKE_TYPES - {RFCTYPE_STRING}
+
 
 def _slice_named_table(response: bytes, name: str) -> bytes:
     """Return the TLV bytes of one named result table, from its 0x0301 to the next.
@@ -1245,10 +1252,12 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
         ddif_rows, key=lambda r: r[1]
     ):
         rfctype = _EXID_TO_RFCTYPE[inttype]
-        if rfctype in _CHAR_LIKE_TYPES:
+        if rfctype in _DDIF_DOUBLED_TYPES:
             nuc_len = leng
             uc_len = leng * 2
         else:
+            # Binary, packed, float, int, and STRING/XSTRING (a handle slot):
+            # the byte width is unit-invariant, so INTLEN serves both.
             nuc_len = intlen
             uc_len = intlen
         fields.append(
