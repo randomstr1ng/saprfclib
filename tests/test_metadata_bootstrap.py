@@ -212,3 +212,70 @@ def test_a_reply_that_did_not_succeed_still_warns() -> None:
 
     # And a reply carrying neither marker is not evidence of success.
     assert _metadata_reply_succeeded(tr(0x0500, b"")) is False
+
+
+def test_ddif_dfies_row_layout_parses_from_capture() -> None:
+    """The DDIF_FIELDINFO_GET DFIES_TAB row layout, parsed from a live reply.
+
+    DDIF_FIELDINFO_GET is the RFC the reference library uses to resolve a DDIC
+    structure's field layout; its DFIES_TAB rows are 1350 bytes and arrive
+    compressed. This checks the byte-offset layout the parser reads: RFCDEST is a
+    CHAR32 field, so 64 UC bytes at UC offset 26 (0 + 6 + 8 + 6 + 6 for the four
+    fields before it).
+    """
+    from saprfclib.connection import _build_type_desc_from_dfies, _parse_ddif_dfies_rows
+
+    raw = (GOLDEN / "ddif_fieldinfo_rfcsi_response.bin").read_bytes()
+    rows = _parse_ddif_dfies_rows(raw)
+    assert len(rows) == 20
+
+    td = _build_type_desc_from_dfies("RFCSI", rows)
+    assert td.uc_size == 490
+    by_name = {f.name: f for f in td.fields}
+    assert by_name["RFCDEST"].uc_offset == 26
+    assert by_name["RFCDEST"].uc_length == 64
+    assert by_name["RFCIPV6ADDR"].uc_offset == 400
+
+
+def test_struct_bootstrap_resolves_rfcsi_via_ddif_fieldinfo() -> None:
+    """The whole secondary bootstrap: DDIF_FIELDINFO_GET first, layout resolved.
+
+    The reference library resolves DDIC layouts with DDIF_FIELDINFO_GET, and so
+    must we — an endpoint that answers RFC_GET_STRUCTURE_DEFINITION with an empty
+    FIELDS table left RFCSI_EXPORT (and every BAPI structure) with no layout,
+    which surfaced downstream as IncompleteDescriptorError. Driving the real
+    captured reply proves the DDIF path resolves the 20 RFCSI fields, and that
+    the request that went out was DDIF_FIELDINFO_GET.
+    """
+    reply = (GOLDEN / "ddif_fieldinfo_rfcsi_response.bin").read_bytes()
+    conn = _conn_with(reply)
+
+    td = conn._call_struct_bootstrap("RFCSI")
+
+    assert td.name == "RFCSI"
+    assert len(td.fields) == 20
+    assert td.uc_size == 490
+    assert [f.name for f in td.fields][:2] == ["RFCPROTO", "RFCCHARTYP"]
+
+    sent = b"".join(conn._transport.sent)  # type: ignore[attr-defined]
+    assert "DDIF_FIELDINFO_GET".encode("utf-16-le") in sent
+    assert "RFC_GET_STRUCTURE_DEFINITION".encode("utf-16-le") not in sent
+
+
+def test_struct_bootstrap_falls_back_to_rsd_when_ddif_is_empty() -> None:
+    """When DDIF returns no field rows, fall back to RFC_GET_STRUCTURE_DEFINITION.
+
+    Both replies here are the endpoint's empty success (rc 0, no FIELDS table), so
+    the fallback is attempted and, being empty too, the layout genuinely cannot be
+    resolved and 'no DFIES rows' is raised. The point is that the fallback ran:
+    both function names appear on the wire, DDIF first.
+    """
+    empty = (GOLDEN / "struct_definition_empty_response.bin").read_bytes()
+    conn = _conn_with(empty, empty)
+
+    with pytest.raises(ValueError, match="no DFIES rows"):
+        conn._call_struct_bootstrap("RFCSI")
+
+    sent = b"".join(conn._transport.sent)  # type: ignore[attr-defined]
+    assert "DDIF_FIELDINFO_GET".encode("utf-16-le") in sent
+    assert "RFC_GET_STRUCTURE_DEFINITION".encode("utf-16-le") in sent

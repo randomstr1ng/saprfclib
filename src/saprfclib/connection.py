@@ -1087,6 +1087,162 @@ def _build_type_desc_from_dfies(tabname: str, dfies_rows: list[tuple[Any, ...]])
     return TypeDesc(name=tabname, fields=fields, nuc_size=nuc_size, uc_size=uc_size)
 
 
+# --------------------------------------------------------------------------- #
+# DDIC layout via DDIF_FIELDINFO_GET (META-04, reference-lib path)
+#
+# The NW RFC reference library resolves a DDIC structure's field layout with
+# DDIF_FIELDINFO_GET, not RFC_GET_STRUCTURE_DEFINITION. Both exist; the
+# reference client (pyrfc / libsapnwrfc 750 PL18) calls DDIF_FIELDINFO_GET, and
+# some servers -- including the HoneySAP emulator this was found against --
+# answer RFC_GET_STRUCTURE_DEFINITION with rc 0 and an *empty* FIELDS table
+# while DDIF_FIELDINFO_GET returns the real fields. Using DDIF matches the
+# reference behaviour and works where RFC_GET_STRUCTURE_DEFINITION comes back
+# empty; RFC_GET_STRUCTURE_DEFINITION is kept as a fallback.
+#
+# DFIES_TAB row layout (UC mode, wire-derived from a live DDIF_FIELDINFO_GET
+# reply for TABNAME=RFCSI and verified end to end: the resulting TypeDesc
+# decodes the RFCSI_EXPORT value of a live RFC_SYSTEM_INFO reply correctly). The
+# row is 1350 bytes of UTF-16LE DFIES columns; only the columns needed to place
+# a field are read. Offsets are byte offsets into the row:
+#   [60:120]   FIELDNAME  C(30)
+#   [122:130]  POSITION   N(4)   1-based field index (as text)
+#   [130:142]  OFFSET     N(6)   UC byte offset of the field in the structure
+#   [334:346]  INTLEN     N(6)   UC byte length of the field (= 2*LENG for char)
+#   [358:370]  DECIMALS   N(6)
+#   [378:380]  INTTYPE    C(1)   ABAP internal type code, same alphabet as the
+#                                DFIES EXID that _EXID_TO_RFCTYPE already maps
+# The server sends UC OFFSET and INTLEN directly, so no NUC arithmetic is needed
+# for a Unicode connection; _build_type_desc_from_dfies derives the NUC values.
+# Source: live DDIF_FIELDINFO_GET(RFCSI) capture 2026-09-30; golden fixture
+# tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin.
+# --------------------------------------------------------------------------- #
+
+_DDIF_FIELDNAME = slice(60, 120)
+_DDIF_POSITION = slice(122, 130)
+_DDIF_UC_OFFSET = slice(130, 142)
+_DDIF_UC_INTLEN = slice(334, 346)
+_DDIF_DECIMALS = slice(358, 370)
+_DDIF_INTTYPE = slice(378, 380)
+_DDIF_MIN_ROW = 380  # a row shorter than this cannot hold INTTYPE
+
+
+def _slice_named_table(response: bytes, name: str) -> bytes:
+    """Return the TLV bytes of one named result table, from its 0x0301 to the next.
+
+    A DDIF_FIELDINFO_GET reply carries more than one table (DFIES_TAB and
+    FIXED_VALUES), so the shared _table_row_buffers walker -- which keys off the
+    last 0x0302 stride and every 0x0305 chunk it sees -- would mix them: the
+    empty FIXED_VALUES 0x0302 overwrites the DFIES_TAB row count. Cutting the
+    single table's byte range out first keeps that walker correct without
+    teaching it about table names. The slice starts after the 0x0301 name record
+    and ends at the next 0x0301 (start of the following table) or the end of the
+    stream, whichever comes first.
+    """
+    pos, n = 0, len(response)
+    start: int | None = None
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", response, pos)
+        header = pos
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                break
+            length = struct.unpack_from(">I", response, pos)[0]
+            pos += 4
+        if pos + length > n:
+            break
+        value = response[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", response, pos)[0] == tag:
+            pos += 2
+        if tag == 0x0301:
+            current = value.decode("utf-16-le", errors="replace").rstrip("\x00 ")
+            if current == name:
+                start = pos
+            elif start is not None:
+                return response[start:header]
+    return response[start:] if start is not None else b""
+
+
+def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
+    """Parse the DFIES_TAB rows of a DDIF_FIELDINFO_GET reply into layout tuples.
+
+    Returns the same (fieldname, position, uc_offset, uc_intlen, decimals, exid)
+    shape as _parse_dfies_rows, so _build_type_desc_from_dfies consumes either.
+    The type code read here is the DFIES INTTYPE column, which uses the same
+    single-character alphabet as the EXID that _EXID_TO_RFCTYPE already maps
+    (confirmed for CHAR against RFCSI); a row whose INTTYPE is not in that map is
+    skipped, exactly as _parse_dfies_rows skips an unknown EXID.
+    """
+    body = _strip_gw_header(response)
+    segment = _slice_named_table(body, "DFIES_TAB")
+    rows: list[tuple[Any, ...]] = []
+    for data in _table_row_buffers(segment, "DFIES_TAB"):
+        if len(data) < _DDIF_MIN_ROW:
+            continue
+        try:
+            fieldname = data[_DDIF_FIELDNAME].decode("utf-16-le").rstrip(" \x00")
+            position = int(data[_DDIF_POSITION].decode("utf-16-le").strip() or "0")
+            uc_offset = int(data[_DDIF_UC_OFFSET].decode("utf-16-le").strip() or "0")
+            uc_intlen = int(data[_DDIF_UC_INTLEN].decode("utf-16-le").strip() or "0")
+            decimals = int(data[_DDIF_DECIMALS].decode("utf-16-le").strip() or "0")
+            inttype = data[_DDIF_INTTYPE].decode("utf-16-le").rstrip(" \x00")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not fieldname or inttype not in _EXID_TO_RFCTYPE:
+            continue
+        rows.append((fieldname, position, uc_offset, uc_intlen, decimals, inttype))
+    return rows
+
+
+def _build_ddif_fieldinfo_desc(unicode_mode: bool) -> FunctionDesc:
+    """The DDIF_FIELDINFO_GET interface, hardcoded to break the bootstrap cycle.
+
+    Mirrors the reference client's call byte-for-byte in tag order: the three
+    returned tables/structures are declared with 0x0205 (DDOBJTYPE, DFIES_TAB,
+    FIXED_VALUES), then the importing scalars carry values -- ALL_TYPES='X' asks
+    the server to expand substructures, and TABNAME names the type to resolve.
+    FIELDNAME empty means "the whole structure". Source: live DDIF_FIELDINFO_GET
+    request capture 2026-09-30 (pyrfc reference client).
+    """
+
+    def _f(name: str, direction: int, uc_length: int) -> FieldDesc:
+        return FieldDesc(
+            name=name,
+            rfctype=RFCTYPE_CHAR,
+            nuc_length=uc_length // 2,
+            nuc_offset=0,
+            uc_length=uc_length,
+            uc_offset=0,
+            decimals=0,
+            unicode_mode=unicode_mode,
+            direction=direction,
+        )
+
+    return FunctionDesc(
+        name="DDIF_FIELDINFO_GET",
+        parameters=[
+            # 0x0205 declarations, in the reference client's order.
+            _f("DDOBJTYPE", RFC_EXPORT, 12),
+            _f("DFIES_TAB", RFC_EXPORT, 0),
+            _f("FIXED_VALUES", RFC_EXPORT, 0),
+            # 0x0201/0x0203 importing values, in the reference client's order.
+            _f("ALL_TYPES", RFC_IMPORT, 2),
+            _f("FIELDNAME", RFC_IMPORT, 60),
+            _f("GROUP_NAMES", RFC_IMPORT, 2),
+            _f("LANGU", RFC_IMPORT, 2),
+            _f("TABNAME", RFC_IMPORT, 60),
+        ],
+    )
+
+
+def _ddif_fieldinfo_params(tabname: str) -> dict[str, Any]:
+    """Importing values for DDIF_FIELDINFO_GET: 'X' to expand, the type name, blanks."""
+    return {"ALL_TYPES": "X", "FIELDNAME": "", "GROUP_NAMES": "", "LANGU": "", "TABNAME": tabname}
+
+
 class _SyncToAsyncTransport:
     """Async-seam shim wrapping a sync Transport (or MockTransport in tests).
 
@@ -2496,13 +2652,40 @@ class Connection:
 
         return FunctionDesc(name=func_name.upper(), parameters=parameters)
 
+    def _struct_via_ddif(self, tabname: str, unicode_mode: bool) -> TypeDesc | None:
+        """Resolve a DDIC type's layout via DDIF_FIELDINFO_GET (the reference path).
+
+        Returns a TypeDesc, or None when the reply carried no usable field rows so
+        the caller can fall back to RFC_GET_STRUCTURE_DEFINITION. Sends over the
+        classic invoke path only; the wRFC path is left on the fallback because it
+        has no DDIF capture behind it. OSError/EOFError propagate.
+        """
+        desc = _build_ddif_fieldinfo_desc(unicode_mode)
+        request_tlv = build_invoke_request(
+            "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
+        )
+        handle = self._session.handle or b"        "
+        frame = self._build_invoke_frame(handle, request_tlv)
+        self._send_invoke_frame(frame)
+        response = _join_response_frames(self._transport.recv_message, "DDIF_FIELDINFO_GET")
+        raise_for_rfc_error(_strip_gw_header(response))
+        rows = _parse_ddif_dfies_rows(response)
+        if not rows:
+            return None
+        return _build_type_desc_from_dfies(tabname, rows)
+
     def _call_struct_bootstrap(self, tabname: str) -> TypeDesc:
-        """Fetch RFCTEST field layout via RFC_GET_STRUCTURE_DEFINITION (META-04).
+        """Fetch a DDIC type's field layout for a STRUCTURE/TABLE parameter (META-04).
 
         Secondary bootstrap called from _call_bootstrap when GFI returns STRUCTURE
-        params (EXID='u'). Uses a hardcoded FunctionDesc to avoid the chicken-and-egg
+        params (EXID='u'). Uses hardcoded FunctionDescs to avoid the chicken-and-egg
         problem. Not protected by the in-flight lock (always called from _call_bootstrap
         which is called from call() which already holds the lock).
+
+        The reference library resolves DDIC layouts with DDIF_FIELDINFO_GET, so we
+        try that first (classic path). RFC_GET_STRUCTURE_DEFINITION is kept as a
+        fallback for connections where DDIF is unavailable or answers with an ABAP
+        exception, and is the only path used over wRFC.
 
         RFC_GET_STRUCTURE_DEFINITION interface (confirmed 2026-06-29 via live GFI):
           TABNAME (I, CHAR C30 = 60B UC) — structure name to look up
@@ -2516,6 +2699,25 @@ class Connection:
         """
         attrs = self._session.attributes
         unicode_mode = attrs.unicode_mode if attrs else True
+
+        if not self._is_ws():
+            try:
+                td = self._struct_via_ddif(tabname, unicode_mode)
+            except (AbapApplicationError, AbapSystemFailure) as exc:
+                _logger.debug(
+                    "DDIF_FIELDINFO_GET for %r raised %s; falling back to "
+                    "RFC_GET_STRUCTURE_DEFINITION",
+                    tabname,
+                    exc,
+                )
+            else:
+                if td is not None:
+                    return td
+                _logger.debug(
+                    "DDIF_FIELDINFO_GET for %r returned no field rows; falling back "
+                    "to RFC_GET_STRUCTURE_DEFINITION",
+                    tabname,
+                )
 
         # Hardcoded FunctionDesc for RFC_GET_STRUCTURE_DEFINITION:
         # TABNAME=IMPORT CHAR(30), FIELDS=EXPORT TABLE (get 0x0205 decl so server returns it).
@@ -4377,10 +4579,47 @@ class AsyncConnection:
 
         return FunctionDesc(name=func_name.upper(), parameters=parameters)
 
+    async def _struct_via_ddif(self, tabname: str, unicode_mode: bool) -> TypeDesc | None:
+        """Async DDIF_FIELDINFO_GET resolution; None when the reply had no field rows."""
+        desc = _build_ddif_fieldinfo_desc(unicode_mode)
+        request_tlv = build_invoke_request(
+            "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
+        )
+        handle = self._session.handle or b"        "
+        frame = Connection._build_invoke_frame(handle, request_tlv)
+        await self._transport.send_message(frame)
+        response = await self._transport.recv_message()
+        raise_for_rfc_error(_strip_gw_header(response))
+        rows = _parse_ddif_dfies_rows(response)
+        if not rows:
+            return None
+        return _build_type_desc_from_dfies(tabname, rows)
+
     async def _call_struct_bootstrap(self, tabname: str) -> TypeDesc:
-        """Async RFC_GET_STRUCTURE_DEFINITION bootstrap (META-04, classic path)."""
+        """Async DDIC layout bootstrap (META-04, classic path).
+
+        DDIF_FIELDINFO_GET first (the reference library's path), then
+        RFC_GET_STRUCTURE_DEFINITION as a fallback — see the sync twin for why.
+        """
         attrs = self._session.attributes
         unicode_mode = attrs.unicode_mode if attrs else True
+
+        try:
+            td = await self._struct_via_ddif(tabname, unicode_mode)
+        except (AbapApplicationError, AbapSystemFailure) as exc:
+            _logger.debug(
+                "DDIF_FIELDINFO_GET for %r raised %s; falling back to RFC_GET_STRUCTURE_DEFINITION",
+                tabname,
+                exc,
+            )
+        else:
+            if td is not None:
+                return td
+            _logger.debug(
+                "DDIF_FIELDINFO_GET for %r returned no field rows; falling back "
+                "to RFC_GET_STRUCTURE_DEFINITION",
+                tabname,
+            )
 
         rsd_desc = FunctionDesc(
             name="RFC_GET_STRUCTURE_DEFINITION",

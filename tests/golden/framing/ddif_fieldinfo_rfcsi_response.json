@@ -1,0 +1,27 @@
+{
+  "message_type": "DDIF_FIELDINFO_GET_RESPONSE",
+  "capture_source": "live capture 2026-09-30 against a HoneySAP endpoint on gateway port 3300 (sysnr 00, unicode, codepage 4103), taken from the pyrfc reference-client conversation (system-info run, frame 19). It is the reply to DDIF_FIELDINFO_GET(TABNAME=RFCSI, ALL_TYPES=X), the call the NW RFC reference library uses to resolve a DDIC structure's field layout. Sanitised preserving byte length: the GW conversation handle at [40:48] zeroed and the 16-byte 0x0514 session token zeroed. No NI length prefix (the transport strips the 4-byte BE prefix before the session sees the frame).",
+  "evidence": "return code 0x0420 == 0; the DFIES_TAB table declares row_size 1350 x row_count 20 (0x0302 = 00000546 00000014) and the 0x0305 SAPCOMPRESS/LZH stream decompresses to exactly 27000 bytes = 1350 x 20. The 20 rows parse to the 20 RFCSI fields, and the TypeDesc built from them (UC size 490) decodes the RFCSI_EXPORT value of the live RFC_SYSTEM_INFO reply correctly (RFCPROTO=011, RFCCHARTYP=4103, RFCSYSID=PRD, RFCSAPRL=752, RFCOPSYS=Linux, RFCKERNRL=720, RFCHOST2=sapnw702).",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {"offset": 0, "length": 2, "name": "gw_frame_type", "value": "0x06cb", "note": "GW/RFC data frame type; 80-byte GW header precedes the TLV stream."},
+    {"offset": 40, "length": 8, "name": "gw_conversation_handle", "note": "sanitised: zeroed, byte length preserved."}
+  ],
+  "notes": [
+    "DFIES_TAB arrives COMPRESSED as 0x0305 fragments (8 x 250B) that concatenate into one SAPCOMPRESS LZH stream; the 8-byte wrapper is [4B unidentified][4B BE compressed length], then [4B LE uncompressed length = 27000][algo 0x12 = LZH][magic 1f 9d]. This is the same compressed-table shape as the GFI PARAMS table.",
+    "The reply carries two tables, DFIES_TAB and FIXED_VALUES; FIXED_VALUES declares row_size 0xa6 with row_count 0. The DFIES_TAB byte range must be sliced out before the shared row walker runs, or the empty FIXED_VALUES 0x0302 overwrites the DFIES_TAB row count.",
+    "DFIES row layout (1350B UTF-16LE, byte offsets): FIELDNAME [60:120] C(30); POSITION [122:130] N(4); UC OFFSET [130:142] N(6); UC INTLEN [334:346] N(6); DECIMALS [358:370] N(6); INTTYPE [378:380] C(1). INTTYPE uses the same alphabet as the DFIES EXID that _EXID_TO_RFCTYPE maps.",
+    "Reference library uses DDIF_FIELDINFO_GET for DDIC layout; RFC_GET_STRUCTURE_DEFINITION is a different RFC that this HoneySAP endpoint answers with rc 0 and an empty FIELDS table. saprfclib now tries DDIF_FIELDINFO_GET first and falls back to RFC_GET_STRUCTURE_DEFINITION."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "table_name": "DFIES_TAB",
+    "row_size": 1350,
+    "row_count": 20,
+    "sapcompress_algo": "LZH",
+    "uncompressed_length": 27000,
+    "fields_parsed": 20,
+    "typedesc_uc_size": 490,
+    "first_fields": ["RFCPROTO", "RFCCHARTYP", "RFCINTTYP", "RFCFLOTYP", "RFCDEST"]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "message_type": "STRUCT_DEFINITION_EMPTY_RESPONSE",
+  "capture_source": "live capture 2026-09-30 against a HoneySAP endpoint on gateway port 3300, from the saprfclib system-info run (frame 19). It is the reply to RFC_GET_STRUCTURE_DEFINITION(TABNAME=RFCSI): return code 0 but no FIELDS table at all. Sanitised preserving byte length: GW conversation handle at [40:48] zeroed and 16-byte 0x0514 session token zeroed. No NI length prefix.",
+  "evidence": "0x0420 == 0 (success) yet the TLV stream carries no 0x0301 'FIELDS' table and no 0x0302/0x0305 records, so _parse_dfies_rows and _parse_ddif_dfies_rows both yield zero rows. This is why saprfclib produced 'no DFIES rows'/type_desc None until it was taught to resolve DDIC layout via DDIF_FIELDINFO_GET.",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {"offset": 0, "length": 2, "name": "gw_frame_type", "value": "0x06cb", "note": "GW/RFC data frame type; 80-byte GW header precedes the TLV stream."},
+    {"offset": 40, "length": 8, "name": "gw_conversation_handle", "note": "sanitised: zeroed, byte length preserved."}
+  ],
+  "notes": [
+    "This endpoint answers RFC_GET_STRUCTURE_DEFINITION with an empty success, whereas it answers DDIF_FIELDINFO_GET (the reference library's DDIC-layout RFC) with the real field rows. Used to exercise the DDIF -> RFC_GET_STRUCTURE_DEFINITION fallback: when DDIF yields nothing the code falls back, and when the fallback is also empty it raises 'no DFIES rows'."
+  ],
+  "expected_parse": {
+    "return_code": 0,
+    "fields_parsed": 0
+  }
+}

@@ -950,10 +950,69 @@ Consequence of getting this wrong, both directions: the request emits the scalar
 the response decodes concatenated row bytes as a single work area, silently dropping every
 row past the first.
 
-A TABLES param also needs its row layout attached — the secondary
-`RFC_GET_STRUCTURE_DEFINITION` lookup keyed on `TABNAME` runs for `RFCTYPE_TABLE` as well as
-`RFCTYPE_STRUCTURE`, otherwise the descriptor reaches the encoder with `type_desc=None` and
-no rows can be laid out.
+A TABLES param also needs its row layout attached — the secondary DDIC-layout lookup keyed on
+`TABNAME` runs for `RFCTYPE_TABLE` as well as `RFCTYPE_STRUCTURE`, otherwise the descriptor
+reaches the encoder with `type_desc=None` and no rows can be laid out.
+
+### DDIC layout resolution: `DDIF_FIELDINFO_GET`, not `RFC_GET_STRUCTURE_DEFINITION` — CONFIRMED (2026-09-30)
+
+The reference library (NW RFC SDK 750 PL18 / pyrfc) resolves a DDIC structure or table's
+field layout with **`DDIF_FIELDINFO_GET`**, keyed on `TABNAME`. `RFC_GET_STRUCTURE_DEFINITION`
+is a *different* RFC; both exist in the SDK (`DDIF_FIELDINFO_GET_v462_6` and
+`RFC_GET_STRUCTURE_DEFINITION_v3` appear as C++ metadata-query classes in `libsapnwrfc.so`),
+but the reference client calls DDIF. This matters for interoperability: at least one server
+(the HoneySAP emulator this was found against) answers `RFC_GET_STRUCTURE_DEFINITION` with
+return code 0 and an **empty** `FIELDS` table, while answering `DDIF_FIELDINFO_GET` with the
+real fields. A client relying on `RFC_GET_STRUCTURE_DEFINITION` there gets no layout and
+fails downstream with `type_desc=None` ("no DFIES rows" / `IncompleteDescriptorError`).
+
+`saprfclib` therefore tries `DDIF_FIELDINFO_GET` first (classic path) and falls back to
+`RFC_GET_STRUCTURE_DEFINITION` when DDIF is unavailable or answers with an ABAP exception.
+
+**Request** (classic invoke TLV, byte-identical to the reference client):
+
+```
+0502                                request marker
+000b  UTF-16LE  "754"               release
+0102  UTF-16LE  "DDIF_FIELDINFO_GET" function name
+0512                                marker
+0205  UTF-16LE  "DDOBJTYPE"         EXPORT declarations, in this order
+0205  UTF-16LE  "DFIES_TAB"
+0205  UTF-16LE  "FIXED_VALUES"
+0201/0203  "ALL_TYPES"   = "X"      IMPORT values, in this order
+0201/0203  "FIELDNAME"   = ""       (blank C30 → the whole structure)
+0201/0203  "GROUP_NAMES" = ""
+0201/0203  "LANGU"       = ""
+0201/0203  "TABNAME"     = <type>   (C30, e.g. "RFCSI")
+ffff
+```
+
+**Response** — the field rows come back in the `DFIES_TAB` table, **compressed** the same way
+the GFI `PARAMS` table is: `0x0302` declares `row_size` × `row_count`, the `0x0305` fragments
+concatenate into one SAPCOMPRESS/LZH stream, and the decompressed blob is sliced by the row
+count. For `RFCSI`: `row_size` 1350, `row_count` 20, decompressing to 27000 bytes. The reply
+also carries a second table (`FIXED_VALUES`), so the `DFIES_TAB` byte range must be sliced out
+(by its `0x0301` name record) before the shared row walker runs — otherwise the empty
+`FIXED_VALUES` `0x0302` overwrites the `DFIES_TAB` row count.
+
+**DFIES row layout** (1350 B, UTF-16LE; byte offsets into the row):
+
+| offset | column | width | meaning |
+|--------|--------|-------|---------|
+| 60 | `FIELDNAME` | C(30) | field name |
+| 122 | `POSITION` | N(4) | 1-based field index |
+| 130 | `OFFSET` | N(6) | **Unicode byte offset** of the field in the structure |
+| 334 | `INTLEN` | N(6) | **Unicode byte length** of the field (= 2 × char length for CHAR) |
+| 358 | `DECIMALS` | N(6) | decimals |
+| 378 | `INTTYPE` | C(1) | ABAP internal type code — same alphabet as the DFIES `EXID` that `_EXID_TO_RFCTYPE` maps |
+
+The server sends UC `OFFSET`/`INTLEN` directly, so no NUC arithmetic is needed on a Unicode
+connection; `_build_type_desc_from_dfies` derives the NUC values. End-to-end verified: the
+`TypeDesc` built from the `RFCSI` DFIES rows (UC size 490) decodes the `RFCSI_EXPORT` value of
+a live `RFC_SYSTEM_INFO` reply correctly. Golden fixtures
+`tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin` (DDIF reply) and
+`struct_definition_empty_response.bin` (the empty `RFC_GET_STRUCTURE_DEFINITION` reply that
+triggers the fallback).
 
 #### Unset fields in a structure or table row
 
