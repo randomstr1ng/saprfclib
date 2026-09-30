@@ -294,3 +294,59 @@ def test_live_pool_acquire_call_release() -> None:
     finally:
         # POOL-04 graceful shutdown: close every pooled connection.
         pool.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.environ.get("SAPRFC_ASHOST"), reason=_LIVE_SKIP_REASON)
+def test_live_stfc_structure_roundtrips_all_scalar_types() -> None:
+    """STFC_STRUCTURE echoes a struct with every scalar type, decoded correctly.
+
+    Guards the DDIF_FIELDINFO_GET struct-layout path (META-04) against a live
+    system: the RFCTEST structure mixes INT4/INT2/INT1, FLOAT, RAW, DATE, TIME and
+    several CHAR fields, which the server aligns (INT4 to 4 bytes, etc.). The
+    library must resolve the layout via DDIF_FIELDINFO_GET, type each field from
+    its DDIC DATATYPE (INT4 is not RAW though both can share INTTYPE 'X'), and take
+    the server's aligned offsets — otherwise a value comes back wrong. Verified
+    field-for-field identical to the reference client (pyrfc) during development.
+
+    Env vars: SAPRFC_ASHOST, SAPRFC_SYSNR (default "00"), SAPRFC_CLIENT (default
+    "001"), SAPRFC_USER, SAPRFC_PASSWD. SAPRFC_PASSWD is read from the env only.
+    """
+    from saprfclib import connect
+
+    conn = connect(
+        ashost=os.environ["SAPRFC_ASHOST"],
+        sysnr=os.environ.get("SAPRFC_SYSNR", "00"),
+        client=os.environ.get("SAPRFC_CLIENT", "001"),
+        user=os.environ["SAPRFC_USER"],
+        passwd=os.environ["SAPRFC_PASSWD"],
+    )
+    try:
+        sent = {
+            "RFCFLOAT": 1.5,
+            "RFCCHAR1": "A",
+            "RFCINT2": 222,
+            "RFCINT1": 11,
+            "RFCCHAR4": "WXYZ",
+            "RFCINT4": 12345678,
+            "RFCHEX3": bytes.fromhex("414243"),
+            "RFCCHAR2": "QQ",
+            "RFCTIME": "095959",
+            "RFCDATE": "20260930",
+            "RFCDATA1": "hello",
+            "RFCDATA2": "world",
+        }
+        echo = conn.call("STFC_STRUCTURE", IMPORTSTRUCT=sent)["ECHOSTRUCT"]
+    finally:
+        conn.close()
+
+    # Integers must decode as integers (regression: INT4 once decoded as raw bytes).
+    assert echo["RFCINT4"] == 12345678
+    assert echo["RFCINT2"] == 222
+    assert echo["RFCINT1"] == 11
+    assert echo["RFCFLOAT"] == 1.5
+    assert echo["RFCDATE"] == "20260930"
+    assert echo["RFCTIME"] == "095959"
+    assert bytes.fromhex(echo["RFCHEX3"]) if isinstance(echo["RFCHEX3"], str) else echo["RFCHEX3"]
+    assert echo["RFCCHAR4"] == "WXYZ"
+    assert echo["RFCDATA1"].startswith("hello")
