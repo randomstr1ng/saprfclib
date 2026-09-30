@@ -130,6 +130,31 @@ def test_time_decode_returns_str():
     assert isinstance(result, str)
 
 
+def test_initial_date_decodes_to_empty_string():
+    """An all-zero (or blank) DATS is the ABAP initial value; surface it as "".
+
+    Matches the reference client (pyrfc): "00000000" and a blank date both decode
+    to "" so a caller can tell "no date" from a real one. Confirmed live against
+    BAPI_USER_GET_DETAIL, where an unset GLTGV came back "" from pyrfc.
+    """
+    f = _scalar_field(DATE, uc_length=16)
+    assert decode(DATE, "00000000".encode("utf-16-le"), f) == ""
+    assert decode(DATE, ("        ").encode("utf-16-le"), f) == ""
+    # A real date is untouched, including one with leading/trailing zeros.
+    assert decode(DATE, "20260930".encode("utf-16-le"), f) == "20260930"
+    assert decode(DATE, "20000101".encode("utf-16-le"), f) == "20000101"
+    # Round-trip: an empty date re-encodes and decodes back to "".
+    assert decode(DATE, encode(DATE, "", f), f) == ""
+
+
+def test_initial_time_decodes_to_empty_string():
+    """An all-zero TIMS ("000000") decodes to "", like the reference client."""
+    f = _scalar_field(TIME, uc_length=12)
+    assert decode(TIME, "000000".encode("utf-16-le"), f) == ""
+    assert decode(TIME, "095959".encode("utf-16-le"), f) == "095959"
+    assert decode(TIME, encode(TIME, "", f), f) == ""
+
+
 def test_num_zero_padded():
     f = _scalar_field(NUM, uc_length=8)  # NUM(4)
     wire = encode(NUM, "42", f)
