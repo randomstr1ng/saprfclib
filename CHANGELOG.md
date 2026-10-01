@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A multi-frame compressed TABLE is no longer truncated when a frame ends on a
+  record boundary.** `RFC_READ_TABLE` on a table whose compressed `DATA` spanned
+  several gateway frames could fail with "SAPCOMPRESS decompression failed … unexpected
+  end of compressed data" and then poison the connection. The gateway chunks a reply at
+  ~28000 payload bytes, and a compressed table serialises as fixed-width `0x0305`
+  records, so a chunk can end *exactly* between records — no mid-record overrun and no
+  `0xFFFF` terminator. `tlv_stream_status` read that as `not_tlv` (stop) instead of a
+  continuation, so the reader returned after one frame, handed the decompressor a
+  truncated stream, and left the remaining frames unread on the socket. It now reports a
+  buffer that parsed at least one whole record and ended on a clean boundary as
+  `truncated` (read on), and `not_tlv` only when nothing parsed. (#44)
+
 ## [0.1.6] - 2026-09-30
 
 The release that made DDIC structure and table metadata come back correct. 0.1.5
