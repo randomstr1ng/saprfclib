@@ -252,35 +252,55 @@ token unique to the connection in that case (`Connection._metadata_cache_key`): 
 calls on one connection still skip the round-trip, and nothing is shared between systems
 that never identified themselves.
 
-### Authentication vs. RFCPING authorization — CONFIRMED (2026-09-30, live)
+### Authentication vs. RFCPING authorization — D-38 (CONFIRMED live, 752 + 793)
 
 The logon TLV embeds `RFCPING`, so the logon response can report an error that belongs to
-that call rather than to authentication. `0x0450` (the system id) tells the two apart: it is
-present precisely when **authentication succeeded**, and the server appends the RFCPING
-outcome after it.
+that call rather than to authentication. Three outcomes must be told apart: logon succeeded,
+logon authenticated but the embedded `RFCPING` was refused, and authentication failed.
+
+**The discriminator is `0x0420` (RETURN_CODE), not `0x0450`.** The dispatcher writes `0x0420`
+only after it has *run* the embedded call — which it reaches only once the logon has
+authenticated. So its presence marks a completed logon regardless of kernel. `0x0450` cannot
+be used: a live NetWeaver 7.52 system omits it even on a fully successful logon (see the
+`0x0450`-not-guaranteed note above). An earlier rule keyed on `0x0450` and therefore
+mis-reported every 7.52 authorization denial as a generic `logon failed`; that was issue #38.
+
+Observed tag presence (live captures — `0420`=RETURN_CODE, `0417`=exception marker,
+`0450`=sys-id):
+
+| logon outcome | 0x0402 | 0x0417 | **0x0420** | 0x0450 | source |
+|---|---|---|---|---|---|
+| success | · | · | **present** | · (752) / present (793) | live 752 (NPL); `wrfc_logon_accepted` (793) |
+| authenticated, RFCPING S_RFC-denied | present | present | **present** | · (752) / present (793) | `wrfc_logon_receive_error` (793, live) |
+| authentication failed (bad password) | present | · | **absent** | · | live 752 (NPL) |
+| authentication failed (signon incomplete) | present | present | **absent** | · | `signon_incomplete_752_response` (752, live) |
 
 A user who authenticates but lacks `S_RFC` for `RFCPING` (common for restricted destination
-users such as `TMSADM`) gets a reply that carries **both** the auth tags and an ABAP
-exception:
+users such as `TMSADM`) gets a reply carrying the auth/identity tags, `0x0420`, **and** an ABAP
+exception delivered as an X-message:
 
 | tag | value |
 |-----|-------|
-| `0x0450` | `A4H` — system id (auth succeeded) |
+| `0x0420` | `0x00000000` — return code present → logon completed |
 | `0x0417` | `341` — message number / exception marker |
 | `0x0403` | `RFC_NO_AUTHORITY` — exception key |
 | `0x0415` / `0x0416` | `00` / `X` — message class / type |
 | `0x0402` | `No RFC authorization for function module RFCPING.` — message text (UTF-16LE) |
+| `0x0450` | `A4H` on 793; **absent on 752** |
 
-So the logon-response handler classifies by `0x0450`:
+So `_handle_logon_response` classifies like this:
 
-- **`0x0450` present + error** → *function-authorization* failure, not an auth failure.
-  `_handle_logon_response` raises the ABAP exception (`AbapApplicationError`, key
-  `RFC_NO_AUTHORITY`) with its real text — matching the reference client, which embeds
-  `RFCPING` too, receives the identical reply, and raises `RFC_NO_AUTHORITY` rather than
-  opening the connection. With `allow_restricted_logon=True` the session is returned instead
-  (authentication and function authorization are separate; the byte stream is in sync and the
-  caller can make its own authorized calls — issue #38).
-- **`0x0450` absent + `0x0402`** → real *authentication* failure; surfaced as `logon failed`.
+- **Any error tag (`0x0402`/`0x0417`) present** → by default raise it, classified exactly as an
+  ordinary invoke response (`raise_for_rfc_error`): the RFC_NO_AUTHORITY case surfaces as
+  `AbapApplicationError` with its real key and text. This matches the reference client, which
+  has no "logon OK vs failed" branch — it raises on any `0x401`/`0x402`/`0x403`.
+- **`allow_restricted_logon=True` *and* `0x0420` present** → the logon authenticated and only the
+  embedded `RFCPING` was refused; the byte stream is in sync and the attributes are present, so
+  the session is handed back usable (issue #38).
+- **No `0x0420` + a bare `0x0402` text** → real *authentication* failure; surfaced as
+  `logon failed`. (A `0x0417`-bearing pre-logon abort such as `CALL_FUNCTION_SIGNON_INCOMPL`
+  likewise has no `0x0420`, so `allow_restricted_logon` cannot salvage it, and it surfaces as
+  its classified ABAP exception.)
 
 The message text (`0x0402`) is UTF-16LE on a live kernel; decoding it as UTF-8 yields a
 NUL-interleaved string, so it is decoded width-aware like every other exception field.
