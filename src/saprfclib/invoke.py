@@ -1851,4 +1851,12 @@ def tlv_stream_status(tlv: bytes) -> str:
         records += 1
         if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
             pos += 2
-    return _TLV_NOT_TLV
+    # Fell off the end without a terminator. If at least one record parsed
+    # cleanly and the buffer ended exactly on a record boundary, the parser was
+    # still in sync when the data stopped -- this is a continuation frame whose
+    # GW chunk happened to end on a record boundary (a compressed TABLE's 0x0305
+    # records are fixed-width, so a 28000-byte chunk can land exactly between
+    # two of them). That is the multi-frame case and must read on, same as a
+    # mid-record split. Only a buffer that parsed NOTHING is genuinely not TLV
+    # (a CPIC refusal overruns on record zero). Issue #44.
+    return _TLV_TRUNCATED if records else _TLV_NOT_TLV

@@ -1,0 +1,31 @@
+{
+  "message_type": "MULTIFRAME_BOUNDARY_SPLIT_PART2",
+  "capture_source": "Derived from a live RFC_READ_TABLE(DD03L, ROWCOUNT=2000) response on the dev system (A4H, unicode) whose compressed DATA table spans multiple GW frames. The real joined response was re-split exactly on a 0x0305 record boundary into two GW frames, so the first frame ends cleanly between two fixed-width 0x0305 records with no 0xFFFF terminator. GW headers rebuilt: byte0=0x06, payload length at offset 56, continuation flag at offset 60 (0 on part1, 1 on part2), offset 17 = -1/500. Server->client only; no credentials.",
+  "evidence": "Reproduces issue #44: a compressed TABLE whose GW chunk ends on a 0x0305 record boundary. tlv_stream_status(part1 body) must be 'truncated' (parser in sync, more follows) so _join_response_frames reads part2; the joined body re-forms the original (53513 bytes) and the DATA table decompresses to 2048000 bytes. Before the fix part1 classified as 'not_tlv' and the reader stopped, truncating the compressed stream.",
+  "ni_header_length": 0,
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 2,
+      "name": "gw_frame_type",
+      "value": "0x06cb"
+    },
+    {
+      "offset": 56,
+      "length": 4,
+      "name": "payload_length_be"
+    },
+    {
+      "offset": 60,
+      "length": 4,
+      "name": "final_frame_flag_be",
+      "note": "0 = continuation, 1 = final"
+    }
+  ],
+  "expected_parse": {
+    "role": "part2",
+    "part1_status": "truncated",
+    "part2_status": "complete",
+    "joined_decompressed_bytes": 2048000
+  }
+}
