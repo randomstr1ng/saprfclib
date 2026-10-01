@@ -100,15 +100,19 @@ async def _stub_bootstrap(func_name: str) -> FunctionDesc:
 # A minimal well-formed success response: return code 0 and no output parameters.
 # An invoke response always carries 0x0420; a payload without it means the call was
 # aborted, and parse_invoke_response now raises rather than reporting {}.
-_EMPTY_OK_RESP: bytes = struct.pack(">HHI", 0x0420, 4, 0)
+# Every real response ends with the 0xFFFF terminator; without it a buffer that
+# parses at least one record and then ends on a record boundary now reads as a
+# continuation (issue #44), so the terminator is part of a realistic single frame.
+_TLV_TERM: bytes = struct.pack(">HH", 0xFFFF, 0)
+_EMPTY_OK_RESP: bytes = struct.pack(">HHI", 0x0420, 4, 0) + _TLV_TERM
 
 
 # Minimal TLV response bytes that trigger AbapApplicationError and AbapSystemFailure.
 # Tag 0x0417 (EXCEPTION_NUMBER) presence → AbapApplicationError.
-_ABAP_APP_RESP: bytes = struct.pack(">HH", 0x0417, 0)
+_ABAP_APP_RESP: bytes = struct.pack(">HH", 0x0417, 0) + _TLV_TERM
 
 # Tag 0x0420 (RETURN_CODE) with non-zero value → AbapSystemFailure.
-_ABAP_SYS_RESP: bytes = struct.pack(">HHI", 0x0420, 4, 1)
+_ABAP_SYS_RESP: bytes = struct.pack(">HHI", 0x0420, 4, 1) + _TLV_TERM
 
 
 # --------------------------------------------------------------------------- #

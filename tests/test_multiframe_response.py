@@ -240,3 +240,63 @@ def test_0x0302_field_order_is_width_then_count() -> None:
     resumable = struct.pack(">II", 62, 0)
     assert struct.unpack(">II", params) == (404, 3)
     assert struct.unpack(">II", resumable) == (62, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #44: a compressed TABLE whose GW chunk ends on a 0x0305 record boundary
+# --------------------------------------------------------------------------- #
+
+BSPLIT1 = GOLDEN / "multiframe_boundary_split_part1.bin"
+BSPLIT2 = GOLDEN / "multiframe_boundary_split_part2.bin"
+
+
+def test_continuation_ending_on_a_record_boundary_is_truncated_not_complete() -> None:
+    """A continuation frame can end exactly between two records (issue #44).
+
+    A compressed TABLE serializes as fixed-width 0x0305 records, so a GW chunk
+    (~28000 bytes) can end exactly on a record boundary -- the parser consumes
+    whole records and runs off the end with no 0xFFFF terminator and no mid-record
+    overrun. That is still a continuation: the parser was in sync when the data
+    stopped. It must classify as 'truncated' (read on), not 'not_tlv' (stop), or
+    the compressed stream is handed to the decompressor truncated and fails with
+    'unexpected end of compressed data', then poisons the connection.
+    """
+    assert tlv_stream_status(_body(BSPLIT1)) == "truncated"
+    assert tlv_stream_status(_body(BSPLIT2)) == "complete"
+
+
+def test_boundary_split_response_joins_and_decompresses() -> None:
+    """End to end: the two boundary-split frames join and the DATA decompresses.
+
+    Real DD03L compressed data re-split on a 0x0305 boundary. _join_response_frames
+    must read both frames; the joined body must decompress to the full table.
+    """
+    import struct as _struct
+
+    from saprfclib.connection import _join_response_frames
+    from saprfclib.invoke import decompress_table_stream
+
+    frames = iter([BSPLIT1.read_bytes(), BSPLIT2.read_bytes()])
+    joined = _join_response_frames(lambda: next(frames), "RFC_READ_TABLE")
+    assert tlv_stream_status(joined) == "complete"
+
+    pos, cur, chunks = 0, None, []
+    n = len(joined)
+    while pos + 4 <= n:
+        tag, length = _struct.unpack_from(">HH", joined, pos)
+        pos += 4
+        if tag == 0xFFFF:
+            break
+        if length == 0xFFFF:
+            length = _struct.unpack_from(">I", joined, pos)[0]
+            pos += 4
+        val = joined[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and _struct.unpack_from(">H", joined, pos)[0] == tag:
+            pos += 2
+        if tag == 0x0301:
+            cur = val.decode("utf-16-le", "replace").rstrip("\x00 ")
+        elif tag == 0x0305 and cur == "DATA":
+            chunks.append(val)
+    out = decompress_table_stream(chunks, "DATA")
+    assert len(out) == 2048000  # full table, no truncation
