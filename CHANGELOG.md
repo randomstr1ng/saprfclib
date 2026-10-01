@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-30
+
+The release that made DDIC structure and table metadata come back correct. 0.1.5
+could fetch a function's interface; 0.1.6 is about what happens when that interface
+contains a structure or a table — which is most real BAPIs — and almost every part of
+that path was returning a plausible layout that sliced the bytes wrong.
+
+The through-line is 0.1.4's and 0.1.5's again: a descriptor that is the right size and
+the wrong shape decodes every field after the first mistake into the wrong column, and
+nothing raises. These returned integers as raw bytes and halved the width of a date, on
+live systems, under a green test suite.
+
+### Added
+
+- **DDIC layout is resolved with `DDIF_FIELDINFO_GET`, matching the reference library.**
+  saprfclib fetched structure and table layouts with `RFC_GET_STRUCTURE_DEFINITION`; the
+  NW RFC SDK uses `DDIF_FIELDINFO_GET`, and some servers answer the former with return
+  code 0 and an empty `FIELDS` table while answering the latter with the real fields.
+  Against such a server every STRUCTURE parameter reached the codec with no descriptor —
+  `RFC_SYSTEM_INFO` raised `IncompleteDescriptorError`, `BAPI_USER_CREATE1` logged "no
+  DFIES rows". `DDIF_FIELDINFO_GET` is now the classic-path resolver, with
+  `RFC_GET_STRUCTURE_DEFINITION` kept as the fallback for connections where DDIF is
+  unavailable or raises (the wRFC path stays on the fallback, which has no DDIF capture
+  behind it).
+
+- **`connect(allow_restricted_logon=True)` / `connect_async(...)`.** Opt-in: return a
+  usable connection when the logon authenticated but the embedded RFCPING was
+  `S_RFC`-denied, for tools that enumerate low-privilege RFC destinations and then issue
+  their own authorized calls. Default stays `False` (raise), matching the reference
+  client.
+
+### Fixed
+
+- **Structure and table fields are typed from the DDIC `DATATYPE`, not `INTTYPE`.** On a
+  live system INT4, INT2, INT1 and RAW all report `INTTYPE 'X'`, so typing by it decoded
+  every integer as raw bytes — right width, wrong type, an INT4 back as four opaque
+  bytes. Types now come from the four-character `DATATYPE`. Integer and float fields are
+  ubiquitous in BAPI structures, so this hit most real interfaces.
+
+- **Field placement comes from the server's `OFFSET`, with real alignment.** A
+  `DDIF_FIELDINFO_GET` reply carries the placement the kernel actually uses, which is not
+  what tight packing produces: for `SYST`, `MODNO` sits at 204 (a two-byte pad to a
+  four-byte boundary) and `DEBUG` at 194. Tight packing mislaid 121 of 171 SYST fields.
+  The builder now takes the server `OFFSET`/`INTLEN` verbatim, and because the server
+  flattens nested substructures into leaf fields with absolute offsets, no client-side
+  recursion is needed. `BAPI_USER_GET_DETAIL` now decodes identically to the reference
+  client across 220 leaf fields. (#40, #41)
+
+- **Field widths come from the unit-invariant `LENG`/`INTLEN`, not the reply's per-type
+  length unit.** The first DDIF cut read `OFFSET`/`INTLEN` as Unicode bytes — true for
+  `RFCSI`, but wrong for the 35 of 36 captured DDIC types that report single-byte lengths
+  on the same connection. That produced a half-width descriptor (`BAPILOGOND` at 379
+  bytes instead of 730, its leading `DATS` 8 bytes instead of 16, violating the SAP_UC
+  rule that `RFC_DATE[8]` is 16 bytes) and mis-sliced every following field.
+
+- **`STRING`/`XSTRING` width from `INTLEN`, not `2×LENG`.** A STRING field is a reference
+  slot whose DFIES `LENG` is 0, so doubling gave it width 0 and mis-sliced any structure
+  that contains one.
+
+- **An initial `DATE`/`TIME` decodes as `""` to match the reference client.** The wire
+  never carries an empty DATS/TIMS; an unset one is all zeros, or less often all blanks.
+  The reference surfaces that as `""` so a caller can tell "no date" from a real value;
+  saprfclib returned the literal `"00000000"`. This was the last decode difference from
+  the reference on `BAPI_USER_GET_DETAIL`. (#42)
+
+- **An `S_RFC`-denied RFCPING at classic logon raises the real exception, not a garbled
+  "logon failed".** When the logon reply carried an error, `connect()` raised a generic
+  "logon failed" with a mojibake UTF-16 message, without telling a real authentication
+  failure from an authorization denial of the RFCPING the logon embeds. It now classifies
+  the two and raises `AbapApplicationError` (key `RFC_NO_AUTHORITY`) for the denial, and
+  decodes the message width-aware so a genuine auth failure is readable. (#38 — 0.1.6
+  keys this on the sys-id tag `0x0450`; see Unreleased for the NetWeaver 7.52 correction.)
+
+- **Parameterless function modules no longer crash the metadata bootstrap.** The live
+  `RFC_GET_FUNCTION_INTERFACE` reply still carries its 80-byte GW header when it reaches
+  the session, and `RFC_PING` (and any other parameterless interface) hit an unstripped
+  TLV walk and raised "malformed TLV: tag 0x06cb length 512 exceeds remaining payload".
+  The GW header is now stripped in both affected paths.
+
 ## [0.1.5] - 2026-09-18
 
 The release that came out of putting the library in front of a real integration.
