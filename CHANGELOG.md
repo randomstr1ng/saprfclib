@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffer that parsed at least one whole record and ended on a clean boundary as
   `truncated` (read on), and `not_tlv` only when nothing parsed. (#44)
 
+- **The classic-logon reply is classified by the return code (`0x0420`), not the sys-id
+  (`0x0450`) — fixes authorization denials on NetWeaver 7.52.** The 0.1.6 rule keyed
+  "authentication succeeded" on the presence of `0x0450`, but a live 7.52 system omits
+  `0x0450` even on a fully successful logon, so every 7.52 `RFC_NO_AUTHORITY` denial was
+  mis-reported as a generic "logon failed". The sys-id gate is gone: a logon error is now
+  surfaced classified by default (the reference client has no "logon OK vs failed" branch
+  — it raises on any error tag), and `allow_restricted_logon`'s salvage keys on `0x0420`,
+  which the dispatcher writes only after running the embedded call, i.e. only once the
+  logon authenticated. Confirmed on live 7.52 and against the 793 golden fixtures. (#38)
+
+### Documentation
+
+- **The `0x0101` encoding header is documented** (`docs/protocol/handshake.md`): its eight
+  bytes negotiate protocol version, integer byte-order, float format, Unicode flag and
+  codepage as independent fields, confirmed against a live 7.52 capture (byte-order
+  markers labelled `[ASSUMED]` pending a big-endian capture). Records why the library's
+  codepage-string-based Unicode/endianness model is correct for every validated 4103
+  little-endian system and why full big-endian support is deliberately deferred. (#48)
+
 ## [0.1.6] - 2026-09-30
 
 The release that made DDIC structure and table metadata come back correct. 0.1.5
