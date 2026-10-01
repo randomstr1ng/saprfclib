@@ -73,9 +73,18 @@ _TAG_KERNEL_REL = 0x0013
 _TAG_USER = 0x0150
 _TAG_CLIENT = 0x0151
 _TAG_LANGUAGE = 0x0152
-# Error indication: 0x0402 carries the error message text (absent on success).
-# Tag 0x0420 does NOT appear in live captures — using 0x0402 instead.
+# Error indication. 0x0402 carries the error message text (absent on success).
+# 0x0417 is the structured ABAP-exception marker; 0x0420 is the invoke return code.
+# The dispatcher writes 0x0420 only after it has run the embedded call, which it
+# reaches only once the logon has authenticated -- so 0x0420's presence marks a
+# completed logon. Observed present on every completed logon across both kernel
+# lines (live NetWeaver 7.52 and the golden 793 wrfc_logon_receive_error reply) and
+# absent on every auth failure (bad password live; signon_incomplete_752). This is
+# the signal 0x0450 was wrongly used for before (D-38): 7.52 omits 0x0450 even on a
+# clean logon. All three are read in _handle_logon_response.
 _TAG_ERROR_MSG = 0x0402
+_TAG_EXCEPTION_NUMBER = 0x0417
+_TAG_RETURN_CODE = 0x0420
 _TAG_TERMINATOR = 0xFFFF
 
 _TLV_HEADER = struct.Struct(">HH")  # tag (2B BE) + length (2B BE)
@@ -293,46 +302,43 @@ class Session:
         tlv_data = data[self._GW_RFC_PREAMBLE :] if is_live else data
         tags = self._parse_tlv(tlv_data)
 
-        # An error is signalled by tag 0x0402 (error message text). What KIND of
-        # error it is depends on whether the system id (0x0450) is present:
+        # A logon reply signals an error with tag 0x0402 (message text) and/or the
+        # structured ABAP-exception tags (0x0417 et al). The reference client raises
+        # on ANY such error -- it has no "logon OK vs failed" branch -- so by default
+        # we classify and raise it exactly as an ordinary invoke response is
+        # classified. The common connect-time case is S_RFC (RFC_NO_AUTHORITY) for a
+        # low-privilege user, delivered as an X-message; it must surface with its real
+        # key and text, not as a generic "logon failed" (D-38, issue #38).
         #
-        #  * 0x0450 present  -> AUTHENTICATION SUCCEEDED. The error belongs to the
-        #    RFCPING that the logon frame embeds, not to the logon. The common case
-        #    is S_RFC (RFC_NO_AUTHORITY) for a low-privilege user. The reference
-        #    client (pyrfc) raises the ABAP exception here and does not open the
-        #    connection -- verified live: it embeds RFCPING too, gets the same reply
-        #    (0x0450 + 0x0417/0x0403 RFC_NO_AUTHORITY + 0x0402), and raises
-        #    RFC_NO_AUTHORITY. So by default classify and raise that exception with
-        #    its real key/text, rather than a generic "logon failed" with a garbled
-        #    message. With allow_restricted_logon, return the usable session instead
-        #    -- the reply carries the full attributes and the byte stream is in sync,
-        #    so the caller can make its own authorized calls (issue #38).
+        # 0x0450 (sys-id) is NOT the discriminator. An earlier rule read "0x0450
+        # present == authenticated", but a live NetWeaver 7.52 capture omits 0x0450
+        # even on a fully successful logon, so that rule mis-reported every 7.52
+        # authorization denial as "logon failed". Removed.
         #
-        #  * 0x0450 absent   -> AUTHENTICATION FAILED. Surface "logon failed".
+        # allow_restricted_logon still needs to tell "authenticated, embedded RFCPING
+        # refused" (hand back a usable session) from "authentication failed" (raise).
+        # Tag 0x0420 (RETURN_CODE) separates them: the dispatcher sets it only after
+        # running the embedded call, i.e. only once the logon authenticated.
         #
         # Never echo credential tags (T-03-CRED); the decoders below read only the
         # error/attribute tags.
-        err_bytes = tags.get(_TAG_ERROR_MSG)
-        if err_bytes is not None:
-            auth_ok = bool(tags.get(_TAG_SYS_ID))  # 0x0450
-            if auth_ok and not self._allow_restricted_logon:
-                # Classify the embedded-call failure (RFC_NO_AUTHORITY etc.) the same
-                # way an ordinary invoke response is classified.
-                from saprfclib.invoke import _decode_error_text, raise_for_rfc_error
+        has_error = _TAG_EXCEPTION_NUMBER in tags or _TAG_ERROR_MSG in tags
+        if has_error:
+            from saprfclib.invoke import _decode_error_text, raise_for_rfc_error
 
+            logon_completed = _TAG_RETURN_CODE in tags  # 0x0420 set by the dispatcher
+            if not (self._allow_restricted_logon and logon_completed):
+                # Default path, and every genuine auth failure: surface the real
+                # error. raise_for_rfc_error raises the classified ABAP exception
+                # (e.g. RFC_NO_AUTHORITY) whenever the structured tags are present.
                 raise_for_rfc_error(tlv_data, _tags=tags)
-                # No structured exception tags, but an error text is present: surface
-                # it as a function error rather than swallowing it.
-                from saprfclib.exceptions import AbapApplicationError
-
-                raise AbapApplicationError(
-                    message=_decode_error_text(err_bytes) or "connect-time RFC call failed"
-                )
-            if not auth_ok:
-                from saprfclib.invoke import _decode_error_text
-
-                raise ValueError(f"logon failed: {_decode_error_text(err_bytes)}")
-            # auth_ok and allow_restricted_logon: fall through and build attributes.
+                # Only a bare 0x0402 text, no structured exception and no return code:
+                # a plain logon rejection (bad credentials). The byte stream is not in
+                # sync; fail hard.
+                raise ValueError(f"logon failed: {_decode_error_text(tags.get(_TAG_ERROR_MSG))}")
+            # allow_restricted_logon and logon_completed: authentication succeeded and
+            # the embedded RFCPING was refused. The reply carries the full attributes
+            # and the byte stream is in sync -> fall through and build a usable session.
 
         codepage = self._codepage or ""
         unicode_mode = codepage == _CODEPAGE_UTF16LE

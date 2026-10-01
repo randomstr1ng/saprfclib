@@ -41,18 +41,19 @@ def _tlv(tag: int, value: bytes) -> bytes:
 def _logon_response(rc: int = 0, *, with_sys_id: bool = True) -> bytes:
     """Build a synthetic server logon-response TLV payload (frame 15).
 
-    RE truth (Task 3 live capture): error is signaled by presence of tag 0x0402
-    (error message text).  On success, 0x0402 is absent.  Tag 0x0420 does NOT
-    appear in live logon-response captures — it is RFCPING-specific.
+    Wire truth (live captures): a successful logon carries tag 0x0420 (RETURN_CODE,
+    written by the dispatcher once it has run the embedded RFCPING) and no 0x0402; a
+    plain authentication failure carries 0x0402 (error text) and no 0x0420. 0x0420's
+    presence -- not 0x0450 -- is what marks a completed logon (D-38): NetWeaver 7.52
+    omits 0x0450 even on success.
 
-    ``with_sys_id`` controls tag 0x0450 (the SAP system id). It is present when
-    authentication SUCCEEDS (issue #38): a logon that authenticated but whose
-    embedded RFCPING was rejected still carries 0x0450, so 0x0450's presence
-    distinguishes a real auth failure from a function-authorization denial.
+    ``with_sys_id`` controls tag 0x0450 (the SAP system id). Kernel 793 sends it;
+    7.52 does not. It is kept here only to exercise attribute decoding, never the
+    success/failure decision.
     """
     parts: list[bytes] = []
     if with_sys_id:
-        parts.append(_tlv(0x0450, b"A4H"))  # SAP System ID (present when auth OK)
+        parts.append(_tlv(0x0450, b"A4H"))  # SAP System ID (793 sends it; 7.52 omits)
     parts += [
         _tlv(0x0452, b"00"),  # System number
         _tlv(0x0453, b"vhcala4hci"),  # Application server host
@@ -63,33 +64,44 @@ def _logon_response(rc: int = 0, *, with_sys_id: bool = True) -> bytes:
         _tlv(0x0152, b"E"),  # Language
     ]
     if rc != 0:
-        parts.append(_tlv(0x0402, f"logon error rc={rc}".encode()))  # error text
+        # Plain auth rejection: error text, no return code (the dispatcher never ran).
+        parts.append(_tlv(0x0402, f"logon error rc={rc}".encode()))
+    else:
+        # Completed logon: the dispatcher ran the embedded call and set 0x0420.
+        parts.append(_tlv(0x0420, struct.pack(">I", 0)))
     parts.append(_tlv(0xFFFF, b""))  # Terminator
     return b"".join(parts)
 
 
-def _authz_denied_logon_response() -> bytes:
+def _authz_denied_logon_response(*, with_sys_id: bool = True) -> bytes:
     """A logon reply that AUTHENTICATED but whose embedded RFCPING was S_RFC-denied.
 
-    Byte-shaped after a live capture (issue #38): the system id (0x0450) is present
-    alongside the ABAP exception tags — 0x0417 message number, 0x0403 exception key
+    Byte-shaped after live captures (issue #38): the completed logon carries tag
+    0x0420 (RETURN_CODE, written once the dispatcher ran the RFCPING) alongside the
+    ABAP exception tags — 0x0417 message number, 0x0403 exception key
     RFC_NO_AUTHORITY, 0x0415/0x0416 message class/type, and 0x0402 the message text.
+
+    ``with_sys_id`` toggles tag 0x0450. Kernel 793 includes it; NetWeaver 7.52 omits
+    it even here, which is exactly the shape that broke the old 0x0450-based rule
+    (D-38). 0x0420 marks the completed logon in both shapes.
     """
-    return b"".join(
-        [
-            _tlv(0x0450, b"A4H"),  # sys id present -> authentication succeeded
-            _tlv(0x0452, b"00"),
-            _tlv(0x0453, b"vhcala4hci"),
-            _tlv(0x0012, b"758"),
-            _tlv(0x0013, b"793"),
-            _tlv(0x0415, b"00"),  # message class
-            _tlv(0x0416, b"X"),  # message type
-            _tlv(0x0417, b"341"),  # message number (also the exception marker)
-            _tlv(0x0403, b"RFC_NO_AUTHORITY"),  # exception key
-            _tlv(0x0402, b"No RFC authorization for function module RFCPING."),
-            _tlv(0xFFFF, b""),
-        ]
-    )
+    parts: list[bytes] = []
+    if with_sys_id:
+        parts.append(_tlv(0x0450, b"A4H"))  # 793 sends it; 7.52 omits it
+    parts += [
+        _tlv(0x0452, b"00"),
+        _tlv(0x0453, b"vhcala4hci"),
+        _tlv(0x0012, b"758"),
+        _tlv(0x0013, b"793"),
+        _tlv(0x0420, struct.pack(">I", 0)),  # return code present -> logon completed
+        _tlv(0x0415, b"00"),  # message class
+        _tlv(0x0416, b"X"),  # message type
+        _tlv(0x0417, b"341"),  # message number (also the exception marker)
+        _tlv(0x0403, b"RFC_NO_AUTHORITY"),  # exception key
+        _tlv(0x0402, b"No RFC authorization for function module RFCPING."),
+        _tlv(0xFFFF, b""),
+    ]
+    return b"".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +179,12 @@ def _drive_to_logon(sess: Session) -> None:
 
 
 def test_authentication_failure_raises_logon_failed() -> None:
-    """No system id (0x0450) + an error text (0x0402) is a real auth failure."""
+    """An error text (0x0402) with no return code (0x0420) is a real auth failure.
+
+    No 0x0420 means the dispatcher never ran the embedded call, i.e. the logon did
+    not authenticate. With only a bare message and no structured exception, this is a
+    plain credential rejection and surfaces as "logon failed".
+    """
     sess = Session()
     _drive_to_logon(sess)
     with pytest.raises(ValueError, match="logon failed"):
@@ -210,6 +227,37 @@ def test_allow_restricted_logon_opens_despite_authz_denial() -> None:
     assert sess.state is SessionState.READY
     assert sess.attributes is not None
     assert sess.attributes.sys_id == "A4H"
+
+
+def test_authz_denied_without_sys_id_still_classified() -> None:
+    """NetWeaver 7.52 omits 0x0450 even on an authenticated-but-denied reply.
+
+    Issue #38 / D-38: classification must not depend on 0x0450. A reply that carries
+    0x0420 (logon completed) plus the RFC_NO_AUTHORITY exception tags but NO 0x0450 --
+    the live 7.52 shape -- must still raise the real ABAP exception by default, not a
+    generic "logon failed".
+    """
+    from saprfclib.exceptions import AbapApplicationError
+
+    sess = Session()
+    _drive_to_logon(sess)
+    with pytest.raises(AbapApplicationError) as ei:
+        sess.feed(_authz_denied_logon_response(with_sys_id=False))
+    assert ei.value.key == "RFC_NO_AUTHORITY"
+    assert sess.state is not SessionState.READY
+
+
+def test_allow_restricted_logon_without_sys_id_opens() -> None:
+    """allow_restricted_logon salvages the 7.52 shape too (no 0x0450).
+
+    The salvage decision keys on 0x0420 (logon completed), so a 7.52 reply that omits
+    0x0450 but authenticated and was S_RFC-denied still reaches READY.
+    """
+    sess = Session(allow_restricted_logon=True)
+    _drive_to_logon(sess)
+    sess.feed(_authz_denied_logon_response(with_sys_id=False))
+    assert sess.state is SessionState.READY
+    assert sess.attributes is not None
 
 
 def test_feed_before_start_raises() -> None:
