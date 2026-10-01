@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-01
+
+Two field-reported interop bugs, both the shape the last two releases kept turning up:
+a failure that returned wrong data or the wrong error instead of raising. One came
+back with a downstream capture, so it ships with the exact failing bytes as a golden
+fixture.
+
+The multi-frame fix is the one that was corrupting results. A compressed table large
+enough to span several gateway frames was truncated whenever a frame happened to end on
+a record boundary — it looked like the end of the stream when it was the middle — which
+surfaced as a decompression error and a poisoned connection rather than a short read.
+The logon fix removes a system-identification assumption that does not hold on NetWeaver
+7.52, where an RFC authorization denial was being reported as a failed logon.
+
 ### Fixed
 
 - **A multi-frame compressed TABLE is no longer truncated when a frame ends on a
@@ -1522,7 +1536,9 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.2...v0.1.3
