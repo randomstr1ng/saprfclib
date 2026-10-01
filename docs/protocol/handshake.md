@@ -252,6 +252,16 @@ token unique to the connection in that case (`Connection._metadata_cache_key`): 
 calls on one connection still skip the round-trip, and nothing is shared between systems
 that never identified themselves.
 
+This matches the reference client, which populates its `sysId` attribute from the same
+sys-id tag and therefore also reports it empty on a 7.52 logon that omits it — confirmed
+live. The reference does split the instance name in `0x0008` into an internal SID/sysnr
+(last two `_`-separated tokens, fixed-width, unvalidated) for routing and trace identity,
+but it keeps that internal and never surfaces it as the connection's `sys_id`; so this
+library does not derive one either. A caller that genuinely needs the SID on such a system
+should read it from the authoritative source — `RFC_SYSTEM_INFO`'s `RFCSYSID` (confirmed
+`"NPL"` live, with `RFCDEST` equal to the `0x0008` instance name) — and treat it as a
+derived value from an explicit call, not a logon attribute.
+
 ### The `0x0101` encoding header — CONFIRMED (live 7.52) + `[ASSUMED]` byte-order
 
 The logon response carries an 8-byte **`0x0101`** element whose value negotiates the
