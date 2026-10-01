@@ -300,3 +300,67 @@ def test_boundary_split_response_joins_and_decompresses() -> None:
             chunks.append(val)
     out = decompress_table_stream(chunks, "DATA")
     assert len(out) == 2048000  # full table, no truncation
+
+
+# --------------------------------------------------------------------------- #
+# The exact issue #44 failing stream: RFC_READ_TABLE(UCONRFCSTATEHEAD) on 7.52
+# --------------------------------------------------------------------------- #
+
+# Seven server->client frames contributed by the reporter of #44: a live
+# RFC_READ_TABLE whose compressed DATA table spans all seven, captured on
+# NetWeaver 7.52 (NPL, kernel 753/16). Six 28080-byte frames and a 2786-byte
+# tail; the frame boundaries fall between fixed-width 0x0305 records, which the
+# unpatched tlv_stream_status read as not_tlv -- stopping after frame 0 and
+# truncating the compressed stream. See multiframe_rrt_ucon752_stream.json.
+RRT_FRAMES = [GOLDEN / f"multiframe_rrt_ucon752_{i:02d}.bin" for i in range(7)]
+
+
+def test_the_issue_44_failing_stream_joins_and_decodes_all_rows() -> None:
+    """End to end on the real capture: seven frames -> 10000 rows, no truncation.
+
+    Unpatched, the reader stops after frame 0 (its body reads not_tlv on the old
+    rule) and the decompressor raises 'unexpected end of compressed data'. With the
+    boundary fix the seven bodies join to one complete TLV stream and the DATA table
+    decompresses to the full 10000 rows the server sent.
+    """
+    from saprfclib.codec import RFCTYPE_CHAR, RFCTYPE_TABLE
+    from saprfclib.connection import _join_response_frames
+    from saprfclib.invoke import parse_invoke_response
+    from saprfclib.types import RFC_EXPORT, FieldDesc, FunctionDesc, TypeDesc
+
+    raws = [p.read_bytes() for p in RRT_FRAMES]
+    assert [len(r) for r in raws] == [28080, 28080, 28080, 28080, 28080, 28080, 2786]
+
+    it = iter(raws)
+    joined = _join_response_frames(lambda: next(it), "RFC_READ_TABLE")
+    assert len(joined) == 170706
+    assert tlv_stream_status(joined) == "complete"
+
+    # RFC_READ_TABLE's DATA is a table of a flat 512-char work area.
+    wa = FieldDesc("WA", RFCTYPE_CHAR, 512, 0, 1024, 0, 0)
+    data = FieldDesc(
+        "DATA",
+        RFCTYPE_TABLE,
+        0,
+        0,
+        0,
+        0,
+        0,
+        type_desc=TypeDesc("TAB512", [wa], 512, 1024),
+        direction=RFC_EXPORT,
+    )
+    result = parse_invoke_response(joined, FunctionDesc("RFC_READ_TABLE", [data]))
+    assert len(result["DATA"]) == 10000
+
+
+def test_the_issue_44_first_frame_is_a_continuation_not_not_tlv() -> None:
+    """The exact byte sequence that triggered the bug.
+
+    Frame 0 ends between two 0x0305 records with no terminator: it parsed whole
+    records and ran out cleanly. That is a continuation (read on), which the fix
+    reports as 'truncated'; the old rule reported 'not_tlv' and stopped.
+    """
+    assert tlv_stream_status(RRT_FRAMES[0].read_bytes()[80:]) == "truncated"
+    # The final frame carries the last-frame flag; the first does not.
+    assert struct.unpack_from(">I", RRT_FRAMES[0].read_bytes(), 60)[0] == 0
+    assert struct.unpack_from(">I", RRT_FRAMES[6].read_bytes(), 60)[0] == 1
