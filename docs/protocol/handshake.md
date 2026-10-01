@@ -252,6 +252,45 @@ token unique to the connection in that case (`Connection._metadata_cache_key`): 
 calls on one connection still skip the round-trip, and nothing is shared between systems
 that never identified themselves.
 
+### The `0x0101` encoding header — CONFIRMED (live 7.52) + `[ASSUMED]` byte-order
+
+The logon response carries an 8-byte **`0x0101`** element whose value negotiates the
+on-wire encoding. Live 7.52 capture (NPL):
+
+```
+0x0101 = 01 01 01 05 04 01 00 03
+          │  │  │  │  └──────── bytes 4–7: codepage digits (0x04 0x01 0x00 0x03 → "4103")
+          │  │  │  └─────────── byte 3:    unicode flag (5 = Unicode, UTF-16; else non-Unicode)
+          │  │  └────────────── byte 2:    float-format marker          [ASSUMED]
+          │  └───────────────── byte 1:    integer byte-order marker    [ASSUMED]
+          └──────────────────── byte 0:    RFC protocol version (client rejects > 5)
+```
+
+- **Confirmed by this capture:** byte 0 = protocol version; byte 3 = `5` = Unicode (agrees
+  with the negotiated codepage 4103); bytes 4–7 = the codepage, one digit per byte with
+  `byte + 0x30` giving the ASCII digit. `0x0016` separately echoes the client codepage
+  ("1100") as UTF-16LE.
+- **`[ASSUMED]`:** bytes 1 and 2 are the integer and float byte-order markers. Only a
+  little-endian value (`01`) has ever been captured, so the *swap* semantics (a value
+  differing from the receiver's native marker selects byte-swapping) are inferred, not
+  wire-confirmed. Confirming them needs a big-endian capture, which we do not have.
+
+**Endianness, unicode, and codepage are four independent bytes here**, not one signal. In
+practice they co-vary — a Unicode little-endian server sends byte 3 = 5 with codepage 4103,
+a big-endian one would send codepage 4102 (UTF-16BE) — but the wire permits them to differ
+because they are distinct fields. The framing integers (TLV id/length) are a separate matter:
+they are **always** big-endian on the wire regardless of this header (`_TLV_HEADER` is `>HH`).
+
+**What the library does today, and the gap.** `saprfclib` derives `unicode_mode` from the
+negotiated codepage string (`== "4103"`) and hardcodes little-endian scalars (CONFIRMED
+against x86-64 golden fixtures), and it **refuses any non-4103 codepage** at handshake. For
+every real 4103 / little-endian Unicode server — the only universe we can capture and
+validate — this is identical to reading `0x0101` bytes 1/2/3, so there is no miscode: a
+big-endian server negotiates codepage 4102 and is refused before any field is decoded, never
+decoded wrongly. Full big-endian / non-4103 support (reading bytes 1/2/3 and swapping
+per field-class) is deliberately **not** implemented, because it cannot be validated without
+a big-endian capture. Tracked as a gap, not shipped as an unvalidated path.
+
 ### Authentication vs. RFCPING authorization — D-38 (CONFIRMED live, 752 + 793)
 
 The logon TLV embeds `RFCPING`, so the logon response can report an error that belongs to
