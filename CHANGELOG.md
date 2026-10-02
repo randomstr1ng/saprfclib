@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-02
+
+One feature: native SOCKS5 proxy support, so `saprfclib` can reach an SAP system through
+the SAP BTP Connectivity Proxy and SAP Cloud Connector — the path a Kyma / Kubernetes
+workload uses — with no NW RFC SDK, Transparent Proxy, or local `socat` bridge. Confirmed
+end to end against a live Connectivity Proxy + Cloud Connector: `STFC_CONNECTION` round-
+tripped. SAP's SOCKS5 authentication model (no-auth or the custom JWT method `0x80`, never
+RFC 1929 user/password) is taken from SAP's own published documentation.
+
+The one non-obvious requirement a proxied connection surfaces is `gwhost`: the GW handshake
+frames carry a host the server-side gateway resolves, which through a Cloud Connector is not
+the virtual host used for the tunnel. The new parameter separates the two; it defaults to
+`ashost`, so direct connections are untouched.
+
 ### Added
 
 - **`gwhost` connection parameter** (issue #51). The gateway host written into the GW
