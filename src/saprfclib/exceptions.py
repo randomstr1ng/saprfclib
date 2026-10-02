@@ -31,6 +31,7 @@ __all__ = [
     "IncompleteDescriptorError",
     "PoolTimeoutError",
     "RetryExhausted",
+    "ProxyError",
     "SncError",
     "TransactionalError",
     "WebSocketError",
@@ -268,6 +269,27 @@ class WebSocketError(SapRfcError):
     credential material. ``ws_proxy_pass`` and the ``Proxy-Authorization`` value
     must never enter the message or the ``repr``. Proxy failures report only the
     HTTP status code — never the credential string.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        self.message = message
+        super().__init__(message if message is not None else "")
+
+
+class ProxyError(SapRfcError):
+    """SOCKS5 proxy negotiation, authentication, or CONNECT error (issue #51).
+
+    Raised by :mod:`saprfclib.socks5` when the SAP BTP Connectivity Proxy (or any
+    SOCKS5 proxy) refuses the method negotiation, rejects the JWT authentication
+    sub-negotiation, or returns a non-zero CONNECT reply code. Subclasses
+    :class:`SapRfcError` so callers can ``except saprfclib.SapRfcError`` uniformly
+    (D-18).
+
+    Security (threat T-07-PROXY-CRED, D-41): this class is NEVER populated from
+    credential material. The proxy JWT, the OAuth ``client_secret`` and any
+    ``proxy_pass`` must never enter the message or the ``repr``. A SOCKS5 failure
+    reports only the protocol reason (the SOCKS5 reply code and its meaning) —
+    never the token or secret.
     """
 
     def __init__(self, message: str | None = None) -> None:

@@ -1,0 +1,124 @@
+# SOCKS5 Proxy Transport (SAP BTP Connectivity Proxy)
+
+**Status:** CONFIRMED-on-doc — the 0x80 JWT frame and the method model are taken from
+SAP's own published connectivity documentation (CC-BY 4.0) and SAP's reference sample.
+Live confirmation against a Kyma Connectivity Proxy is still pending (issue #51); the
+0x00 no-auth path and the CONNECT request/reply are plain RFC 1928.
+**Confidence:** HIGH for the wire layout (two independent SAP sources agree). The
+`[ASSUMED]` marker below records what a live capture would settle.
+
+---
+
+## Why this exists
+
+In SAP BTP / Kyma, on-premise systems reached through SAP Cloud Connector are consumed by
+Kubernetes workloads over a **SOCKS5** interface exposed by the SAP Connectivity Proxy
+(default port `20004`). `proxy_type="socks5"` lets `saprfclib` open a raw RFC/TCP
+connection through that proxy with no NW RFC SDK, no Transparent Proxy, and no local
+`socat` bridge:
+
+```
+saprfclib → SOCKS5 proxy (:20004) → SAP Cloud Connector → virtual-host:3300 → SAP
+```
+
+SOCKS5 sits **below** the NI length prefix (see [framing.md](framing.md)). The handshake
+produces an ordinary connected socket; everything above it — NI versioning, the GW
+connect, the logon TLV, even SNC or an `saprouter` route — is unchanged. The seam is a
+`socket_factory` in `transport.py` (D-39); `proxy_type="socks5"` is the built-in factory.
+
+## Layering
+
+```
+RFC logon / RfcInvoke TLV
+  → Session (NI version, GW connect, handshake)       — unchanged
+    → Transport.send_message / recv_message            — NI 4-byte length prefix
+      → socket                                         — returned by socks5_connect()
+        → SOCKS5 greeting / auth / CONNECT             — this module (below the socket)
+          → TCP to the proxy
+```
+
+## Authentication methods (D-40)
+
+SAP uses **two** SOCKS5 authentication methods, and **not** the RFC 1929
+username/password method (0x02). This was the specific correction that drove the design:
+offering 0x02 is wrong.
+
+| Method | Number | When | saprfclib trigger |
+|--------|--------|------|-------------------|
+| No authentication | `0x00` (RFC 1928 §3) | Connectivity Proxy **trusted mode** — `config.servers.proxy.socks5.enableProxyAuthorization = false`, the default for in-cluster Kyma workloads. The proxy derives the subaccount from the caller's in-cluster identity. | no JWT parameters set |
+| SAP custom JWT | `0x80` | CF Connectivity service SOCKS5 (auth mandatory there) and the Connectivity Proxy in **untrusted mode** (`enableProxyAuthorization = true`). | `proxy_jwt`, or the `proxy_client_id`/`proxy_client_secret`/`proxy_token_url` triple |
+
+### Method 0x00 — no authentication
+
+Standard RFC 1928: greeting `05 01 00`, server selects `05 00`, then straight to CONNECT.
+
+### Method 0x80 — SAP JWT sub-negotiation
+
+Greeting `05 01 80`; the server confirms `05 80` (the method byte reads as `128`, or
+`-128` in a signed-byte implementation — both are `0x80`). The authentication request
+then carries a JWT access token and an optional Cloud Connector location id:
+
+```
+┌────────┬──────────────────────────────────────────────────────────────┐
+│ 1 byte │ sub-negotiation version — currently 0x01                      │
+│ 4 byte │ JWT length, uint32 big-endian                                 │
+│ X byte │ the JWT in encoded (compact) form                            │
+│ 1 byte │ Cloud Connector location id length (0 if unused)             │
+│ Y byte │ location id, base64-encoded (omitted when the length is 0)   │
+└────────┴──────────────────────────────────────────────────────────────┘
+```
+
+Reply: `01 <status>`, where `status == 0x00` is success. The JWT is an OAuth2
+`client_credentials` token minted from the connectivity service binding's `client_id` /
+`client_secret` against its `uaa` URL; `saprfclib` can fetch it (`proxy_token_url`) or
+accept a pre-fetched `proxy_jwt`.
+
+## CONNECT request / reply (RFC 1928 §4, §6)
+
+Request: `05 01 00 <ATYP> <addr> <port:u16 BE>`. The address is sent as a packed IPv4/IPv6
+literal when `dest_host` is one, otherwise as a **domain name** (`ATYP 0x03`) so the proxy
+resolves it — a Cloud Connector virtual host is only resolvable behind the proxy.
+
+Reply `REP` codes and the meanings `saprfclib` reports (matching SAP's own translation):
+
+| REP | Meaning |
+|-----|---------|
+| 0 | succeeded |
+| 1 | general SOCKS server failure |
+| 2 | connection not allowed (forbidden) |
+| 3 | network unreachable |
+| 4 | host unreachable |
+| 5 | connection refused |
+| 6 | TTL expired |
+| 7 | command not supported |
+| 8 | address type not supported |
+
+## Security (D-41, threat T-07-PROXY-CRED)
+
+The JWT, the OAuth `client_secret`, and any proxy password are used only to build wire
+bytes. They never enter a log record or a `ProxyError` message; a failure reports the
+SOCKS5 reply code and its meaning only. `fetch_connectivity_token` refuses a non-`https`
+`token_url` rather than send the secret in cleartext.
+
+## Sources
+
+- SAP-docs/btp-connectivity, `docs/1-connectivity-documentation/using-the-tcp-protocol-for-cloud-applications-cd15837.md`
+  (the Markdown behind the help.sap.com page *Using the TCP Protocol for Cloud
+  Applications*) — the 0x80 method number, the sub-negotiation frame table, and the
+  reference sample `ConnectivitySocks5ProxySocket`. Licensed CC-BY 4.0; referenced here,
+  not copied verbatim (legal boundary).
+- SAP-docs/btp-connectivity, `connectivity-proxy-integration-f6cb5bc.md` — trusted vs.
+  untrusted mode and `enableProxyAuthorization`.
+- IETF RFC 1928 (SOCKS5), RFC 7519 (JWT).
+
+## Known gaps / `[ASSUMED]`
+
+- **[ASSUMED]** The 0x80 frame is confirmed against two SAP sources but not yet against a
+  live capture from a Kyma Connectivity Proxy. A capture of a real 0x80 handshake (and of
+  an untrusted-mode rejection) would promote this to tier-1 and is the outstanding item on
+  issue #51. The reporter offered a Kyma + Connectivity Proxy + Cloud Connector test
+  environment.
+- A `VCAP_SERVICES` / Kyma binding parser (reading `onpremise_proxy_host` /
+  `onpremise_socks5_proxy_port` and the `uaa` credentials directly from the bound service)
+  is a planned convenience, not in this change — the proxy parameters are passed explicitly
+  for now.

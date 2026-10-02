@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SOCKS5 proxy support for raw RFC/TCP connections** (issue #51). `connect()` and
+  `connect_async()` accept `proxy_type="socks5"` with `proxy_host`/`proxy_port` to reach an
+  SAP system through the SAP BTP Connectivity Proxy — the SOCKS5 interface Kyma/Kubernetes
+  workloads use to consume on-premise systems via SAP Cloud Connector, with no NW RFC SDK,
+  Transparent Proxy, or local `socat` bridge. SAP's two SOCKS5 authentication methods are
+  both supported — no-authentication (trusted mode) and the SAP custom JWT method `0x80`
+  (untrusted mode); SAP does **not** use the RFC 1929 username/password method. A JWT may be
+  supplied directly (`proxy_jwt`) or fetched via OAuth2 `client_credentials`
+  (`proxy_client_id`/`proxy_client_secret`/`proxy_token_url`), with an optional
+  `proxy_scc_location_id`. A generic `socket_factory` hook exposes the same transport seam
+  for other proxy scenarios. The JWT and OAuth secret are never logged or placed into an
+  exception (D-39/40/41). See `docs/protocol/socks5.md`. The wire layout is confirmed
+  against SAP's own published documentation; live confirmation against a Kyma Connectivity
+  Proxy is pending.
+
 ## [0.1.7] - 2026-10-01
 
 Two field-reported interop bugs, both the shape the last two releases kept turning up:

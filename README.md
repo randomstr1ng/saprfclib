@@ -53,6 +53,29 @@ it in-process - no configuration needed.
 | Message server | `mshost`, `sysid`, `group` |
 | SNC (X.509 / Kerberos) | `snc_lib`, `snc_partnername`, `snc_qop` |
 | WebSocket RFC | `wshost`, `wsport`, `ws_path` |
+| SOCKS5 proxy (SAP BTP) | `proxy_type="socks5"`, `proxy_host`, `proxy_port` (+ `proxy_jwt` / OAuth triple) |
+
+Reach an on-premise system through the SAP BTP Connectivity Proxy / Cloud Connector
+(e.g. from a Kyma workload) with no NW RFC SDK or Transparent Proxy:
+
+```python
+# trusted mode (no proxy authentication)
+conn = saprfclib.connect(
+    ashost="s4-2025", sysnr="00", client="001", user="Developer", passwd="...",
+    proxy_type="socks5",
+    proxy_host="connectivity-proxy.kyma-system.svc.cluster.local",
+    proxy_port=20004,
+)
+
+# untrusted mode — SAP JWT (method 0x80), token fetched via client_credentials
+conn = saprfclib.connect(
+    ashost="s4-2025", sysnr="00", client="001", user="Developer", passwd="...",
+    proxy_type="socks5", proxy_host="...", proxy_port=20004,
+    proxy_client_id="...", proxy_client_secret="...",
+    proxy_token_url="https://<subaccount>.authentication.<region>.hana.ondemand.com/oauth/token",
+    proxy_scc_location_id="MyLocation",  # optional Cloud Connector location
+)
+```
 
 See the [Connection Options guide](https://randomstr1ng.github.io/saprfclib/getting-started/connection-options/)
 for the full parameter reference.
