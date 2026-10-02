@@ -3941,6 +3941,99 @@ class _AsyncUnitHandle:
         return False
 
 
+# --------------------------------------------------------------------------- #
+# SOCKS5 proxy wiring (issue #51, D-39/40/41)                                  #
+# --------------------------------------------------------------------------- #
+def _validate_proxy_args(
+    proxy_type: str | None,
+    proxy_host: str | None,
+    proxy_port: int | None,
+    socket_factory: Callable[[str, int], socket.socket] | None,
+    *,
+    wshost: str | None,
+) -> None:
+    """Reject contradictory proxy configuration before any connection is opened.
+
+    ``proxy_type`` and ``socket_factory`` are two spellings of the same seam
+    (D-39), so only one may be set. SOCKS5 belongs to the raw-TCP paths; the
+    WebSocket (wRFC) path has its own HTTP CONNECT proxy via ``ws_proxy_*``.
+    """
+    if proxy_type is not None and socket_factory is not None:
+        raise ValueError("pass either proxy_type or socket_factory, not both")
+    if wshost is not None and (proxy_type is not None or socket_factory is not None):
+        raise ValueError(
+            "proxy_type/socket_factory do not apply to the wRFC (wshost) path; "
+            "use ws_proxy_host/ws_proxy_port for an HTTP CONNECT proxy there"
+        )
+    if proxy_type is not None:
+        if proxy_type != "socks5":
+            raise ValueError(f"unsupported proxy_type {proxy_type!r}; only 'socks5' is supported")
+        if proxy_host is None or proxy_port is None:
+            raise ValueError("proxy_host and proxy_port are required when proxy_type='socks5'")
+
+
+def _resolve_proxy_jwt(
+    proxy_jwt: str | None,
+    proxy_client_id: str | None,
+    proxy_client_secret: str | None,
+    proxy_token_url: str | None,
+    *,
+    connect_timeout: float | None,
+) -> str | None:
+    """Return the JWT for the SAP 0x80 SOCKS5 method, or ``None`` for no-auth (0x00).
+
+    An explicit ``proxy_jwt`` wins. Otherwise, if any of the OAuth triple is given,
+    all three are required and a ``client_credentials`` token is fetched (D-41).
+    When nothing is supplied the trusted-mode no-authentication path is used.
+
+    The secret is never logged; see :func:`saprfclib.socks5.fetch_connectivity_token`.
+    """
+    if proxy_jwt is not None:
+        return proxy_jwt
+    if proxy_client_id or proxy_client_secret or proxy_token_url:
+        if not (proxy_client_id and proxy_client_secret and proxy_token_url):
+            raise ValueError(
+                "proxy_client_id, proxy_client_secret and proxy_token_url must be "
+                "set together to fetch a SOCKS5 JWT"
+            )
+        from saprfclib.socks5 import fetch_connectivity_token
+
+        return fetch_connectivity_token(
+            proxy_token_url,
+            proxy_client_id,
+            proxy_client_secret,
+            timeout=connect_timeout if connect_timeout is not None else 10.0,
+        )
+    return None
+
+
+def _make_socks5_socket_factory(
+    proxy_host: str,
+    proxy_port: int,
+    *,
+    jwt: str | None,
+    scc_location_id: str,
+    connect_timeout: float | None,
+    read_timeout: float | None,
+) -> Callable[[str, int], socket.socket]:
+    """Build a ``socket_factory`` that reaches ``(host, port)`` through a SOCKS5 proxy."""
+    from saprfclib.socks5 import socks5_connect
+
+    def _factory(host: str, port: int) -> socket.socket:
+        return socks5_connect(
+            proxy_host,
+            proxy_port,
+            host,
+            port,
+            jwt=jwt,
+            scc_location_id=scc_location_id,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
+
+    return _factory
+
+
 def connect(
     ashost: str,
     sysnr: str | int,
@@ -3972,6 +4065,15 @@ def connect(
     ws_proxy_user: str | None = None,
     ws_proxy_pass: str | None = None,
     ws_tls_verify: bool = True,
+    proxy_type: str | None = None,
+    proxy_host: str | None = None,
+    proxy_port: int | None = None,
+    proxy_jwt: str | None = None,
+    proxy_scc_location_id: str | None = None,
+    proxy_client_id: str | None = None,
+    proxy_client_secret: str | None = None,
+    proxy_token_url: str | None = None,
+    socket_factory: Callable[[str, int], socket.socket] | None = None,
     trace: RfcTrace | None = None,
     snc_lib: str | None = None,
     snc_partnername: str | None = None,
@@ -4016,6 +4118,25 @@ def connect(
         precisely what is applied.
       - direct: ``port = 3300 + int(sysnr)`` (gateway port unless ``port`` is
         given), connect_tcp, handshake.
+
+    ``proxy_type="socks5"`` routes the raw-TCP connection through a SOCKS5 proxy —
+    the interface the SAP BTP Connectivity Proxy exposes so Kyma/Kubernetes
+    workloads reach on-premise systems via SAP Cloud Connector (issue #51, D-39).
+    ``proxy_host`` and ``proxy_port`` are required (no default is assumed). SAP
+    uses two SOCKS5 authentication methods and never RFC 1929 user/password (D-40):
+
+      - **no authentication** (method 0x00) when none of the JWT parameters are
+        set — the Connectivity Proxy in trusted mode
+        (``enableProxyAuthorization=false``, the default for in-cluster workloads).
+      - **SAP JWT** (method 0x80) when ``proxy_jwt`` is supplied, or when
+        ``proxy_client_id``/``proxy_client_secret``/``proxy_token_url`` are all set
+        — then a ``client_credentials`` token is fetched (D-41). An optional
+        ``proxy_scc_location_id`` selects a specific Cloud Connector location.
+
+    ``socket_factory`` is the generic form of the same seam: a
+    ``Callable[[host, port], socket]`` that returns an already-connected socket. It
+    is mutually exclusive with ``proxy_type``. Neither applies to the wRFC
+    (``wshost``) path, which proxies via ``ws_proxy_*``.
 
     ``lang`` is the logon language. Accepts the one-character SAP code ('E' English,
     'D' German, 'S' Spanish, …) or the two-character ISO code ('EN', 'DE', 'ES'); an
@@ -4063,9 +4184,9 @@ def connect(
     sits in ``router.py``: some field boundaries inside a server-list entry, and
     whether the entry count is carried in the header or only implied by the
     payload length. ``passwd``,
-    ``ws_proxy_pass``, ``snc_lib``, ``snc_partnername`` and ``snc_myname`` are
-    never logged or echoed into any log message or exception string (threats
-    T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
+    ``ws_proxy_pass``, ``proxy_jwt``, ``proxy_client_secret``, ``snc_lib``,
+    ``snc_partnername`` and ``snc_myname`` are never logged or echoed into any log
+    message or exception string (threats T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
     # Imported lazily so the direct-TCP facade carries no hard dependency on the
     # alternate-transport layer (router.py, plan 03-03 Task 2).
@@ -4076,6 +4197,26 @@ def connect(
     )
 
     user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
+
+    # SOCKS5 proxy (issue #51, D-39/40/41). Build a socket_factory once; it reaches
+    # the gateway through the proxy and everything above the socket is unchanged.
+    _validate_proxy_args(proxy_type, proxy_host, proxy_port, socket_factory, wshost=wshost)
+    if proxy_type == "socks5":
+        _proxy_jwt = _resolve_proxy_jwt(
+            proxy_jwt,
+            proxy_client_id,
+            proxy_client_secret,
+            proxy_token_url,
+            connect_timeout=connect_timeout,
+        )
+        socket_factory = _make_socks5_socket_factory(
+            proxy_host,  # type: ignore[arg-type]  # validated non-None above
+            proxy_port,  # type: ignore[arg-type]
+            jwt=_proxy_jwt,
+            scc_location_id=proxy_scc_location_id or "",
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
 
     if mshost is not None:
         # Message-server group logon: resolve to a concrete (ashost, sysnr).
@@ -4156,6 +4297,7 @@ def connect(
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
             trace=trace,
+            socket_factory=socket_factory,
         )
 
         # Step 1: NI version exchange on the plain inner transport.
@@ -4219,6 +4361,7 @@ def connect(
         _retry_delay = retry_delay
         _tid_store = tid_store
         _unit_store = unit_store
+        _socket_factory = socket_factory
 
         async def _async_setup() -> AsyncConnection:
             # Use connect_tcp (sync, patchable in tests) wrapped in a thin async shim.
@@ -4231,6 +4374,7 @@ def connect(
                 connect_timeout=_connect_timeout,
                 read_timeout=_read_timeout,
                 trace=trace,
+                socket_factory=_socket_factory,
             )
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
             if _saprouter is not None:
@@ -5417,6 +5561,15 @@ async def connect_async(
     port: int | None = None,
     snc_lib: str | None = None,
     wshost: str | None = None,
+    proxy_type: str | None = None,
+    proxy_host: str | None = None,
+    proxy_port: int | None = None,
+    proxy_jwt: str | None = None,
+    proxy_scc_location_id: str | None = None,
+    proxy_client_id: str | None = None,
+    proxy_client_secret: str | None = None,
+    proxy_token_url: str | None = None,
+    socket_factory: Callable[[str, int], socket.socket] | None = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     tid_store: TidStore | None = None,
@@ -5453,6 +5606,28 @@ async def connect_async(
             "use the synchronous saprfclib.connect() for SNC/wRFC"
         )
 
+    # SOCKS5 proxy (issue #51, D-39/40/41). The handshake and the token fetch are
+    # blocking; connect_tcp_async runs the socket_factory in a thread executor, and
+    # the token fetch is pushed off the loop here with to_thread.
+    _validate_proxy_args(proxy_type, proxy_host, proxy_port, socket_factory, wshost=wshost)
+    if proxy_type == "socks5":
+        _proxy_jwt = await asyncio.to_thread(
+            _resolve_proxy_jwt,
+            proxy_jwt,
+            proxy_client_id,
+            proxy_client_secret,
+            proxy_token_url,
+            connect_timeout=connect_timeout,
+        )
+        socket_factory = _make_socks5_socket_factory(
+            proxy_host,  # type: ignore[arg-type]  # validated non-None above
+            proxy_port,  # type: ignore[arg-type]
+            jwt=_proxy_jwt,
+            scc_location_id=proxy_scc_location_id or "",
+            connect_timeout=connect_timeout,
+            read_timeout=None,
+        )
+
     from saprfclib.router import (
         MessageServerClient,
         open_route_async,
@@ -5478,7 +5653,11 @@ async def connect_async(
     # See connect(): an explicit port replaces the derivation.
     port = port if port is not None else 3300 + int(sysnr)
     transport = await connect_tcp_async(
-        ashost, port, timeout=timeout, connect_timeout=connect_timeout
+        ashost,
+        port,
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        socket_factory=socket_factory,
     )
 
     if saprouter is not None:

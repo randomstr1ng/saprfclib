@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import struct
+from collections.abc import Callable
 from typing import cast
 
 from saprfclib.exceptions import SapRfcError
@@ -275,6 +276,7 @@ def connect_tcp(
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float | None = DEFAULT_READ_TIMEOUT,
     trace: RfcTrace | None = None,
+    socket_factory: Callable[[str, int], socket.socket] | None = None,
 ) -> Transport:
     """Open a blocking TCP socket and return a Transport bound to it.
 
@@ -292,11 +294,22 @@ def connect_tcp(
             callers keep working; prefer the two explicit arguments, since one
             number cannot express "connect quickly, then wait as long as the
             call needs".
+        socket_factory: optional hook that returns an already-connected socket to
+            ``(host, port)`` instead of :func:`socket.create_connection` opening a
+            direct one (D-39). This is the substitution point for a SOCKS5 proxy
+            (issue #51) and any other custom reach — the factory owns reaching the
+            target; everything above the socket (NI framing, handshake) is
+            unchanged. The read timeout, TCP_NODELAY and keepalive are still
+            applied to the returned socket here, so a factory need not repeat them.
+            When ``None`` the direct path below is byte-for-byte unchanged.
     """
     if timeout is not None:
         connect_timeout = timeout
         read_timeout = timeout
-    sock = socket.create_connection((host, port), timeout=connect_timeout)
+    if socket_factory is not None:
+        sock = socket_factory(host, port)
+    else:
+        sock = socket.create_connection((host, port), timeout=connect_timeout)
     # create_connection leaves its connect timeout on the socket, where it would
     # then apply to every later recv. Set the read timeout explicitly so the two
     # are never conflated by accident.
@@ -399,6 +412,7 @@ async def connect_tcp_async(
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     trace: RfcTrace | None = None,
+    socket_factory: Callable[[str, int], socket.socket] | None = None,
 ) -> AsyncTransport:
     """Open an asyncio TCP connection and return an AsyncTransport.
 
@@ -412,13 +426,27 @@ async def connect_tcp_async(
         connect_timeout: how long to wait for the connection. Defaults to
             :data:`DEFAULT_CONNECT_TIMEOUT`; ``None`` waits indefinitely.
         timeout: deprecated alias for ``connect_timeout``.
+        socket_factory: optional hook returning an already-connected socket to
+            ``(host, port)`` (D-39). It is a *blocking* callable (e.g. a SOCKS5
+            handshake), so it is run in a thread executor to keep the event loop
+            responsive; the returned socket is then adopted by the event loop.
+            When ``None`` the direct ``open_connection`` path is unchanged.
     """
     if timeout is not None:
         connect_timeout = timeout
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port),
-        timeout=connect_timeout,
-    )
+    if socket_factory is not None:
+        loop = asyncio.get_running_loop()
+        raw = await asyncio.wait_for(
+            loop.run_in_executor(None, socket_factory, host, port),
+            timeout=connect_timeout,
+        )
+        raw.setblocking(False)
+        reader, writer = await asyncio.open_connection(sock=raw)
+    else:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=connect_timeout,
+        )
     sock = writer.get_extra_info("socket")
     if sock is not None:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
