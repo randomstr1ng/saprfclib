@@ -13,10 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handshake frames, which the server-side gateway resolves, is now separable from
   `ashost`. It defaults to `ashost` (direct connections are unchanged) and is set for a
   proxy / Cloud Connector path, where `ashost` is the virtual host used only for the TCP
-  tunnel and `gwhost` must be the SAP system's internal hostname. Without this a proxied
-  connection completed the NI/GW_CONNECT legs and then failed with the gateway reporting
-  `hostname '<virtual>' unknown` and tearing the conversation down. See
-  `docs/protocol/socks5.md`.
+  tunnel and `gwhost` must be the SAP system's internal address (an IP literal is simplest,
+  as it needs no server-side DNS). Without this a proxied connection completed the
+  NI/GW_CONNECT legs and then failed with the gateway reporting `hostname '<virtual>'
+  unknown` and tearing the conversation down. A SOCKS5 connection without `gwhost` now
+  emits a warning. Confirmed end to end against a live SAP BTP Connectivity Proxy + Cloud
+  Connector (`STFC_CONNECTION` round-tripped); the accepted `0x060f` frame is committed as a
+  golden fixture. See `docs/protocol/socks5.md`.
 - **SOCKS5 proxy support for raw RFC/TCP connections** (issue #51). `connect()` and
   `connect_async()` accept `proxy_type="socks5"` with `proxy_host`/`proxy_port` to reach an
   SAP system through the SAP BTP Connectivity Proxy — the SOCKS5 interface Kyma/Kubernetes
@@ -31,9 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binding (a credentials/instance/`VCAP_SERVICES` mapping or JSON string, or the
   `VCAP_SERVICES` / `SERVICE_BINDING_ROOT` environment) and returns the `proxy_*` arguments
   ready to splat into `connect()`. The JWT and OAuth secret are never logged or placed into an
-  exception (D-39/40/41). See `docs/protocol/socks5.md`. The wire layout is confirmed
-  against SAP's own published documentation; live confirmation against a Kyma Connectivity
-  Proxy is pending.
+  exception (D-39/40/41). See `docs/protocol/socks5.md`. Confirmed end to end against a live
+  SAP BTP Connectivity Proxy + Cloud Connector (no-auth path); the 0x80 JWT frame follows
+  SAP's own published documentation and awaits a live untrusted-mode capture.
 
 ## [0.1.7] - 2026-10-01
 

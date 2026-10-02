@@ -1,11 +1,12 @@
 # SOCKS5 Proxy Transport (SAP BTP Connectivity Proxy)
 
-**Status:** CONFIRMED-on-doc — the 0x80 JWT frame and the method model are taken from
-SAP's own published connectivity documentation (CC-BY 4.0) and SAP's reference sample.
-Live confirmation against a Kyma Connectivity Proxy is still pending (issue #51); the
-0x00 no-auth path and the CONNECT request/reply are plain RFC 1928.
-**Confidence:** HIGH for the wire layout (two independent SAP sources agree). The
-`[ASSUMED]` marker below records what a live capture would settle.
+**Status:** CONFIRMED — a live connection through an SAP BTP Connectivity Proxy SOCKS5
+endpoint + Cloud Connector completed and the `STFC_CONNECTION` call round-tripped
+(`nohat-rfc-working.pcap`, 2026-10-02, SAP A4H). The no-auth (0x00) path, the CONNECT
+request/reply (RFC 1928), and the `gwhost` requirement are all confirmed live. The 0x80
+JWT frame layout is from SAP's own published documentation (CC-BY 4.0) and reference
+sample; it is still awaiting a live untrusted-mode capture.
+**Confidence:** HIGH.
 
 ---
 
@@ -119,22 +120,24 @@ and tears the conversation down, so the following RFC call fails with
 `Conversation … not found`.
 
 The fix is the `gwhost` parameter: `ashost` stays the virtual tunnel host, and
-`gwhost` is set to the SAP system's own internal hostname — the name the gateway
-resolves to itself (visible in the error above as `vhcala4hci`). `gwhost` defaults
-to `ashost`, so a direct connection is unchanged.
+`gwhost` is set to the SAP system's own internal address — one the gateway resolves
+to itself. `gwhost` defaults to `ashost`, so a direct connection is unchanged.
 
 ```python
 conn = saprfclib.connect(
     ashost="s4-2025-raw", sysnr="00", client="001", user="Developer", passwd="...",
     proxy_type="socks5", proxy_host="connectivity-proxy...", proxy_port=20004,
-    gwhost="vhcala4hci",   # the internal host the gateway resolves locally
+    gwhost="192.168.88.9",   # the SAP system's internal address (an IP needs no server-side DNS)
 )
 ```
 
-**[ASSUMED]** The exact value `gwhost` must take for a given landscape (the SAP
-system's internal hostname, or whatever the gateway resolves to itself) is
-confirmed only against the issue #51 capture, where `vhcala4hci` is the gateway's
-own host. A capture from another landscape would confirm the general rule.
+**CONFIRMED (2026-10-02, `nohat-rfc-working.pcap`):** with `gwhost="192.168.88.9"`
+(the SAP system's internal IPv4) the gateway accepted the `0x060f` frame and the
+`STFC_CONNECTION` call returned its `ECHOTEXT`. The exact accepted frame is committed
+as `tests/golden/handshake/gw_info_proxy.bin`, and
+`test_gw_info_matches_live_accepted_proxy_frame` asserts the builder reproduces it.
+An **IP literal is the simplest choice** because it needs no DNS on the gateway host;
+a hostname works too if the gateway can resolve it.
 
 ## Security (D-41, threat T-07-PROXY-CRED)
 
@@ -156,11 +159,9 @@ SOCKS5 reply code and its meaning only. `fetch_connectivity_token` refuses a non
 
 ## Known gaps / `[ASSUMED]`
 
-- **[ASSUMED]** The 0x80 frame is confirmed against two SAP sources but not yet against a
-  live capture from a Kyma Connectivity Proxy. A capture of a real 0x80 handshake (and of
-  an untrusted-mode rejection) would promote this to tier-1 and is the outstanding item on
-  issue #51. The reporter offered a Kyma + Connectivity Proxy + Cloud Connector test
-  environment.
+- The no-auth (0x00) path is confirmed live (see Status). **[ASSUMED]** the 0x80 JWT frame
+  is confirmed against two SAP sources but not yet against a live untrusted-mode capture; a
+  capture of a real 0x80 handshake would promote it to tier-1.
 - The message-server resolve leg (`mshost`) still connects to the message server
   directly rather than through the proxy; only the resolved application-server
   connection is proxied. Message-server logon behind a Connectivity Proxy is untested.
