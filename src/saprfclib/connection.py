@@ -45,6 +45,7 @@ import struct
 import threading
 import time
 import uuid
+import warnings
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -3969,12 +3970,17 @@ def _validate_proxy_args(
     socket_factory: Callable[[str, int], socket.socket] | None,
     *,
     wshost: str | None,
+    gwhost: str | None = None,
 ) -> None:
     """Reject contradictory proxy configuration before any connection is opened.
 
     ``proxy_type`` and ``socket_factory`` are two spellings of the same seam
     (D-39), so only one may be set. SOCKS5 belongs to the raw-TCP paths; the
     WebSocket (wRFC) path has its own HTTP CONNECT proxy via ``ws_proxy_*``.
+
+    Emits a warning when a SOCKS5 proxy is used without ``gwhost`` — through a
+    Cloud Connector ``ashost`` is usually a virtual host the gateway cannot
+    resolve, which fails mid-handshake with ``hostname '…' unknown`` (issue #51).
     """
     if proxy_type is not None and socket_factory is not None:
         raise ValueError("pass either proxy_type or socket_factory, not both")
@@ -3988,6 +3994,15 @@ def _validate_proxy_args(
             raise ValueError(f"unsupported proxy_type {proxy_type!r}; only 'socks5' is supported")
         if proxy_host is None or proxy_port is None:
             raise ValueError("proxy_host and proxy_port are required when proxy_type='socks5'")
+        if gwhost is None:
+            warnings.warn(
+                "connecting through a SOCKS5 proxy without gwhost: if ashost is a "
+                "virtual host (e.g. a Cloud Connector vhost) the SAP gateway cannot "
+                "resolve it and the handshake fails with \"hostname '...' unknown\". "
+                "Set gwhost to the SAP system's internal hostname. See "
+                "docs/protocol/socks5.md.",
+                stacklevel=3,
+            )
 
 
 def _resolve_proxy_jwt(
@@ -4227,7 +4242,9 @@ def connect(
 
     # SOCKS5 proxy (issue #51, D-39/40/41). Build a socket_factory once; it reaches
     # the gateway through the proxy and everything above the socket is unchanged.
-    _validate_proxy_args(proxy_type, proxy_host, proxy_port, socket_factory, wshost=wshost)
+    _validate_proxy_args(
+        proxy_type, proxy_host, proxy_port, socket_factory, wshost=wshost, gwhost=gwhost
+    )
     if proxy_type == "socks5":
         _proxy_jwt = _resolve_proxy_jwt(
             proxy_jwt,
@@ -5650,7 +5667,9 @@ async def connect_async(
     # SOCKS5 proxy (issue #51, D-39/40/41). The handshake and the token fetch are
     # blocking; connect_tcp_async runs the socket_factory in a thread executor, and
     # the token fetch is pushed off the loop here with to_thread.
-    _validate_proxy_args(proxy_type, proxy_host, proxy_port, socket_factory, wshost=wshost)
+    _validate_proxy_args(
+        proxy_type, proxy_host, proxy_port, socket_factory, wshost=wshost, gwhost=gwhost
+    )
     if proxy_type == "socks5":
         _proxy_jwt = await asyncio.to_thread(
             _resolve_proxy_jwt,
