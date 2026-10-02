@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supplied directly (`proxy_jwt`) or fetched via OAuth2 `client_credentials`
   (`proxy_client_id`/`proxy_client_secret`/`proxy_token_url`), with an optional
   `proxy_scc_location_id`. A generic `socket_factory` hook exposes the same transport seam
-  for other proxy scenarios. The JWT and OAuth secret are never logged or placed into an
+  for other proxy scenarios. `connectivity_proxy_kwargs()` reads the Connectivity service
+  binding (a credentials/instance/`VCAP_SERVICES` mapping or JSON string, or the
+  `VCAP_SERVICES` / `SERVICE_BINDING_ROOT` environment) and returns the `proxy_*` arguments
+  ready to splat into `connect()`. The JWT and OAuth secret are never logged or placed into an
   exception (D-39/40/41). See `docs/protocol/socks5.md`. The wire layout is confirmed
   against SAP's own published documentation; live confirmation against a Kyma Connectivity
   Proxy is pending.

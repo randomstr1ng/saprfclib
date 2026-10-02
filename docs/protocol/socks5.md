@@ -118,7 +118,29 @@ SOCKS5 reply code and its meaning only. `fetch_connectivity_token` refuses a non
   an untrusted-mode rejection) would promote this to tier-1 and is the outstanding item on
   issue #51. The reporter offered a Kyma + Connectivity Proxy + Cloud Connector test
   environment.
-- A `VCAP_SERVICES` / Kyma binding parser (reading `onpremise_proxy_host` /
-  `onpremise_socks5_proxy_port` and the `uaa` credentials directly from the bound service)
-  is a planned convenience, not in this change — the proxy parameters are passed explicitly
-  for now.
+- The message-server resolve leg (`mshost`) still connects to the message server
+  directly rather than through the proxy; only the resolved application-server
+  connection is proxied. Message-server logon behind a Connectivity Proxy is untested.
+
+## Reading the service binding
+
+`connectivity_proxy_kwargs()` turns a Connectivity service binding into the `proxy_*`
+keyword arguments for `connect()`, so the parameters need not be dug out by hand:
+
+```python
+import saprfclib
+
+cfg = saprfclib.connectivity_proxy_kwargs()  # reads VCAP_SERVICES, else SERVICE_BINDING_ROOT
+conn = saprfclib.connect(ashost="s4-2025", sysnr="00", client="001",
+                         user="Developer", passwd="...", **cfg)
+```
+
+It accepts a raw credentials mapping, a service-instance mapping, a full
+`VCAP_SERVICES` mapping, or a JSON string of any of those; with `None` it reads the
+environment — `VCAP_SERVICES` (Cloud Foundry) first, then `SERVICE_BINDING_ROOT`
+(Kyma / Kubernetes, one file per key or a single `credentials` JSON file). The binding
+fields used are `onpremise_proxy_host`, `onpremise_socks5_proxy_port`, and — for the
+SAP JWT method — `clientid`, `clientsecret` and `token_service_url` (or the deprecated
+`url`), with the token endpoint formed as `<token_service_url>/oauth/token`. Pass
+`with_auth=False` for a trusted-mode Connectivity Proxy (the in-cluster Kyma default),
+which uses the no-authentication method and would reject a JWT.

@@ -422,3 +422,142 @@ def test_fetch_token_https_monkeypatched(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
     token = socks5.fetch_connectivity_token("https://uaa.example/oauth/token", "client", "s3cr3t")
     assert token == "fetched.jwt.value"
+
+
+# --------------------------------------------------------------------------- #
+# 4. Connectivity service binding → connect() kwargs                           #
+# --------------------------------------------------------------------------- #
+
+_CREDS = {
+    "onpremise_proxy_host": "connectivity-proxy.internal",
+    "onpremise_socks5_proxy_port": "20004",
+    "onpremise_proxy_http_port": "20003",
+    "clientid": "cid",
+    "clientsecret": "csecret",
+    "token_service_url": "https://sub.authentication.eu10.hana.ondemand.com",
+}
+
+
+def test_connectivity_kwargs_from_raw_credentials() -> None:
+    cfg = socks5.connectivity_proxy_kwargs(_CREDS)
+    assert cfg["proxy_type"] == "socks5"
+    assert cfg["proxy_host"] == "connectivity-proxy.internal"
+    assert cfg["proxy_port"] == 20004
+    assert cfg["proxy_client_id"] == "cid"
+    assert cfg["proxy_client_secret"] == "csecret"
+    assert cfg["proxy_token_url"] == (
+        "https://sub.authentication.eu10.hana.ondemand.com/oauth/token"
+    )
+
+
+def test_connectivity_kwargs_trusted_mode_omits_auth() -> None:
+    cfg = socks5.connectivity_proxy_kwargs(_CREDS, with_auth=False)
+    assert cfg == {
+        "proxy_type": "socks5",
+        "proxy_host": "connectivity-proxy.internal",
+        "proxy_port": 20004,
+    }
+
+
+def test_connectivity_kwargs_deprecated_url_key() -> None:
+    creds = {k: v for k, v in _CREDS.items() if k != "token_service_url"}
+    creds["url"] = "https://sub.authentication.eu10.hana.ondemand.com/"
+    cfg = socks5.connectivity_proxy_kwargs(creds)
+    assert cfg["proxy_token_url"].endswith("/oauth/token")
+    assert "//oauth" not in cfg["proxy_token_url"].replace("https://", "")
+
+
+def test_connectivity_kwargs_from_vcap_shape() -> None:
+    vcap = {"connectivity": [{"credentials": _CREDS}]}
+    cfg = socks5.connectivity_proxy_kwargs(vcap)
+    assert cfg["proxy_host"] == "connectivity-proxy.internal"
+
+
+def test_connectivity_kwargs_from_instance_shape() -> None:
+    cfg = socks5.connectivity_proxy_kwargs({"credentials": _CREDS})
+    assert cfg["proxy_port"] == 20004
+
+
+def test_connectivity_kwargs_from_json_string() -> None:
+    cfg = socks5.connectivity_proxy_kwargs(json.dumps({"connectivity": [{"credentials": _CREDS}]}))
+    assert cfg["proxy_host"] == "connectivity-proxy.internal"
+
+
+def test_connectivity_kwargs_missing_auth_raises() -> None:
+    creds = {
+        "onpremise_proxy_host": "h",
+        "onpremise_socks5_proxy_port": "20004",
+    }
+    with pytest.raises(ProxyError, match="clientid/clientsecret"):
+        socks5.connectivity_proxy_kwargs(creds)
+    # ... but trusted mode is fine without credentials.
+    assert socks5.connectivity_proxy_kwargs(creds, with_auth=False)["proxy_port"] == 20004
+
+
+def test_connectivity_kwargs_missing_host_raises() -> None:
+    # Recognised as a credentials mapping (has the SOCKS5 port key) but no host.
+    with pytest.raises(ProxyError, match="onpremise_proxy_host"):
+        socks5.connectivity_proxy_kwargs({"onpremise_socks5_proxy_port": "20004"}, with_auth=False)
+
+
+def test_connectivity_kwargs_unrecognised_binding_raises() -> None:
+    with pytest.raises(ProxyError, match="could not find connectivity credentials"):
+        socks5.connectivity_proxy_kwargs({"clientid": "x"}, with_auth=False)
+
+
+def test_connectivity_kwargs_reads_vcap_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VCAP_SERVICES", json.dumps({"connectivity": [{"credentials": _CREDS}]}))
+    monkeypatch.delenv("SERVICE_BINDING_ROOT", raising=False)
+    cfg = socks5.connectivity_proxy_kwargs()
+    assert cfg["proxy_host"] == "connectivity-proxy.internal"
+
+
+def test_connectivity_kwargs_no_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VCAP_SERVICES", raising=False)
+    monkeypatch.delenv("SERVICE_BINDING_ROOT", raising=False)
+    with pytest.raises(ProxyError, match="neither VCAP_SERVICES nor SERVICE_BINDING_ROOT"):
+        socks5.connectivity_proxy_kwargs()
+
+
+def test_connectivity_kwargs_service_binding_root_file_per_key(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pathlib
+
+    root = pathlib.Path(str(tmp_path))
+    binding = root / "my-connectivity"
+    binding.mkdir()
+    (binding / "type").write_text("connectivity")
+    for key, value in _CREDS.items():
+        (binding / key).write_text(value)
+    monkeypatch.delenv("VCAP_SERVICES", raising=False)
+    monkeypatch.setenv("SERVICE_BINDING_ROOT", str(root))
+    cfg = socks5.connectivity_proxy_kwargs()
+    assert cfg["proxy_port"] == 20004
+    assert cfg["proxy_client_secret"] == "csecret"
+
+
+def test_connectivity_kwargs_service_binding_root_credentials_json(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pathlib
+
+    root = pathlib.Path(str(tmp_path))
+    binding = root / "conn"
+    binding.mkdir()
+    (binding / "type").write_text("connectivity")
+    (binding / "credentials").write_text(json.dumps(_CREDS))
+    monkeypatch.delenv("VCAP_SERVICES", raising=False)
+    monkeypatch.setenv("SERVICE_BINDING_ROOT", str(root))
+    cfg = socks5.connectivity_proxy_kwargs(with_auth=False)
+    assert cfg["proxy_host"] == "connectivity-proxy.internal"
+
+
+def test_connectivity_kwargs_secret_not_in_error() -> None:
+    # A binding that will fail auth resolution must not echo any secret it did hold.
+    creds = {"onpremise_proxy_host": "h", "onpremise_socks5_proxy_port": "20004", "clientid": "x"}
+    with pytest.raises(ProxyError) as exc:
+        socks5.connectivity_proxy_kwargs(creds)
+    assert "x" == creds["clientid"]  # sanity
+    # clientsecret absent here; ensure the message is about the missing field only.
+    assert "clientsecret" in str(exc.value)

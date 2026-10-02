@@ -48,11 +48,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import socket
 import struct
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 from saprfclib.exceptions import ProxyError
 from saprfclib.transport import (
@@ -75,6 +78,7 @@ __all__ = [
     "socks5_connect",
     "socks5_connect_async",
     "fetch_connectivity_token",
+    "connectivity_proxy_kwargs",
 ]
 
 # RFC 1928 §3-§4 constants.
@@ -487,3 +491,161 @@ def fetch_connectivity_token(
     if not isinstance(token, str) or not token:
         raise ProxyError("OAuth2 token response did not contain an access_token")
     return token
+
+
+# --------------------------------------------------------------------------- #
+# Connectivity service binding → connect() kwargs (issue #51)                  #
+# --------------------------------------------------------------------------- #
+# The SAP BTP Connectivity service publishes the proxy host, the SOCKS5 port and
+# the XSUAA credentials in its service binding. Field names are from SAP's own
+# documentation (consuming-the-connectivity-service-313b215.md):
+#
+#   onpremise_proxy_host         the proxy host
+#   onpremise_socks5_proxy_port  the SOCKS5 port (typically 20004)
+#   clientid / clientsecret      XSUAA client_credentials
+#   token_service_url            XSUAA base URL; the token endpoint is
+#                                "<token_service_url>/oauth/token"
+#                                ("url" is the deprecated spelling)
+#
+# In Cloud Foundry these live in VCAP_SERVICES under ``connectivity[0].credentials``.
+# In Kyma / Kubernetes the SAP BTP service operator mounts them under
+# ``$SERVICE_BINDING_ROOT/<binding>/`` — either one file per key, or a single
+# ``credentials`` JSON file.
+_SOCKS5_PORT_KEY = "onpremise_socks5_proxy_port"
+_PROXY_HOST_KEY = "onpremise_proxy_host"
+
+
+def _token_endpoint(credentials: Mapping[str, Any]) -> str | None:
+    """Return ``<token_service_url>/oauth/token`` from a credentials mapping, or None."""
+    base = credentials.get("token_service_url") or credentials.get("url")
+    if not base or not isinstance(base, str):
+        return None
+    base = base.rstrip("/")
+    return base if base.endswith("/oauth/token") else base + "/oauth/token"
+
+
+def _credentials_from_binding(binding: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve a credentials mapping from any of the shapes a binding may take.
+
+    Accepts a raw credentials mapping, a service-instance mapping with a
+    ``credentials`` key, or a full VCAP_SERVICES mapping with a ``connectivity``
+    array.
+    """
+    if _PROXY_HOST_KEY in binding or _SOCKS5_PORT_KEY in binding:
+        return binding
+    if "connectivity" in binding:
+        instances = binding["connectivity"]
+        if not instances:
+            raise ProxyError("VCAP_SERVICES has an empty 'connectivity' array")
+        creds = instances[0].get("credentials")
+        if not isinstance(creds, Mapping):
+            raise ProxyError("connectivity binding has no 'credentials' object")
+        return creds
+    creds_val = binding.get("credentials")
+    if isinstance(creds_val, Mapping):
+        return creds_val
+    raise ProxyError(
+        f"could not find connectivity credentials in the binding (keys: {sorted(binding)!r})"
+    )
+
+
+def _credentials_from_service_binding_root(root: str) -> Mapping[str, Any]:
+    """Read a connectivity binding from a ``SERVICE_BINDING_ROOT`` directory tree.
+
+    Each immediate subdirectory is one service binding. The connectivity binding
+    is the one whose ``type`` file reads ``connectivity`` or which contains the
+    SOCKS5 port key. Keys are either individual files or a single ``credentials``
+    JSON file.
+    """
+    base = Path(root)
+    if not base.is_dir():
+        raise ProxyError(f"SERVICE_BINDING_ROOT {root!r} is not a directory")
+    for entry in sorted(base.iterdir()):
+        if not entry.is_dir():
+            continue
+        type_file = entry / "type"
+        is_connectivity = type_file.is_file() and type_file.read_text().strip() == "connectivity"
+        creds_file = entry / "credentials"
+        if creds_file.is_file():
+            creds: dict[str, Any] = json.loads(creds_file.read_text())
+            if is_connectivity or _SOCKS5_PORT_KEY in creds:
+                return creds
+            continue
+        # One file per key.
+        files = {f.name: f for f in entry.iterdir() if f.is_file()}
+        if is_connectivity or _SOCKS5_PORT_KEY in files:
+            return {name: f.read_text().strip() for name, f in files.items()}
+    raise ProxyError(f"no connectivity service binding found under {root!r}")
+
+
+def connectivity_proxy_kwargs(
+    binding: Mapping[str, Any] | str | None = None,
+    *,
+    with_auth: bool = True,
+) -> dict[str, Any]:
+    """Build ``connect()`` proxy keyword arguments from a Connectivity service binding.
+
+    ``binding`` may be a raw credentials mapping, a service-instance mapping, a full
+    VCAP_SERVICES mapping, or a JSON string of any of those. When ``None``, the
+    environment is read: ``VCAP_SERVICES`` first (Cloud Foundry), then
+    ``SERVICE_BINDING_ROOT`` (Kyma / Kubernetes).
+
+    Returns a dict suitable for splatting into :func:`saprfclib.connect`::
+
+        cfg = connectivity_proxy_kwargs()
+        conn = saprfclib.connect(ashost="s4", sysnr="00", client="001", **cfg)
+
+    ``with_auth`` controls whether the SAP JWT (0x80) parameters are included. The
+    default ``True`` suits the Cloud Foundry Connectivity service, where proxy
+    authentication is mandatory, and the Connectivity Proxy in untrusted mode. Set
+    it to ``False`` for the Connectivity Proxy in **trusted mode**
+    (``enableProxyAuthorization=false``, the in-cluster Kyma default), which uses the
+    no-authentication method and where sending a JWT would be rejected at method
+    negotiation.
+
+    The returned dict carries ``proxy_client_secret`` when ``with_auth`` is set;
+    treat it as a secret (it is never logged by this library).
+    """
+    if binding is None:
+        vcap = os.environ.get("VCAP_SERVICES")
+        if vcap:
+            credentials = _credentials_from_binding(json.loads(vcap))
+        else:
+            root = os.environ.get("SERVICE_BINDING_ROOT")
+            if not root:
+                raise ProxyError(
+                    "no binding given and neither VCAP_SERVICES nor SERVICE_BINDING_ROOT "
+                    "is set in the environment"
+                )
+            credentials = _credentials_from_service_binding_root(root)
+    elif isinstance(binding, str):
+        credentials = _credentials_from_binding(json.loads(binding))
+    else:
+        credentials = _credentials_from_binding(binding)
+
+    host = credentials.get(_PROXY_HOST_KEY)
+    port = credentials.get(_SOCKS5_PORT_KEY)
+    if not host or port is None:
+        raise ProxyError(
+            "connectivity binding is missing onpremise_proxy_host or onpremise_socks5_proxy_port"
+        )
+
+    kwargs: dict[str, Any] = {
+        "proxy_type": "socks5",
+        "proxy_host": str(host),
+        "proxy_port": int(port),
+    }
+    if with_auth:
+        client_id = credentials.get("clientid")
+        client_secret = credentials.get("clientsecret")
+        token_url = _token_endpoint(credentials)
+        if not (client_id and client_secret and token_url):
+            raise ProxyError(
+                "connectivity binding is missing clientid/clientsecret/token_service_url "
+                "needed for SAP JWT proxy authentication (pass with_auth=False for a "
+                "trusted-mode Connectivity Proxy)"
+            )
+        kwargs["proxy_client_id"] = str(client_id)
+        kwargs["proxy_client_secret"] = str(client_secret)
+        kwargs["proxy_token_url"] = token_url
+    return kwargs
