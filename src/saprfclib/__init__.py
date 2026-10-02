@@ -59,6 +59,7 @@ from saprfclib.language import language_iso_to_sap, language_sap_to_iso
 from saprfclib.metadata import get_function_desc
 from saprfclib.pool import AsyncConnectionPool, ConnectionPool, PoolMetrics
 from saprfclib.server import AsyncRfcServer, RfcServer
+from saprfclib.socks5 import connectivity_proxy_kwargs
 from saprfclib.stores import (
     AsyncTidStore,
     AsyncUnitStore,
@@ -94,6 +95,7 @@ __all__ = [
     "get_function_desc",
     # Sync connection
     "connect",
+    "connectivity_proxy_kwargs",
     "ConnectionPool",
     # Async connection + pool + server (Phase 9 / D-08)
     "connect_async",

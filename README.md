@@ -75,6 +75,11 @@ conn = saprfclib.connect(
     proxy_token_url="https://<subaccount>.authentication.<region>.hana.ondemand.com/oauth/token",
     proxy_scc_location_id="MyLocation",  # optional Cloud Connector location
 )
+
+# or let saprfclib read the bound Connectivity service (VCAP_SERVICES / SERVICE_BINDING_ROOT)
+cfg = saprfclib.connectivity_proxy_kwargs()           # add with_auth=False in trusted mode
+conn = saprfclib.connect(ashost="s4-2025", sysnr="00", client="001",
+                         user="Developer", passwd="...", **cfg)
 ```
 
 See the [Connection Options guide](https://randomstr1ng.github.io/saprfclib/getting-started/connection-options/)
