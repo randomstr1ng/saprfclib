@@ -1937,14 +1937,21 @@ class Connection:
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
         lang: str = _DEFAULT_LANG,
+        gwhost: str | None = None,
     ) -> None:
         """Drive the NI/GW/logon handshake to READY (or raise on failure).
+
+        ``gwhost`` is the gateway host written into the GW frames; it defaults to
+        ``ashost``. They differ only when the TCP destination is not the name the
+        gateway resolves — e.g. a virtual host reached through a SOCKS5 proxy /
+        Cloud Connector (issue #51).
 
         The Session emits the NI-version request; for GW-connect, GW-info,
         GW-done, and logon legs the facade supplies the request bytes (the pure
         state machine does not own credential/handle framing). We loop, feeding
         each server frame and sending the facade-supplied frames, until READY.
         """
+        gwhost = gwhost or ashost
         # wRFC path: bypass NI/GW entirely; use RFC app-layer TLVs over WebSocket.
         try:
             from saprfclib.ws import WsTransport
@@ -1993,7 +2000,7 @@ class Connection:
                 client=client,
                 user=user,
                 passwd=passwd,
-                ashost=ashost,
+                gwhost=gwhost,
                 sysnr=sysnr,
                 local_ip=local_ip,
                 lang=lang,
@@ -2020,7 +2027,7 @@ class Connection:
                     client=client,
                     user=user,
                     passwd=passwd,
-                    ashost=ashost,
+                    gwhost=gwhost,
                     sysnr=sysnr,
                     local_ip=local_ip,
                     lang=lang,
@@ -2034,7 +2041,7 @@ class Connection:
         client: str,
         user: str | None,
         passwd: str | None,
-        ashost: str,
+        gwhost: str,
         sysnr: int,
         local_ip: str,
         lang: str = _DEFAULT_LANG,
@@ -2048,10 +2055,10 @@ class Connection:
         handle = self._session.handle or b"00000000"
         match prev_state:
             case SessionState.CONNECTED:
-                return [self._build_gw_connect_request(ashost, sysnr, snc=self._snc_mode)]
+                return [self._build_gw_connect_request(gwhost, sysnr, snc=self._snc_mode)]
             case SessionState.NI_VERSIONED:
                 return [
-                    self._build_gw_info(handle, ashost, snc=self._snc_mode),
+                    self._build_gw_info(handle, gwhost, snc=self._snc_mode),
                     self._build_gw_done_client(handle, snc=self._snc_mode),
                 ]
             case SessionState.GW_CONNECTED:
@@ -2072,8 +2079,14 @@ class Connection:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _build_gw_connect_request(ashost: str, sysnr: int, *, snc: bool = False) -> bytes:
+    def _build_gw_connect_request(gwhost: str, sysnr: int, *, snc: bool = False) -> bytes:
         """Build the 453-byte GW_CONNECT_REQUEST payload (PKT 8 capture).
+
+        ``gwhost`` is the gateway/application-server host written into the frame —
+        the name the *gateway* resolves, which for a direct connection is the same
+        as ``ashost`` but through a proxy/Cloud Connector is the internal host, not
+        the virtual host used for the TCP tunnel (issue #51 live capture: a virtual
+        ``ashost`` here makes the gateway answer ``hostname '…' unknown``).
 
         Confirmed from the GW_CONNECT frame builder.
         Fields confirmed by analysis:
@@ -2106,7 +2119,7 @@ class Connection:
         payload[28:36] = b"\x00\x00\x05\x00\x00\x00\x00\x00"
         payload[40:48] = b"        "  # no handle in outbound request
         payload[48:56] = b"NWRFC   "  # remote LU name = RFC gateway partner
-        payload[56:64] = ashost[:8].ljust(8).encode("ascii")  # IP prefix
+        payload[56:64] = gwhost[:8].ljust(8).encode("ascii")  # IP prefix
         # Two-digit field: "sapdp" + NN + one space is exactly 8 bytes. A value
         # above 99 used to make it 9 and grow the whole frame by a byte.
         payload[64:72] = f"sapdp{_validate_sysnr(sysnr):02d} ".encode("ascii")
@@ -2121,7 +2134,7 @@ class Connection:
         payload[122:154] = os.urandom(16).hex().upper().encode("ascii")
         payload[156:172] = b"\x00\x01\xff\xff\xff\xfe\xff\xff\xff\xfe\x02\x00\x00\x00\x00\x00"
         # Server IP null-terminated at payload[185]
-        ip_b = ashost.encode("ascii") + b"\x00"
+        ip_b = gwhost.encode("ascii") + b"\x00"
         payload[185 : 185 + min(len(ip_b), 16)] = ip_b[:16]
         # Client hostname null-terminated at payload[329]
         try:
@@ -2135,8 +2148,13 @@ class Connection:
         return bytes(payload)
 
     @staticmethod
-    def _build_gw_info(handle: bytes, ashost: str, *, snc: bool = False) -> bytes:
+    def _build_gw_info(handle: bytes, gwhost: str, *, snc: bool = False) -> bytes:
         """Build the 224-byte GW_INFO payload (PKT 10 capture; no server response).
+
+        ``gwhost`` is the gateway host written into the frame (see
+        :meth:`_build_gw_connect_request`). The gateway resolves this field — issue
+        #51 live capture shows a virtual ``ashost`` here is rejected with
+        ``hostname '…' unknown`` and the conversation is then torn down.
 
         Confirmed from the GW_INFO frame builder.
         Fields confirmed by analysis:
@@ -2161,11 +2179,11 @@ class Connection:
         payload[24:28] = b"\x00\x00\x00\x90"  # [27]=0x90 confirmed (confirmed)
         payload[28:32] = b"\x00\x00\x04\x00"  # [30]=4 confirmed (confirmed)
         payload[40:48] = handle
-        payload[48:56] = ashost[:8].ljust(8).encode("ascii")
-        struct.pack_into(">I", payload, 56, len(ashost))
+        payload[48:56] = gwhost[:8].ljust(8).encode("ascii")
+        struct.pack_into(">I", payload, 56, len(gwhost))
         struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
         # Server IP padded with spaces to 112 bytes at payload[80]
-        ip_b = ashost.encode("ascii")
+        ip_b = gwhost.encode("ascii")
         padded = ip_b + b" " * (112 - len(ip_b))
         payload[80:192] = padded[:112]
         return bytes(payload)
@@ -4074,6 +4092,7 @@ def connect(
     proxy_client_secret: str | None = None,
     proxy_token_url: str | None = None,
     socket_factory: Callable[[str, int], socket.socket] | None = None,
+    gwhost: str | None = None,
     trace: RfcTrace | None = None,
     snc_lib: str | None = None,
     snc_partnername: str | None = None,
@@ -4137,6 +4156,14 @@ def connect(
     ``Callable[[host, port], socket]`` that returns an already-connected socket. It
     is mutually exclusive with ``proxy_type``. Neither applies to the wRFC
     (``wshost``) path, which proxies via ``ws_proxy_*``.
+
+    ``gwhost`` is the gateway host written into the GW handshake frames, which the
+    **server-side gateway resolves**. It defaults to ``ashost`` and should be left
+    unset for a direct connection. Set it for a proxy / Cloud Connector path:
+    ``ashost`` is then the *virtual* host used only to open the TCP tunnel (resolved
+    by the proxy), while ``gwhost`` must be the SAP system's own internal hostname —
+    the name the gateway resolves to itself. A virtual ``gwhost`` makes the gateway
+    reject the connection with ``hostname '…' unknown`` (issue #51).
 
     ``lang`` is the logon language. Accepts the one-character SAP code ('E' English,
     'D' German, 'S' Spanish, …) or the two-character ISO code ('EN', 'DE', 'ES'); an
@@ -4362,6 +4389,7 @@ def connect(
         _tid_store = tid_store
         _unit_store = unit_store
         _socket_factory = socket_factory
+        _gwhost = gwhost
 
         async def _async_setup() -> AsyncConnection:
             # Use connect_tcp (sync, patchable in tests) wrapped in a thin async shim.
@@ -4398,6 +4426,7 @@ def connect(
                 ashost=_ashost,
                 sysnr=_sysnr,
                 lang=_lang,
+                gwhost=_gwhost,
             )
             return ac
 
@@ -4416,7 +4445,13 @@ def connect(
         open_route(transport, hops, ashost, str(port))
 
     conn._handshake(
-        client=client, user=user, passwd=passwd, ashost=ashost, sysnr=int(sysnr), lang=lang
+        client=client,
+        user=user,
+        passwd=passwd,
+        ashost=ashost,
+        sysnr=int(sysnr),
+        lang=lang,
+        gwhost=gwhost,
     )
     return conn
 
@@ -4657,8 +4692,12 @@ class AsyncConnection:
         ashost: str = "0.0.0.0",
         sysnr: int = 0,
         lang: str = _DEFAULT_LANG,
+        gwhost: str | None = None,
     ) -> None:
         """Drive the NI/GW/logon handshake to READY (classic TCP path, async).
+
+        ``gwhost`` is the gateway host written into the GW frames (defaults to
+        ``ashost``); it differs only for a proxy/Cloud-Connector path (issue #51).
 
         Mirrors Connection._handshake for the DISCONNECTED → READY path.
         Facade-owned frames (GW_CONNECT, GW_INFO+GW_DONE_CLIENT, logon) are built
@@ -4667,6 +4706,7 @@ class AsyncConnection:
 
         Credentials are never logged (T-09-03-CRED).
         """
+        gwhost = gwhost or ashost
         local_ip = "127.0.0.1"
         try:
             sock = self._transport._writer.get_extra_info("socket")
@@ -4689,12 +4729,12 @@ class AsyncConnection:
                 match prev_state:
                     case SessionState.CONNECTED:
                         await self._transport.send_message(
-                            Connection._build_gw_connect_request(ashost, sysnr, snc=False)
+                            Connection._build_gw_connect_request(gwhost, sysnr, snc=False)
                         )
                     case SessionState.NI_VERSIONED:
                         # GW_INFO has no server response; send both in the same iteration.
                         await self._transport.send_message(
-                            Connection._build_gw_info(handle, ashost, snc=False)
+                            Connection._build_gw_info(handle, gwhost, snc=False)
                         )
                         await self._transport.send_message(
                             Connection._build_gw_done_client(handle, snc=False)
@@ -5570,6 +5610,7 @@ async def connect_async(
     proxy_client_secret: str | None = None,
     proxy_token_url: str | None = None,
     socket_factory: Callable[[str, int], socket.socket] | None = None,
+    gwhost: str | None = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     tid_store: TidStore | None = None,
@@ -5682,5 +5723,6 @@ async def connect_async(
         ashost=ashost,
         sysnr=int(sysnr),
         lang=lang,
+        gwhost=gwhost,
     )
     return conn

@@ -561,3 +561,37 @@ def test_connectivity_kwargs_secret_not_in_error() -> None:
     assert "x" == creds["clientid"]  # sanity
     # clientsecret absent here; ensure the message is about the missing field only.
     assert "clientsecret" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# 5. gwhost decoupling (issue #51 live capture)                                #
+# --------------------------------------------------------------------------- #
+# The GW frames must carry the gateway host the SERVER resolves, not the virtual
+# host used only for the TCP tunnel. A virtual ashost in these fields made the
+# gateway answer "hostname '…' unknown" and tear the conversation down.
+
+from saprfclib.connection import Connection  # noqa: E402
+
+
+def test_gw_info_writes_gwhost_not_virtual_host() -> None:
+    frame = Connection._build_gw_info(b"HANDLE12", "vhcala4hci")
+    # Server-host field is the 112-byte block at [80:192].
+    host_field = frame[80:192].rstrip(b" ")
+    assert host_field == b"vhcala4hci"
+    # Length field at [56:64] is len(gwhost).
+    assert struct.unpack_from(">I", frame, 56)[0] == len("vhcala4hci")
+
+
+def test_gw_connect_request_writes_gwhost() -> None:
+    frame = Connection._build_gw_connect_request("vhcala4hci", 0)
+    # Null-terminated server host at [185].
+    assert frame[185:195].startswith(b"vhcala4hci")
+    # 8-byte prefix at [56:64].
+    assert frame[56:64] == b"vhcala4h"  # "vhcala4hci"[:8]
+
+
+def test_gwhost_defaults_to_ashost_for_direct_path() -> None:
+    # When gwhost is omitted the builders receive ashost unchanged, so a direct
+    # connection is byte-identical to before this change.
+    info_as = Connection._build_gw_info(b"HANDLE12", "10.0.0.1")
+    assert info_as[80:192].rstrip(b" ") == b"10.0.0.1"
