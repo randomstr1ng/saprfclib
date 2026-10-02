@@ -45,6 +45,29 @@ If you cannot reach tier 1–3 for a value, you have two legitimate options:
 You do not have a third option. Shipping an unsourced constant is worse than shipping
 nothing — a missing feature is visible, a wrong byte is not.
 
+### Do the work — reverse-engineering and capture always beat a guess
+
+When a wire value is unknown, the answer is to **go get it**, never to invent it.
+Reverse-engineering the binary and capturing live packets are **always preferred over a
+guess — including a plausible one.** Reach for them first, in this order of what the
+result may be used for:
+
+- **Packet captures** are the citable ground truth (tier 1–2 above): replayable, and
+  what golden fixtures are built from. A value you can capture, you capture — you do not
+  infer it.
+- **Binary reverse-engineering** is the investigative tool that tells you *where to look
+  and what to capture* — field boundaries, branch conditions, which constant feeds which
+  frame. Prefer it over guessing every time. But it is never a shortcut around a capture,
+  and — per the legal boundary below — **its output is never cited in this repository.**
+  A value RE surfaces is confirmed by putting it on the wire against a real system and is
+  then recorded as observed wire behaviour; the capture is the evidence, not the
+  disassembly.
+
+A guess is the last resort, reached only when capture *and* RE are both genuinely out of
+reach — and even then it ships only as a labelled `[ASSUMED]` tier-4 inference whose
+label says which capture or RE would settle it. "I could have captured it but assumed
+instead" is not an acceptable reason for an `[ASSUMED]` value.
+
 ### Nothing ships unvalidated — including defaults
 
 The tier table above governs *wire values*. This rule governs **commits**: no
