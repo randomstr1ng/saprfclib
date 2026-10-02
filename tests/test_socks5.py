@@ -595,3 +595,51 @@ def test_gwhost_defaults_to_ashost_for_direct_path() -> None:
     # connection is byte-identical to before this change.
     info_as = Connection._build_gw_info(b"HANDLE12", "10.0.0.1")
     assert info_as[80:192].rstrip(b" ") == b"10.0.0.1"
+
+
+def test_connect_classic_path_threads_gwhost_into_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The classic connect() path (AsyncConnection) must write gwhost, not the
+    # virtual ashost, into the GW frames the gateway resolves (issue #51).
+    import saprfclib.connection as cm
+    import tests._mocks as mocks
+    from tests.test_connection import _handshake_responses
+
+    captured: dict[str, object] = {}
+
+    def fake_connect_tcp(host: str, port: int, **kw: object) -> object:
+        t = mocks.MockTransport(_handshake_responses())
+        captured["t"] = t
+        return t
+
+    monkeypatch.setattr(cm, "connect_tcp", fake_connect_tcp)
+    conn = cm.connect(
+        ashost="s4-2025-raw",
+        sysnr="00",
+        client="001",
+        user="DEV",
+        passwd="x",
+        gwhost="vhcala4hci",
+    )
+    try:
+        gw_info = next(f for f in captured["t"].sent if f[:2] == b"\x06\x0f")  # type: ignore[attr-defined]
+        assert gw_info[80:192].rstrip(b" ") == b"vhcala4hci"
+        assert b"s4-2025-raw" not in gw_info
+    finally:
+        conn.close()
+
+
+def test_proxy_without_gwhost_warns() -> None:
+    with pytest.warns(UserWarning, match="without gwhost"):
+        from saprfclib.connection import _validate_proxy_args
+
+        _validate_proxy_args("socks5", "proxy", 20004, None, wshost=None, gwhost=None)
+
+
+def test_proxy_with_gwhost_no_warning() -> None:
+    import warnings as _w
+
+    from saprfclib.connection import _validate_proxy_args
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning becomes an error
+        _validate_proxy_args("socks5", "proxy", 20004, None, wshost=None, gwhost="vhcala4hci")
