@@ -1,0 +1,116 @@
+{
+  "message_type": "GW_INFO",
+  "capture_source": "live capture 2026-10-02 (nohat-rfc-working.pcap) frame 5; SAP A4H sysnr=00 via SAP BTP Connectivity Proxy SOCKS5 + Cloud Connector",
+  "evidence": "CONFIRMED — the gateway accepted this 0x060f frame and the STFC_CONNECTION call round-tripped (ECHOTEXT returned). Proves the gateway-host field [80:192] must carry the SAP system's internal address (here the IPv4 literal 192.168.88.9), not the virtual tunnel host (s4-2025-raw), which an earlier capture showed the gateway rejects with 'hostname ... unknown' (issue #51).",
+  "ni_header_length": 4,
+  "notes": [
+    "GW_INFO (type 0x060f) — sent by the client after GW_CONNECT accept; the gateway sends no response to this frame.",
+    "The server-host block at offset 80 (112 bytes, space-padded) is the field the gateway resolves. gwhost here is the IPv4 literal 192.168.88.9, so no server-side DNS is needed.",
+    "Connection handle '56334047' comes from the GW_CONNECT ACK (frame 4).",
+    "No credentials appear in this frame (credentials are in the later 0x06cb logon frame, deliberately not captured here)."
+  ],
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_length",
+      "value": "000000e0",
+      "type": "fixed",
+      "note": "BE uint32 = 224 payload bytes"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "gw_msg_class",
+      "value": "0x060f",
+      "type": "fixed",
+      "note": "GW_INFO message type"
+    },
+    {
+      "offset": 6,
+      "length": 2,
+      "name": "gw_protocol_version",
+      "value": "0x0200",
+      "type": "fixed",
+      "note": "GW protocol version 2.0"
+    },
+    {
+      "offset": 8,
+      "length": 36,
+      "name": "gw_header",
+      "value": "variable",
+      "type": "fixed",
+      "note": "GW header area (flags 0xffff0000 at payload[4:8], plus fixed GW fields through payload[39])"
+    },
+    {
+      "offset": 44,
+      "length": 8,
+      "name": "connection_handle",
+      "value": "3536333334303437",
+      "type": "fixed",
+      "note": "ASCII '56334047' — connection handle from the GW_CONNECT ACK (payload[40:48])"
+    },
+    {
+      "offset": 52,
+      "length": 8,
+      "name": "gwhost_prefix",
+      "value": "3139322e3136382e",
+      "type": "fixed",
+      "note": "ASCII '192.168.' — first 8 bytes of the gateway host (payload[48:56])"
+    },
+    {
+      "offset": 60,
+      "length": 4,
+      "name": "gwhost_length",
+      "value": "0000000c",
+      "type": "fixed",
+      "note": "BE uint32 = 12 = len('192.168.88.9') (payload[56:60])"
+    },
+    {
+      "offset": 64,
+      "length": 16,
+      "name": "zeros_pad",
+      "value": "0x00...",
+      "type": "fixed",
+      "note": "All zeros (payload[60:76])"
+    },
+    {
+      "offset": 80,
+      "length": 4,
+      "name": "tail",
+      "value": "ffff0004",
+      "type": "fixed",
+      "note": "RFC marker / client tail 0xffff0004 (plain) (payload[76:80])"
+    },
+    {
+      "offset": 84,
+      "length": 12,
+      "name": "gwhost",
+      "value": "3139322e3136382e38382e39",
+      "type": "variable",
+      "note": "ASCII '192.168.88.9' — the SAP system's internal address the gateway resolves (payload[80:92])"
+    },
+    {
+      "offset": 96,
+      "length": 100,
+      "name": "gwhost_padding",
+      "value": "0x20...",
+      "type": "fixed",
+      "note": "Space padding of the 112-byte server-host block (payload[92:192])"
+    },
+    {
+      "offset": 196,
+      "length": 32,
+      "name": "trailing_zeros",
+      "value": "0x00...",
+      "type": "fixed",
+      "note": "Trailing zeros to the 224-byte frame end (payload[192:224])"
+    }
+  ],
+  "expected_parse": {
+    "ni_length": 224,
+    "gw_msg_type": "0x060f",
+    "connection_handle": "56334047",
+    "gwhost": "192.168.88.9"
+  }
+}
