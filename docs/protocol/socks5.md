@@ -93,6 +93,49 @@ Reply `REP` codes and the meanings `saprfclib` reports (matching SAP's own trans
 | 7 | command not supported |
 | 8 | address type not supported |
 
+## Gateway host vs. tunnel host (`gwhost`)
+
+The SOCKS5 tunnel and the SAP RFC handshake resolve the target host in **two
+different places**, and through a proxy they are not the same name:
+
+- The **SOCKS5 CONNECT** target (`ashost`) is resolved by the proxy / Cloud
+  Connector. For a Connectivity Proxy this is the *virtual host* configured in the
+  Cloud Connector (e.g. `s4-2025-raw`).
+- The **GW handshake frames** (`0x0601` GW_CONNECT and `0x060f` GW_INFO) carry a
+  gateway host that the **server-side gateway resolves locally** — byte `[80:192]`
+  of the `0x060f` frame. The generic SOCKS5 tunnel forwards raw TCP, so the Cloud
+  Connector does not rewrite this field (unlike its RFC-aware protocol handler); the
+  virtual host reaches the gateway unchanged and cannot be resolved there.
+
+A live capture (issue #51, `nohat-rfc.pcap`) showed the consequence: the NI version
+exchange and GW_CONNECT succeed, then the gateway answers the `0x060f` frame with
+
+```
+*ERR* hostname 's4-2025-raw' unknown … NI (network interface) …
+      SAP-Gateway on host vhcala4hci / sapgw00
+```
+
+and tears the conversation down, so the following RFC call fails with
+`Conversation … not found`.
+
+The fix is the `gwhost` parameter: `ashost` stays the virtual tunnel host, and
+`gwhost` is set to the SAP system's own internal hostname — the name the gateway
+resolves to itself (visible in the error above as `vhcala4hci`). `gwhost` defaults
+to `ashost`, so a direct connection is unchanged.
+
+```python
+conn = saprfclib.connect(
+    ashost="s4-2025-raw", sysnr="00", client="001", user="Developer", passwd="...",
+    proxy_type="socks5", proxy_host="connectivity-proxy...", proxy_port=20004,
+    gwhost="vhcala4hci",   # the internal host the gateway resolves locally
+)
+```
+
+**[ASSUMED]** The exact value `gwhost` must take for a given landscape (the SAP
+system's internal hostname, or whatever the gateway resolves to itself) is
+confirmed only against the issue #51 capture, where `vhcala4hci` is the gateway's
+own host. A capture from another landscape would confirm the general rule.
+
 ## Security (D-41, threat T-07-PROXY-CRED)
 
 The JWT, the OAuth `client_secret`, and any proxy password are used only to build wire

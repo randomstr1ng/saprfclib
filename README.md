@@ -61,10 +61,11 @@ Reach an on-premise system through the SAP BTP Connectivity Proxy / Cloud Connec
 ```python
 # trusted mode (no proxy authentication)
 conn = saprfclib.connect(
-    ashost="s4-2025", sysnr="00", client="001", user="Developer", passwd="...",
+    ashost="s4-2025-raw", sysnr="00", client="001", user="Developer", passwd="...",
     proxy_type="socks5",
     proxy_host="connectivity-proxy.kyma-system.svc.cluster.local",
     proxy_port=20004,
+    gwhost="vhcala4hci",  # SAP system's internal host (ashost is the virtual tunnel host)
 )
 
 # untrusted mode — SAP JWT (method 0x80), token fetched via client_credentials

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gwhost` connection parameter** (issue #51). The gateway host written into the GW
+  handshake frames, which the server-side gateway resolves, is now separable from
+  `ashost`. It defaults to `ashost` (direct connections are unchanged) and is set for a
+  proxy / Cloud Connector path, where `ashost` is the virtual host used only for the TCP
+  tunnel and `gwhost` must be the SAP system's internal hostname. Without this a proxied
+  connection completed the NI/GW_CONNECT legs and then failed with the gateway reporting
+  `hostname '<virtual>' unknown` and tearing the conversation down. See
+  `docs/protocol/socks5.md`.
 - **SOCKS5 proxy support for raw RFC/TCP connections** (issue #51). `connect()` and
   `connect_async()` accept `proxy_type="socks5"` with `proxy_host`/`proxy_port` to reach an
   SAP system through the SAP BTP Connectivity Proxy — the SOCKS5 interface Kyma/Kubernetes
