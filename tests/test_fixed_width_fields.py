@@ -76,36 +76,58 @@ def test_post_registration_frame_length_is_stable() -> None:
         session.build_post_reg_a("a" * 129)
 
 
-def test_program_id_is_truncated_at_the_field_width_not_at_eight() -> None:
-    """A 16-byte field was being cut to 8.
+def test_ni_init_long_program_id_matches_sdk_capture() -> None:
+    """A program ID over 8 characters must leave payload[46:54] blank (issue #58).
 
-    Invisible in the capture it was written from, which used the seven-character
-    program ID "python3" — slicing at 8 changed nothing there. Any longer ID
-    registered under half its name, and a gateway that cannot match the SM59
-    destination simply never sends the server a call. Nothing reports it.
-    """
-    for prog_id, expected in [
-        ("python3", b"python3         "),
-        ("SAPRFC_TEST", b"SAPRFC_TEST     "),
-        ("MY_RFC_SERVER", b"MY_RFC_SERVER   "),
-        ("A" * 20, b"A" * 16),
-    ]:
-        field = prog_id.encode("ascii")[:16].ljust(16, b"\x20")
-        assert len(field) == 16
-        assert field == expected
-
-
-def test_the_ni_init_capture_still_reproduces() -> None:
-    """The fix must not disturb the frame the capture recorded.
-
-    "python3" is exactly the value for which the old and new code agree, which is
-    both why the bug survived and why this fixture cannot detect it — noted here
-    so nobody reads a passing fixture as proof the field is right.
+    Releases up to 0.1.8 wrote program_id[:16] across [38:54]. The only capture
+    then available used "python3", for which 8 and 16 agree. The SDK capture with
+    "ZFTNT_SIGTEST" shows program_id[:8] then blanks, and the gateway closes the
+    handle on any non-blank value there.
     """
     from pathlib import Path
 
+    from saprfclib.server import _build_ni_init
+
+    capture = (
+        Path(__file__).parent / "golden" / "framing" / "server_ni_init_client_long_progid.bin"
+    ).read_bytes()[4:]
+    built = _build_ni_init(capture[2:6], "titan", "ZFTNT_SIGTEST")
+    assert built == capture
+
+
+def test_the_ni_init_capture_still_reproduces() -> None:
+    """The short-ID capture, where every truncation width agrees."""
+    from pathlib import Path
+
+    from saprfclib.server import _build_ni_init
+
     capture = (
         Path(__file__).parent / "golden" / "framing" / "server_ni_init_client.bin"
-    ).read_bytes()
-    assert capture[0x2A:0x3A] == b"python3         "
-    assert b"python3"[:16].ljust(16, b"\x20") == capture[0x2A:0x3A]
+    ).read_bytes()[4:]
+    built = _build_ni_init(capture[2:6], "titan", "python3")
+    # [0:2] differs: this older capture has 0203, the SDK capture and the code 020b.
+    assert built[2:] == capture[2:]
+
+
+@pytest.mark.parametrize("prog_id", ["A", "python3", "ZFTNT_SIGTEST", "A" * 64])
+def test_ni_init_length_is_stable_and_tail_blank(prog_id: str) -> None:
+    from saprfclib.server import _build_ni_init
+
+    frame = _build_ni_init(b"\x0a\x00\x00\x01", "a" * 50, prog_id)
+    assert len(frame) == 64
+    assert frame[46:54] == b"\x20" * 8
+
+
+def test_post_registration_gw_frames_match_sdk_capture() -> None:
+    from pathlib import Path
+
+    from saprfclib.server import _build_post_call_d2, _build_reg_waiting
+
+    golden = Path(__file__).parent / "golden" / "framing"
+
+    def load(name: str) -> bytes:
+        return (golden / f"{name}.bin").read_bytes()[4:]
+
+    assert _build_reg_waiting() == load("server_reg_waiting")
+    done = load("server_dispatch_done")
+    assert _build_post_call_d2(done[40:48]) == done

@@ -134,34 +134,70 @@ _RESPONSE_DIRECTIONS = frozenset({RFC_EXPORT, RFC_CHANGING, RFC_TABLES})
 # --------------------------------------------------------------------------- #
 
 
+def _build_ni_init(local_ip: bytes, local_host: str, program_id: str) -> bytes:
+    """Build the 64B first frame of the registration socket.
+
+    Source: golden fixtures server_ni_init_client.bin (program ID "python3") and
+    server_ni_init_client_long_progid.bin (13-char "ZFTNT_SIGTEST", NW RFC SDK).
+
+    [0:2]=020b [2:6]=local IPv4 [6:10]=zeros [10:20]=program_id[:9], NUL-padded
+    [20:24]="1100" [24:28]=zeros [28:30]=0006 [30:38]=hostname[:8], blank-padded
+    [38:46]=program_id[:8], blank-padded [46:54]=blanks [54:58]=06cbffff [58:64]=zeros
+    """
+    prog_id_enc = program_id.encode("ascii")
+    # NUL-padded, not blank-padded. Source: server_ni_init_client.bin has
+    # "python3\x00\x00\x00"; up to 0.1.8 this sent "python3\x00  ".
+    proc_name_10 = prog_id_enc[:9].ljust(10, b"\x00")
+    local_host_8 = local_host[:8].encode("ascii", "replace").ljust(8, b"\x20")
+    # Program ID is cut at 8 here; the full ID goes in the 512B TPNAME frame.
+    # Source: long_progid fixture — the SDK sends "ZFTNT_SI" for "ZFTNT_SIGTEST".
+    prog_id_8 = prog_id_enc[:8].ljust(8, b"\x20")
+    # [46:54] must stay blank. Behavioural probe 2026-10-27 (A4H gateway): any
+    # non-blank value here makes the gateway close the handle without a reply and
+    # log "REGISTER_TP conv id not initialized" (issue #58). Releases up to 0.1.8
+    # wrote program_id[8:16] here, which broke every program ID over 8 characters.
+    # [ASSUMED] the field is a conversation ID that is empty at registration; the
+    # bytes are captured, the meaning is inferred from the gateway log text.
+    blank_8 = b"\x20" * 8
+    frame = (
+        b"\x02\x0b"
+        + local_ip
+        + b"\x00\x00\x00\x00"
+        + proc_name_10
+        + b"1100"
+        + b"\x00\x00\x00\x00"
+        + b"\x00\x06"
+        + local_host_8
+        + prog_id_8
+        + blank_8
+        + b"\x06\xcb\xff\xff"
+        + b"\x00" * 6
+    )
+    if len(frame) != 64:
+        raise ValueError(f"local_ip must be 4 bytes, got {len(local_ip)}")
+    return frame
+
+
 def _build_reg_waiting() -> bytes:
-    """Build 06d1 REG_WAITING (80B) — sent after 512B frame (sdk_listen.pcap PKT4).
+    """Build 06d1 REG_WAITING (80B) — sent after the 512B TPNAME frame.
 
     Signals GW "ready to accept CPI-C calls" → SMGW: "Waiting for CPI-C Call".
     GW responds with 06cf assigning a session handle.
 
-    Layout (80B): [0:2]=06d1 [2:4]=0700 [4:6]=ffff [6:40]=zeros
-    [32:40]=seq=1  [40:48]=local handle (\x00H000001)
-    [48:52]=0x50 (frame size)  [52:76]=zeros  [76:80]=ffffffff
+    Source: golden fixture server_reg_waiting.bin (NW RFC SDK, 2026-10-27).
+    Layout (80B): [0:2]=06d1 [2:4]=0700 [4:6]=ffff [30]=0x01
+    [40:48]=local conv ID "H0000001"  [48:52]=0x50 (frame size)  [76:80]=ffffffff
     """
     frame = bytearray(80)
     frame[0:2] = b"\x06\xd1"
     frame[2:4] = b"\x07\x00"
     frame[4:6] = b"\xff\xff"
-    frame[32:40] = b"\x00\x00\x00\x00\x00\x00\x00\x01"
-    frame[40:48] = b"\x00\x48\x30\x30\x30\x30\x30\x31"  # SDK local handle (\x00H000001)
+    # Earlier releases put this 0x01 at [39] and wrote "\x00H000001" at [40:48];
+    # the 2026-10-27 SDK capture has 0x01 at [30] and "H0000001".
+    frame[30] = 0x01
+    frame[40:48] = b"H0000001"
     frame[48:52] = b"\x00\x00\x00\x50"  # = 80 (frame size)
     frame[76:80] = b"\xff\xff\xff\xff"
-    return bytes(frame)
-
-
-def _build_re_reg() -> bytes:
-    """Build 06d0 RE-REG_WAITING (80B) — sent after replying to one call (PKT11).
-
-    Identical to 06d1 except type byte is 06d0, signalling GW to queue next call.
-    """
-    frame = bytearray(_build_reg_waiting())
-    frame[0:2] = b"\x06\xd0"
     return bytes(frame)
 
 
@@ -184,13 +220,14 @@ def _build_post_call_b(gw_handle: bytes) -> bytes:
 def _build_post_call_d2(gw_handle: bytes) -> bytes:
     """Build 06d2 dispatch-done frame (80B) — sent after 060b (PKT10).
 
-    [32:40]=seq=1  [40:48]=GW handle  [48:52]=0x50  [76:80]=ffff0001
+    Source: golden fixture server_dispatch_done.bin (NW RFC SDK, 2026-10-27).
+    [30]=0x01  [40:48]=GW handle  [48:52]=0x50  [76:80]=ffff0001
     """
     frame = bytearray(80)
     frame[0:2] = b"\x06\xd2"
     frame[2:4] = b"\x07\x00"
     frame[4:6] = b"\xff\xff"
-    frame[32:40] = b"\x00\x00\x00\x00\x00\x00\x00\x01"
+    frame[30] = 0x01  # was [39] before the 2026-10-27 capture; see _build_reg_waiting
     frame[40:48] = gw_handle
     frame[48:52] = b"\x00\x00\x00\x50"
     frame[76:78] = b"\xff\xff"
@@ -1547,35 +1584,7 @@ class RfcServer:
 
             prog_id_enc = program_id.encode("ascii")
 
-            # --- NI init (64B, SDK-verified from sdk_reg.pcap PKT3) ---
-            _pid9 = prog_id_enc[:9]
-            proc_name_10 = _pid9 + b"\x00" + b"\x20" * (9 - len(_pid9))
-            local_host_8 = local_host[:8].encode("ascii", "replace").ljust(8, b"\x20")
-            # 16-byte field, so truncate at 16 — not 8.
-            #
-            # This read prog_id_enc[:8] and was invisible for the capture it was
-            # written from: that used the program ID "python3", seven characters,
-            # so slicing at 8 changed nothing and ljust(16) produced the right
-            # bytes. Any longer ID was silently cut in half — "SAPRFC_TEST"
-            # registered as "SAPRFC_T" — and the gateway then never matches the
-            # SM59 destination, so the server waits for calls that never arrive
-            # with nothing anywhere reporting a problem.
-            prog_id_16 = prog_id_enc[:16].ljust(16, b"\x20")
-            ni_init = (
-                b"\x02\x0b"
-                + local_ip_bytes
-                + b"\x00\x00\x00\x00"
-                + proc_name_10
-                + b"1100"
-                + b"\x00\x00\x00\x00"
-                + b"\x00\x06"
-                + local_host_8
-                + prog_id_16
-                + b"\x06\xcb\xff\xff"
-                + b"\x00" * 6
-            )
-            assert len(ni_init) == 64
-            transport.send_message(ni_init)
+            transport.send_message(_build_ni_init(local_ip_bytes, local_host, program_id))
             transport.recv_message()  # NI response (sdk_reg.pcap PKT5) — discard
 
             # --- 512B hostname+TPNAME frame (sdk_reg.pcap PKT7) ---
@@ -1618,7 +1627,7 @@ class RfcServer:
                 ft = int.from_bytes(frame[0:2], "big")
                 _logger.debug("[saprfclib-server] frame type=0x%04x len=%d", ft, len(frame))
                 if ft in (0x06CF, 0x06CE):
-                    # GW (re-)assigned session handle — 06CF after 06d0 re-register,
+                    # GW (re-)assigned session handle — 06CF after 06d1 wait-for-call,
                     # 06CE for queued-call dispatch.
                     gw_handle = frame[40:48] if len(frame) >= 48 else gw_handle
                     _logger.debug("[saprfclib-server] gw handle=%r", gw_handle)
@@ -1638,8 +1647,8 @@ class RfcServer:
         """Dispatch one 0603 inbound call and send the 0608 response + cleanup frames.
 
         sdk_listen.pcap PKT8 (0608 response): 80B GW header with GW handle at [40:48]
-        + RFC TLV from dispatch_inbound. Post-call: PKT9 (060b) + PKT10 (06d2) +
-        PKT11 (06d0) to signal GW we processed the call and are ready for the next.
+        + RFC TLV from dispatch_inbound. Post-call: 060b + 06d2 + 06d1, the order the
+        NW RFC SDK sends in rfc_typeT-registered_server.pcap (2026-10-27).
         """
         try:
             response_tlv = self.dispatch_inbound(frame)
@@ -1650,10 +1659,15 @@ class RfcServer:
                 len(response_tlv),
                 len(full_response),
             )
-            # Post-call cleanup (sdk_listen.pcap PKT9/PKT10/PKT11)
+            # Post-call cleanup: 060b, 06d2, then 06d1 to wait for the next call.
+            # Up to 0.1.8 this sent 06d0 last. The SDK capture sends 06d0 only at
+            # shutdown, right before FIN; sent after a call, the gateway delivered no
+            # further calls (live test 2026-10-27, issue #58). saprfclib does not send
+            # 06d0 at shutdown yet: stop() runs on another thread and would race the
+            # serve thread's sends, so the gateway sees a plain FIN.
             transport.send_message(_build_post_call_b(gw_handle))  # 060b
             transport.send_message(_build_post_call_d2(gw_handle))  # 06d2
-            transport.send_message(_build_re_reg())  # 06d0 re-register
+            transport.send_message(_build_reg_waiting())  # 06d1 wait for next call
         except Exception as e:  # noqa: BLE001
             _logger.error("[saprfclib-server] dispatch ERROR: %s: %s", type(e).__name__, e)
 

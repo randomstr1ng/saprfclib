@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **RFC server registration with program IDs over 8 characters** (issue #58). The first
+  frame on the registration socket wrote `program_id[:16]` where the gateway expects the
+  first 8 characters followed by 8 blanks. Any longer ID put non-blank bytes in the second
+  half, and the gateway closed the connection (`REGISTER_TP conv id not initialized`),
+  which surfaced as `EOFError` in `serve_forever()`. Confirmed against an NW RFC SDK
+  capture and a live gateway probe.
+- The same frame's process-name field is now NUL-padded, as both captures show, instead
+  of blank-padded after the NUL.
+- The `06d1` / `06d2` frames sent after registration and after each call now match the
+  SDK capture: `0x01` at byte 30 (was 39), and local conversation ID `H0000001` (was
+  `\x00H000001`).
+- **A registered server stopped receiving calls after the first one.** After each reply it
+  sent `06d0`, which the SDK sends only at shutdown. It now sends `06d1` (wait for the next
+  call), as the SDK does.
+
 ## [0.1.8] - 2026-10-02
 
 One feature: native SOCKS5 proxy support, so `saprfclib` can reach an SAP system through

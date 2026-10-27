@@ -576,6 +576,50 @@ NI header (4B) + GW header (0x0601 GW_CONNECT)
 (acceptance flag), [40:48] = gateway-assigned ASCII connection handle (e.g.
 `36964135`), [78:80] ffff→0004 (accepted tail).
 
+**Registration socket as `RfcServer.serve_forever()` drives it** — confirmed from a live
+NW RFC SDK capture (2026-10-27, program ID `ZFTNT_SIGTEST`, A4H gateway). Golden fixtures:
+`server_ni_init_client_long_progid.bin`, `server_reg_waiting.bin`,
+`server_dispatch_done.bin`, `server_listen_end.bin`. Offsets are payload offsets (NI header
+excluded).
+
+```
+1. server → gw  64B   first frame
+   [0:2]   020b
+   [2:6]   local IPv4
+   [10:20] program_id[:9], NUL-padded to 10
+   [20:24] "1100"
+   [28:30] 0006
+   [30:38] local hostname[:8], blank-padded
+   [38:46] program_id[:8], blank-padded   (the full ID goes in frame 3)
+   [46:54] 8 blanks                       MUST be blank — see below
+   [54:58] 06cb ffff
+2. gw → server  64B   echo with [20:24]="4103", [28:30]=000f, [54:56]=06fb
+3. server → gw  512B  hostname NUL-terminated at [0:128], program_id NUL-terminated
+                      at [128:192], rest blanks
+4. server → gw  80B   06d1: [2:4]=0700 [4:6]=ffff [30]=01 [40:48]="H0000001"
+                      [48:52]=00000050 [76:80]=ffffffff
+5. gw → server        06cf when a call arrives; gateway conversation ID at [40:48]
+```
+
+After the 0608 reply the SDK sends 060b, 06d2 (same as 06d1 but type 06d2, the gateway
+conversation ID at [40:48], [76:80]=ffff0001) and then 06d1 again to wait for the next call.
+06d0 (same as 06d1, type 06d0) appears once, at shutdown, immediately before FIN. Up to
+0.1.8 saprfclib sent 06d0 after every call; in a live test on 2026-10-27 the gateway then
+delivered no further calls. saprfclib does not send 06d0 at shutdown yet (gap: `stop()`
+runs on another thread than the serve loop).
+
+Payload [46:54] of frame 1 must be blank. Behavioural probe on 2026-10-27 against the same
+gateway: with blanks the gateway replies with frame 2; with `"GTEST   "` it closes the
+handle without replying and the gateway log records `REGISTER_TP conv id not initialized`
+(issue #58). Up to 0.1.8, saprfclib wrote `program_id[:16]` across [38:54], so every
+program ID longer than 8 characters failed to register. **[ASSUMED]** the field is a
+conversation ID that is empty at registration time. The bytes are captured; the meaning
+comes only from the log text. A capture where the SDK sends a non-blank value there would
+settle it.
+
+Open: the older `server_ni_init_client.bin` capture has `0203` at [0:2], where the SDK
+capture and the code have `020b`. What decides between the two is not known.
+
 **Inbound call (gateway → registered server)** reuses the 06-family data frame
 (`0x060F` data + `0x0605` GW_DONE) carrying the assigned handle and the peer IP. It is
 deserialized by the same TLV path as a client-side response — the server direction is the
