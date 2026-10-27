@@ -201,6 +201,18 @@ def _build_reg_waiting() -> bytes:
     return bytes(frame)
 
 
+def _build_listen_end() -> bytes:
+    """Build 06d0 (80B) — sent once when the server stops, right before closing.
+
+    Source: golden fixture server_listen_end.bin (NW RFC SDK, 2026-10-27): the SDK
+    sends it at shutdown, immediately before FIN, and never after a call. Identical
+    to 06d1 except for the type.
+    """
+    frame = bytearray(_build_reg_waiting())
+    frame[0:2] = b"\x06\xd0"
+    return bytes(frame)
+
+
 def _build_post_call_b(gw_handle: bytes) -> bytes:
     """Build 060b GW_MONITOR frame (80B) — sent after 0608 response (PKT9).
 
@@ -1573,6 +1585,7 @@ class RfcServer:
 
         transport = connect_tcp(gwhost, _gwserv_port(gwserv))
         self._transport = transport
+        registered = False
         try:
             local_ip_str = transport.local_address[0]
             local_ip_bytes = _socket.inet_aton(local_ip_str)
@@ -1601,12 +1614,18 @@ class RfcServer:
             # RfcListenAndDispatch sends this to signal CMACCP "I'm ready to accept".
             # GW transitions our entry to "Waiting for CPI-C Call" in SMGW.
             transport.send_message(_build_reg_waiting())
+            registered = True
 
             # --- recv 06cf/06ce — GW assigns session handle ---
             # sdk_listen.pcap PKT5: type 0x06CF when a call arrives immediately.
             # Empirically observed: type 0x06CE is also sent by GW (queued-call path).
             # Both carry the GW session handle at bytes [40:48].
-            cf_resp = transport.recv_message()
+            try:
+                cf_resp = transport.recv_message()
+            except (EOFError, OSError):
+                if self._stopped:
+                    return  # stop() before the first call; finally sends 06d0
+                raise
             cf_ft = int.from_bytes(cf_resp[0:2], "big") if len(cf_resp) >= 2 else 0
             gw_handle: bytes = cf_resp[40:48] if len(cf_resp) >= 48 else b"        "
             _logger.debug(
@@ -1639,6 +1658,14 @@ class RfcServer:
             _logger.debug("[saprfclib-server] serve loop exited")
         finally:
             self._transport = None
+            # 06d0 only on our own stop: if the gateway closed first there is no
+            # one to tell. Sent here, by the thread that owns the socket, so it
+            # cannot interleave with a 0608 reply (stop() only shuts down reads).
+            if registered and self._stopped:
+                try:
+                    transport.send_message(_build_listen_end())
+                except OSError as e:
+                    _logger.debug("[saprfclib-server] 06d0 not sent: %s", e)
             transport.close()
 
     def _dispatch_and_reply_sync(  # pragma: no cover
@@ -1662,9 +1689,7 @@ class RfcServer:
             # Post-call cleanup: 060b, 06d2, then 06d1 to wait for the next call.
             # Up to 0.1.8 this sent 06d0 last. The SDK capture sends 06d0 only at
             # shutdown, right before FIN; sent after a call, the gateway delivered no
-            # further calls (live test 2026-10-27, issue #58). saprfclib does not send
-            # 06d0 at shutdown yet: stop() runs on another thread and would race the
-            # serve thread's sends, so the gateway sees a plain FIN.
+            # further calls (live test 2026-10-27, issue #58).
             transport.send_message(_build_post_call_b(gw_handle))  # 060b
             transport.send_message(_build_post_call_d2(gw_handle))  # 06d2
             transport.send_message(_build_reg_waiting())  # 06d1 wait for next call
@@ -1697,18 +1722,17 @@ class RfcServer:
             raise _exc[0]
 
     def stop(self) -> None:  # pragma: no cover - live path
-        """Signal the serve loop to stop: set the stopped flag and close the socket.
+        """Signal the serve loop to stop: set the stopped flag and shut down reads.
 
-        Closing the socket unblocks the blocking recv_message() call in the serve
-        loop so it exits cleanly. Safe to call from any thread (Pitfall 5).
+        Shutting down the read side unblocks the blocking recv_message() call in
+        the serve loop. The serve thread, which owns the socket, then sends 06d0
+        and closes it — this thread never writes, so nothing can interleave with a
+        reply in flight. Safe to call from any thread (Pitfall 5).
         """
         self._stopped = True
         transport = getattr(self, "_transport", None)
         if transport is not None:
-            try:
-                transport.close()
-            except Exception:  # noqa: BLE001
-                pass
+            transport.shutdown_read()
 
     def close(self) -> None:  # pragma: no cover - live path
         """Tear the server down: stop the loop and join the background thread."""

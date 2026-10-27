@@ -605,8 +605,9 @@ After the 0608 reply the SDK sends 060b, 06d2 (same as 06d1 but type 06d2, the g
 conversation ID at [40:48], [76:80]=ffff0001) and then 06d1 again to wait for the next call.
 06d0 (same as 06d1, type 06d0) appears once, at shutdown, immediately before FIN. Up to
 0.1.8 saprfclib sent 06d0 after every call; in a live test on 2026-10-27 the gateway then
-delivered no further calls. saprfclib does not send 06d0 at shutdown yet (gap: `stop()`
-runs on another thread than the serve loop).
+delivered no further calls. saprfclib sends 06d0 from `stop()`'s cleanup path: `stop()`
+only shuts down the socket's read side, and the serve thread sends 06d0 and closes. It is
+not sent when the gateway closed the connection first.
 
 Payload [46:54] of frame 1 must be blank. Behavioural probe on 2026-10-27 against the same
 gateway: with blanks the gateway replies with frame 2; with `"GTEST   "` it closes the
