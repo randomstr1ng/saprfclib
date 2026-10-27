@@ -1617,24 +1617,9 @@ class RfcServer:
             transport.send_message(_build_reg_waiting())
             registered = True
 
-            # --- recv 06cf/06ce — GW assigns session handle ---
-            # sdk_listen.pcap PKT5: type 0x06CF when a call arrives immediately.
-            # Empirically observed: type 0x06CE is also sent by GW (queued-call path).
-            # Both carry the GW session handle at bytes [40:48].
-            try:
-                cf_resp = transport.recv_message()
-            except (EOFError, OSError):
-                if self._stopped:
-                    return  # stop() before the first call; finally sends 06d0
-                raise
-            cf_ft = int.from_bytes(cf_resp[0:2], "big") if len(cf_resp) >= 2 else 0
-            gw_handle: bytes = cf_resp[40:48] if len(cf_resp) >= 48 else b"        "
-            _logger.debug(
-                "[saprfclib-server] LISTENING — program_id=%r gw_frame=0x%04x gw_handle=%r",
-                program_id,
-                cf_ft,
-                gw_handle,
-            )
+            # GW conversation ID for the reply; set by each 06cf (sdk_listen.pcap PKT5).
+            gw_handle = b"        "
+            _logger.debug("[saprfclib-server] LISTENING — program_id=%r", program_id)
 
             while not self._stopped:
                 try:
@@ -1646,11 +1631,16 @@ class RfcServer:
                     continue
                 ft = int.from_bytes(frame[0:2], "big")
                 _logger.debug("[saprfclib-server] frame type=0x%04x len=%d", ft, len(frame))
-                if ft in (0x06CF, 0x06CE):
-                    # GW (re-)assigned session handle — 06CF after 06d1 wait-for-call,
-                    # 06CE for queued-call dispatch.
+                if ft == 0x06CF:
+                    # Precedes each inbound 0603; carries the conversation ID at [40:48].
                     gw_handle = frame[40:48] if len(frame) >= 48 else gw_handle
                     _logger.debug("[saprfclib-server] gw handle=%r", gw_handle)
+                elif ft == 0x06CE:
+                    # Unprompted idle frame, about every 314 s on an idle registration.
+                    # The NW RFC SDK sends no reply and keeps its handle (golden fixture
+                    # server_idle_06ce.bin, 2026-10-27). Up to 0.1.8 this was read as a
+                    # handle update and overwrote gw_handle with "0000007\x00".
+                    _logger.debug("[saprfclib-server] idle frame 0x06ce, no reply")
                 elif ft == 0x0603:
                     self._dispatch_and_reply_sync(transport, frame, gw_handle)
                 else:

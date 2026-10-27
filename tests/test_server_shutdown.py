@@ -110,3 +110,26 @@ def test_gateway_close_sends_no_listen_end(monkeypatch: pytest.MonkeyPatch) -> N
     assert not thread.is_alive()
     assert _payload("server_listen_end") not in fake.sent
     assert fake.events[-1] == "close"
+
+
+def test_idle_06ce_keeps_handle_and_gets_no_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """06ce is an idle frame: no reply, and the next call uses the 06cf handle."""
+    idle = _payload("server_idle_06ce")
+    inbound = bytearray(80)
+    inbound[0:2] = b"\x06\x03"
+    fake = _ScriptedTransport([*_gateway_frames(), idle, bytes(inbound)])
+    replies: list[bytes] = []
+    monkeypatch.setattr(
+        RfcServer,
+        "_dispatch_and_reply_sync",
+        lambda self, t, frame, gw_handle: replies.append(gw_handle),
+    )
+    server, thread = _run(monkeypatch, fake)
+    assert fake.waiting.wait(5)
+    sent_before_stop = len(fake.sent)
+
+    server.stop()
+    thread.join(5)
+
+    assert replies == [b"01490310"]
+    assert sent_before_stop == 3  # NI init, TPNAME, 06d1 — nothing for 06ce
