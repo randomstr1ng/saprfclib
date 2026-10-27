@@ -1,0 +1,58 @@
+{
+  "message_type": "SERVER_IDLE_06CE",
+  "capture_source": "live capture 2026-10-27, NW RFC SDK registered server (program ID ZFTNT_SIGTEST) idle for 633 s against SAP A4H gateway 192.168.88.7:3300 (sapgw00); file rfc_typeT-registered_server_idle.pcap, packet 11",
+  "evidence": "server listen path (issue #58 follow-up)",
+  "ni_header_length": 4,
+  "notes": [
+    "Gateway -> registered server, unprompted, at +316.6 s and +632.0 s of an idle registration. The SDK answered the first with a TCP ACK only: no RFC frame, and it kept listening.",
+    "saprfclib idle run the same day (12 min, same gateway): identical frame at +315.4 s and +629.5 s except [76:80] (00001800 there, 00001c00 here).",
+    "[40:48] '0000007\\x00' is not a conversation ID usable for a reply; calls are always preceded by 06cf carrying the real one.",
+    "Contains no host or IP data; no sanitisation needed.",
+    "Offsets are FILE offsets (NI 4-byte header included)."
+  ],
+  "expected_parse": {
+    "gw_type": "0x06ce"
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
+      "type": "fixed",
+      "note": "BE uint32 = 80"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06ce",
+      "type": "fixed",
+      "note": "idle frame"
+    },
+    {
+      "offset": 34,
+      "length": 1,
+      "name": "byte_30",
+      "value": "0x01",
+      "type": "fixed",
+      "note": "0x01"
+    },
+    {
+      "offset": 44,
+      "length": 8,
+      "name": "id_field",
+      "value": "0000007\\x00",
+      "type": "fixed",
+      "note": "ASCII '0000007\\x00'; meaning unknown"
+    },
+    {
+      "offset": 80,
+      "length": 4,
+      "name": "tail",
+      "value": "",
+      "type": "variable",
+      "note": "00001c00 here, 00001800 in the saprfclib run; meaning unknown"
+    }
+  ]
+}

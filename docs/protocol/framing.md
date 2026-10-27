@@ -599,7 +599,15 @@ excluded).
 4. server → gw  80B   06d1: [2:4]=0700 [4:6]=ffff [30]=01 [40:48]="H0000001"
                       [48:52]=00000050 [76:80]=ffffffff
 5. gw → server        06cf when a call arrives; gateway conversation ID at [40:48]
+   gw → server  80B   06ce, unprompted, about every 314 s while idle — no reply
 ```
+
+`06ce` on an idle registration (golden fixture `server_idle_06ce.bin`): the SDK answers it
+with a TCP ACK only and keeps listening; saprfclib, sending nothing, stayed registered for
+12 minutes. Its [40:48] is `"0000007\0"`, not a conversation ID — every call is preceded by
+a `06cf` carrying the real one. What the frame is for, and whether the interval is a
+gateway setting, is not established. Not the same context as the `06ce` run in the client
+capture described under "One unexplained observation".
 
 After the 0608 reply the SDK sends 060b, 06d2 (same as 06d1 but type 06d2, the gateway
 conversation ID at [40:48], [76:80]=ffff0001) and then 06d1 again to wait for the next call.
