@@ -618,8 +618,15 @@ conversation ID that is empty at registration time. The bytes are captured; the 
 comes only from the log text. A capture where the SDK sends a non-blank value there would
 settle it.
 
-Open: the older `server_ni_init_client.bin` capture has `0203` at [0:2], where the SDK
-capture and the code have `020b`. What decides between the two is not known.
+`[0:2]` selects the connection kind: `0203` opens a client connection, `020b` a
+registration. Every client capture opens with `0203` (`client_ni_init_request.bin`, NW RFC
+SDK and saprfclib clients); the registered-server capture opens with `020b`. Behavioural
+probe 2026-10-27: a registration sequence opened with `0203` is answered
+`*ERR* wrong appc header version (111) from client` — the gateway reads the following
+512B TPNAME frame as a client APPC header (111 = `0x6f`, the first hostname byte). The body
+layout of the two is the same. `client_ni_init_request.bin` / `client_ni_init_reply.bin`
+were committed as `server_ni_init_client` / `server_ni_init_gateway`, a misreading of a
+client-socket capture as a registration.
 
 **Inbound call (gateway → registered server)** reuses the 06-family data frame
 (`0x060F` data + `0x0605` GW_DONE) carrying the assigned handle and the peer IP. It is

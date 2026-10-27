@@ -5,9 +5,9 @@
   "ni_header_length": 4,
   "notes": [
     "First frame the SDK sends on the registration socket, with a 13-character program ID.",
-    "Disambiguates server_ni_init_client.bin (7-char 'python3'): the SDK writes program_id[:8] at payload[38:46] and blanks at payload[46:54].",
+    "Disambiguates client_ni_init_request.bin (7-char 'python3', same body layout): the SDK writes program_id[:8] at payload[38:46] and blanks at payload[46:54].",
     "Behavioural probe 2026-10-27 against the same gateway: non-blank payload[46:54] makes the gateway close the handle without a reply (gw log 'REGISTER_TP conv id not initialized'); blank gets the 64B reply.",
-    "Sanitised length-preserving: local hostname replaced by 'titan', local IP by 192.168.196.170 (same placeholders as server_ni_init_client.bin).",
+    "Sanitised length-preserving: local hostname replaced by 'titan', local IP by 192.168.196.170 (same placeholders as client_ni_init_request.bin).",
     "Offsets are FILE offsets (NI 4-byte header included)."
   ],
   "expected_parse": {

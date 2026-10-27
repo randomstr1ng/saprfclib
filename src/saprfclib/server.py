@@ -137,15 +137,16 @@ _RESPONSE_DIRECTIONS = frozenset({RFC_EXPORT, RFC_CHANGING, RFC_TABLES})
 def _build_ni_init(local_ip: bytes, local_host: str, program_id: str) -> bytes:
     """Build the 64B first frame of the registration socket.
 
-    Source: golden fixtures server_ni_init_client.bin (program ID "python3") and
-    server_ni_init_client_long_progid.bin (13-char "ZFTNT_SIGTEST", NW RFC SDK).
+    Source: golden fixture server_ni_init_client_long_progid.bin (13-char
+    "ZFTNT_SIGTEST", NW RFC SDK). The body layout is shared with the client NI init
+    (client_ni_init_request.bin, program "python3"), which differs only in [0:2]=0203.
 
     [0:2]=020b [2:6]=local IPv4 [6:10]=zeros [10:20]=program_id[:9], NUL-padded
     [20:24]="1100" [24:28]=zeros [28:30]=0006 [30:38]=hostname[:8], blank-padded
     [38:46]=program_id[:8], blank-padded [46:54]=blanks [54:58]=06cbffff [58:64]=zeros
     """
     prog_id_enc = program_id.encode("ascii")
-    # NUL-padded, not blank-padded. Source: server_ni_init_client.bin has
+    # NUL-padded, not blank-padded. Source: client_ni_init_request.bin has
     # "python3\x00\x00\x00"; up to 0.1.8 this sent "python3\x00  ".
     proc_name_10 = prog_id_enc[:9].ljust(10, b"\x00")
     local_host_8 = local_host[:8].encode("ascii", "replace").ljust(8, b"\x20")

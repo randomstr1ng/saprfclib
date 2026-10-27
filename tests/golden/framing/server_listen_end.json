@@ -5,7 +5,7 @@
   "ni_header_length": 4,
   "notes": [
     "06d0, sent by the SDK once at shutdown, immediately before FIN. Not sent after a call. saprfclib does not emit it yet.",
-    "Sanitised length-preserving: local hostname replaced by 'titan', local IP by 192.168.196.170 (same placeholders as server_ni_init_client.bin).",
+    "Sanitised length-preserving: local hostname replaced by 'titan', local IP by 192.168.196.170 (same placeholders as client_ni_init_request.bin).",
     "Offsets are FILE offsets (NI 4-byte header included)."
   ],
   "expected_parse": {

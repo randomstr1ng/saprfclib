@@ -95,17 +95,22 @@ def test_ni_init_long_program_id_matches_sdk_capture() -> None:
     assert built == capture
 
 
-def test_the_ni_init_capture_still_reproduces() -> None:
-    """The short-ID capture, where every truncation width agrees."""
+def test_ni_init_body_matches_the_client_capture() -> None:
+    """The client NI init shares the body layout; only [0:2] differs (0203 vs 020b).
+
+    Short program name "python3", where every truncation width agrees — but it pins
+    the NUL padding of the process name at [10:20].
+    """
     from pathlib import Path
 
     from saprfclib.server import _build_ni_init
 
     capture = (
-        Path(__file__).parent / "golden" / "framing" / "server_ni_init_client.bin"
+        Path(__file__).parent / "golden" / "framing" / "client_ni_init_request.bin"
     ).read_bytes()[4:]
     built = _build_ni_init(capture[2:6], "titan", "python3")
-    # [0:2] differs: this older capture has 0203, the SDK capture and the code 020b.
+    assert capture[0:2] == b"\x02\x03"
+    assert built[0:2] == b"\x02\x0b"
     assert built[2:] == capture[2:]
 
 
