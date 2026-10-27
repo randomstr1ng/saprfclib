@@ -1573,9 +1573,10 @@ class RfcServer:
           1. NI init (64B, type=0x020b) → recv NI response (discard)
           2. 512B hostname+TPNAME frame → SMGW: "Registered Server"
           3. 06d1 REG_WAITING (80B) → SMGW: "Waiting for CPI-C Call"
-          4. recv 06cf (125B) — GW assigns session handle at [40:48]
-          5. recv loop: 0603 = inbound call → dispatch → 0608 response + cleanup
-                        06cf = GW re-handle (after re-register) → update handle
+          4. recv loop: 06cf = conversation ID for the next call at [40:48]
+                        0603 = inbound call → 0608 reply, 060b, 06d2, 06d1
+                        06ce = idle frame → no reply
+          5. on stop(): 06d0, then close
         """
         import socket as _socket
 
