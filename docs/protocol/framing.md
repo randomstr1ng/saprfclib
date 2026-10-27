@@ -621,10 +621,16 @@ Payload [46:54] of frame 1 must be blank. Behavioural probe on 2026-10-27 agains
 gateway: with blanks the gateway replies with frame 2; with `"GTEST   "` it closes the
 handle without replying and the gateway log records `REGISTER_TP conv id not initialized`
 (issue #58). Up to 0.1.8, saprfclib wrote `program_id[:16]` across [38:54], so every
-program ID longer than 8 characters failed to register. **[ASSUMED]** the field is a
-conversation ID that is empty at registration time. The bytes are captured; the meaning
-comes only from the log text. A capture where the SDK sends a non-blank value there would
-settle it.
+program ID longer than 8 characters failed to register.
+
+The field is the conversation ID. A program the gateway starts itself (SM59 type T,
+"Start on application server") connects back with kind `0203` and puts the conversation ID
+it was given at [46:54]; the gateway echoes it and uses it at [40:48] of every following
+`06xx` frame on that connection. Captured 2026-10-27 (S/4HANA 2025, program `sapxpg`) for
+five connections, each with a different ID: golden fixture
+`client_ni_init_started_program.bin`. Such a program reaches a local gateway over the Unix
+domain socket `/tmp/.sapstream33NN`, so the capture is an strace of the gateway process; a
+TCP capture shows nothing. A registration has no conversation yet, so [46:54] is blank.
 
 `[0:2]` selects the connection kind: `0203` opens a client connection, `020b` a
 registration. Every client capture opens with `0203` (`client_ni_init_request.bin`, NW RFC
