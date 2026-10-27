@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A registered server stopped receiving calls after the first one.** After each reply it
   sent `06d0`, which the SDK sends only at shutdown. It now sends `06d1` (wait for the next
   call), as the SDK does.
+- **`RfcServer.stop()` now deregisters cleanly.** The serve thread sends `06d0` before
+  closing, as the SDK does at shutdown, instead of the gateway seeing a bare FIN.
+  `stop()` itself only shuts down the socket's read side, so it never writes concurrently
+  with a reply in flight.
 
 ## [0.1.8] - 2026-10-02
 
