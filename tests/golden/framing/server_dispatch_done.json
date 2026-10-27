@@ -1,0 +1,48 @@
+{
+  "message_type": "SERVER_DISPATCH_DONE",
+  "capture_source": "live capture 2026-10-27, NW RFC SDK registered server (program ID ZFTNT_SIGTEST) against SAP A4H gateway 192.168.88.7:3300 (sapgw00); file rfc_typeT-registered_server.pcap",
+  "evidence": "server registration path (issue #58)",
+  "ni_header_length": 4,
+  "notes": [
+    "06d2 sent after 060b following the 0608 reply.",
+    "Sanitised length-preserving: local hostname replaced by 'titan', local IP by 192.168.196.170 (same placeholders as server_ni_init_client.bin).",
+    "Offsets are FILE offsets (NI 4-byte header included)."
+  ],
+  "expected_parse": {
+    "gw_type": "0x06d2"
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
+      "type": "fixed",
+      "note": "BE uint32 = 80"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "gw_type",
+      "value": "0x06d2",
+      "type": "fixed",
+      "note": "06d2 sent after 060b following the 0608 reply"
+    },
+    {
+      "offset": 34,
+      "length": 1,
+      "name": "byte_30",
+      "value": "0x01",
+      "type": "fixed",
+      "note": "0x01"
+    },
+    {
+      "offset": 44,
+      "length": 8,
+      "name": "gw_handle",
+      "value": "",
+      "type": "variable",
+      "note": "conversation ID the gateway assigned in 06cf payload[40:48]"
+    }
+  ]
+}
