@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   half, and the gateway closed the connection (`REGISTER_TP conv id not initialized`),
   which surfaced as `EOFError` in `serve_forever()`. Confirmed against an NW RFC SDK
   capture and a live gateway probe.
+  The field is the conversation ID: a program the gateway starts sends the ID it was given
+  there. Confirmed from a capture of a gateway-started `sapxpg` (fixture
+  `client_ni_init_started_program`).
 - The same frame's process-name field is now NUL-padded, as both captures show, instead
   of blank-padded after the NUL.
 - The `06d1` / `06d2` frames sent after registration and after each call now match the

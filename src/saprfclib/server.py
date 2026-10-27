@@ -157,8 +157,9 @@ def _build_ni_init(local_ip: bytes, local_host: str, program_id: str) -> bytes:
     # non-blank value here makes the gateway close the handle without a reply and
     # log "REGISTER_TP conv id not initialized" (issue #58). Releases up to 0.1.8
     # wrote program_id[8:16] here, which broke every program ID over 8 characters.
-    # [ASSUMED] the field is a conversation ID that is empty at registration; the
-    # bytes are captured, the meaning is inferred from the gateway log text.
+    # The field is the conversation ID: a program the gateway starts sends the ID it
+    # was given here (kind 0203), and the gateway then uses it as the conversation ID
+    # of that connection. Source: golden fixture client_ni_init_started_program.bin.
     blank_8 = b"\x20" * 8
     frame = (
         b"\x02\x0b"
