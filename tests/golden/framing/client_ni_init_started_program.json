@@ -1,0 +1,67 @@
+{
+  "message_type": "CLIENT_NI_INIT_STARTED_PROGRAM",
+  "capture_source": "live capture 2026-10-27, S/4HANA 2025 on RHEL 10: strace of the gateway process during five SM59 connection tests of a type-T destination 'Start on application server' (program sapxpg). The started program reaches the local gateway over the Unix domain socket /tmp/.sapstream3300, not TCP, so tcpdump sees nothing.",
+  "evidence": "meaning of payload [46:54] (issue #58 follow-up)",
+  "ni_header_length": 4,
+  "notes": [
+    "First frame a gateway-started program sends to the gateway: connect kind 0203, conversation ID at payload [46:54].",
+    "All five connections: [46:54] (32155195, 32156209, 32157218, 32158227, 32159235) equals the [40:48] conversation ID the gateway then uses in every 06xx frame of that connection, and the gateway echoes it in its 64B reply.",
+    "Contrast: a registration (020b, server_ni_init_client_long_progid.bin) sends 8 blanks there; non-blank is refused with 'REGISTER_TP conv id not initialized' (probe, issue #58).",
+    "Sanitised length-preserving: local hostname[:8] replaced by 'titan   '. [2:6] is 127.0.0.1 as captured.",
+    "Offsets are FILE offsets (NI 4-byte header included)."
+  ],
+  "expected_parse": {
+    "ni_type": "0x0203",
+    "conversation_id": "32155195"
+  },
+  "field_annotations": [
+    {
+      "offset": 0,
+      "length": 4,
+      "name": "ni_payload_length",
+      "value": "",
+      "type": "fixed",
+      "note": "BE uint32 = 64"
+    },
+    {
+      "offset": 4,
+      "length": 2,
+      "name": "ni_type",
+      "value": "0x0203",
+      "type": "fixed",
+      "note": "client connection"
+    },
+    {
+      "offset": 14,
+      "length": 10,
+      "name": "process_name",
+      "value": "sapxpg\\x00\\x00\\x00\\x00",
+      "type": "fixed",
+      "note": "program name[:9], NUL-padded"
+    },
+    {
+      "offset": 34,
+      "length": 8,
+      "name": "local_host",
+      "value": "",
+      "type": "variable",
+      "note": "hostname[:8], blank-padded"
+    },
+    {
+      "offset": 42,
+      "length": 8,
+      "name": "program_name_8",
+      "value": "sapxpg  ",
+      "type": "fixed",
+      "note": "program name[:8], blank-padded"
+    },
+    {
+      "offset": 50,
+      "length": 8,
+      "name": "conversation_id",
+      "value": "",
+      "type": "variable",
+      "note": "conversation ID from the gateway; session-specific"
+    }
+  ]
+}

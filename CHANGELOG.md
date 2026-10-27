@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-27
+
+One fix, issue #58: the RFC server (`RfcServer`) now registers at the gateway with any
+program ID, serves call after call on one registration, survives idle periods, and
+deregisters cleanly on `stop()`. Up to 0.1.8 it could not register a program ID longer than
+8 characters, and once that was fixed it stopped receiving calls after the first one.
+
+Every wire change is taken from an NW RFC SDK capture of a registered server, committed as
+golden fixtures. It was confirmed live against an S/4HANA gateway: the SM59 connection test
+and repeated `STFC_CONNECTION` calls on one registration, an idle registration across the
+gateway's idle frames, and the entry leaving SMGW → Logged-on Clients on `stop()`.
+
+### Fixed
+
+- **RFC server registration with program IDs over 8 characters** (issue #58). The first
+  frame on the registration socket wrote `program_id[:16]` where the gateway expects the
+  first 8 characters followed by 8 blanks. Any longer ID put non-blank bytes in the second
+  half, and the gateway closed the connection (`REGISTER_TP conv id not initialized`),
+  which surfaced as `EOFError` in `serve_forever()`.
+- **A registered server stopped receiving calls after the first one.** After each reply it
+  sent `06d0`, which the SDK sends only at shutdown. It now sends `06d1` (wait for the next
+  call), as the SDK does.
+- **An idle registered server could answer its next call with the wrong conversation
+  ID.** The gateway sends an unprompted `06ce` frame about every 314 s; the serve loop took
+  its `[40:48]` as the conversation ID. It is now ignored, as the NW RFC SDK does, and only
+  `06cf` sets the ID.
+- **`RfcServer.stop()` now deregisters cleanly.** The serve thread sends `06d0` before
+  closing, as the SDK does at shutdown, instead of the gateway seeing a bare FIN. `stop()`
+  itself only shuts down the socket's read side, so it never writes concurrently with a
+  reply in flight. A `stop()` before the first call no longer raises `EOFError`.
+- The first registration frame's process-name field is now NUL-padded, as every capture
+  shows, instead of blank-padded after the NUL.
+- The `06d1` / `06d2` frames sent after registration and after each call now match the
+  SDK capture: `0x01` at byte 30 (was 39), and local conversation ID `H0000001` (was
+  `\x00H000001`).
+
+### Added
+
+- `Transport.shutdown_read()`: shuts down only the read side of the socket, waking a thread
+  blocked in `recv_message()` while the owning thread can still send.
+
+### Documentation
+
+- `docs/protocol/framing.md` documents the registration socket frame by frame (first
+  frame, TPNAME frame, `06d1`, `06cf`, `06ce`, `06d2`, `06d0`).
+- Payload `[0:2]` of the first frame selects the connection kind: `0203` opens a client
+  connection, `020b` a registration. Confirmed by a gateway probe: a registration opened
+  with `0203` is refused with `wrong appc header version`.
+- Payload `[46:54]` is the conversation ID. A program the gateway starts itself sends its
+  ID there, and the gateway uses the same ID for that connection. A registration leaves it
+  blank. Captured from a gateway-started `sapxpg`. Such a program reaches a local gateway
+  over the Unix domain socket `/tmp/.sapstream33NN`, so a TCP capture shows nothing.
+- The fixtures `server_ni_init_client` / `server_ni_init_gateway` were a client-connection
+  capture misread as a registration. They are renamed `client_ni_init_request` /
+  `client_ni_init_reply`, with their bytes unchanged.
+- New golden fixtures: `server_ni_init_client_long_progid`, `server_reg_waiting`,
+  `server_dispatch_done`, `server_listen_end`, `server_idle_06ce`,
+  `client_ni_init_started_program`.
+
 ## [0.1.8] - 2026-10-02
 
 One feature: native SOCKS5 proxy support, so `saprfclib` can reach an SAP system through
@@ -1581,7 +1640,9 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.4...v0.1.5

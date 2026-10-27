@@ -259,6 +259,17 @@ class Transport:
         """Return the remote (host, port) of the underlying socket."""
         return cast(tuple[str, int], self._sock.getpeername())
 
+    def shutdown_read(self) -> None:
+        """Shut down the read side only, waking a thread blocked in recv_message().
+
+        The write side stays open, so the thread that owns the socket can still
+        send its final frames before close(). Ignores an already-broken connection.
+        """
+        try:
+            self._sock.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
+
     def close(self) -> None:
         """Shut down and close the socket; ignore an already-broken connection."""
         try:
