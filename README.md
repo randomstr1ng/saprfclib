@@ -84,20 +84,20 @@ conn = saprfclib.connect(ashost="s4-2025", sysnr="00", client="001",
                          user="Developer", passwd="...", **cfg)
 ```
 
-See the [Connection Options guide](https://randomstr1ng.github.io/saprfclib/getting-started/connection-options/)
+See the [Connection Options guide](https://saprfclib.dev/getting-started/connection-options/)
 for the full parameter reference.
 
 ## Documentation
 
-Full documentation: **https://randomstr1ng.github.io/saprfclib/**
+Full documentation: **https://saprfclib.dev/**
 
-- [Getting Started](https://randomstr1ng.github.io/saprfclib/getting-started/installation/) - install,
+- [Getting Started](https://saprfclib.dev/getting-started/installation/) - install,
   connect, and make your first call in 10 minutes
-- [Cookbook](https://randomstr1ng.github.io/saprfclib/cookbook/) - TABLE parameters,
+- [Cookbook](https://saprfclib.dev/cookbook/) - TABLE parameters,
   RFC server, tRFC/qRFC, connection pool, SNC, WebSocket RFC
-- [API Reference](https://randomstr1ng.github.io/saprfclib/api/connect/) - auto-generated from
+- [API Reference](https://saprfclib.dev/api/connect/) - auto-generated from
   typed docstrings via MkDocs + mkdocstrings
-- [Protocol Docs](https://randomstr1ng.github.io/saprfclib/protocol/framing/) - NI/CPIC framing,
+- [Protocol Docs](https://saprfclib.dev/protocol/framing/) - NI/CPIC framing,
   ABAP type serialization, RFC handshake, SNC, tRFC/bgRFC wire specs
 
 ## Example Scripts
