@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/saprfclib.svg)](https://pypi.org/project/saprfclib/)
 [![Python](https://img.shields.io/pypi/pyversions/saprfclib.svg)](https://pypi.org/project/saprfclib/)
 [![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen.svg)](LICENSE)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16017/badge)](https://www.bestpractices.dev/projects/16017)
 
 `saprfclib` is a pure-Python reimplementation of the SAP RFC wire protocol - zero
 native/C dependencies. Call any SAP function module from Python with just a `pip install`.
