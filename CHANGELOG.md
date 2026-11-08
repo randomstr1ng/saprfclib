@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AES-256-CBC, HMAC-SHA256), RSA certificates. Confirmed live against an S/4HANA system
   (handshake, logon, multi-chunk requests and responses) and byte for byte against SAP
   CommonCryptoLib; see `docs/protocol/snc-mechanism.md`.
+- **`snc_sso=True`: SNC logon without a password** (issues #16, #61). The server maps the
+  client certificate to a user. Only the logon records change (no password, no user unless
+  given); the SNC frames are the same as for a password logon, so the "extension header"
+  premise of #61 does not apply. Works with the built-in mechanism and with `snc_lib`.
+  Confirmed live; record layout in `tests/golden/snc/snc_logon_tlvs.json`.
 - `saprfclib.pse.load_pse()` reads `sapgenpse` PSE files (versions 2 and 4, default and
   PBES2 encryption, RSA keys).
 
@@ -39,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The SNC extension header encodes the partner DN like the reference client (T61String for
   characters outside PrintableString, upper-case `C`, `DC` and `SN`); non-ASCII partner
   names are refused instead of being mis-encoded.
+- A password logon inside SNC now carries the empty record 0x0675 the reference client
+  sends.
 - `docs/protocol/snc.md` listed the SNC handshake frame types as 1/2; they are 2/4.
 
 ## [0.1.9] - 2026-10-27

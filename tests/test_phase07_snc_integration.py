@@ -136,3 +136,24 @@ def test_live_builtin_snc() -> None:
         assert [r["WA"].strip() for r in res["DATA"]] == ["T000"]
     finally:
         conn.close()
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("SAPRFC_SNC_PSE") and os.environ.get("SAPRFC_SNC_SSO_USER")),
+    reason="needs SAPRFC_SNC_PSE and SAPRFC_SNC_SSO_USER (the user the certificate maps to)",
+)
+def test_live_builtin_snc_sso() -> None:
+    """snc_sso=True: no user, no password; the server maps the certificate to a user."""
+    conn = saprfclib.connect(
+        ashost=os.environ["SAPRFC_ASHOST"],
+        sysnr=os.environ.get("SAPRFC_SYSNR", "00"),
+        client=os.environ["SAPRFC_CLIENT"],
+        snc_partnername=os.environ["SAPRFC_SNC_PARTNERNAME"],
+        snc_pse=os.environ["SAPRFC_SNC_PSE"],
+        snc_pse_pin=os.environ.get("SAPRFC_SNC_PSE_PIN"),
+        snc_sso=True,
+    )
+    try:
+        assert conn.call("RFC_SYSTEM_INFO")["RFCSI_EXPORT"]["RFCSYSID"]
+    finally:
+        conn.close()

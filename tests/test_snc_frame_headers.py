@@ -217,3 +217,71 @@ def test_partner_dn_encoding(name, ok):
     else:
         with pytest.raises(ValueError):
             _build_snc_ext_header(name)
+
+
+# --- logon records: snc_sso vs password logon ---------------------------------
+
+LOGON = json.loads(
+    (pathlib.Path(__file__).parent / "golden" / "snc" / "snc_logon_tlvs.json").read_text()
+)
+
+
+def _tags(tlv: bytes) -> list[str]:
+    out, i = [], 0
+    while i + 4 <= len(tlv):
+        t = int.from_bytes(tlv[i : i + 2], "big")
+        n = int.from_bytes(tlv[i + 2 : i + 4], "big")
+        out.append(f"{t:04x}")
+        if t == 0xFFFF:
+            break
+        i += 4 + n + 2  # extended format repeats the tag after the value
+    return out
+
+
+@pytest.mark.parametrize(
+    "mode,user,passwd,pw_logon",
+    [
+        ("nosso", "U", "pw", True),
+        ("sso_nouser", None, None, False),
+        ("sso_user", "U", None, False),
+    ],
+)
+def test_logon_records_match_reference(mode, user, passwd, pw_logon):
+    from saprfclib.connection import Connection
+
+    tlv = Connection._build_logon_request(
+        client="001", user=user, passwd=passwd, seed=1, snc_password_logon=pw_logon
+    )
+    assert _tags(tlv) == LOGON["modes"][mode]["tags"][1:]  # [0] is the COM header
+
+
+def test_snc_sso_drops_the_password(monkeypatch, caplog):
+    import saprfclib
+
+    seen = {}
+
+    def _boom(*a, **k):
+        seen.update(k)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr("saprfclib.connection._builtin_snc_mechanism", _boom)
+    with pytest.raises(RuntimeError, match="stop"):
+        saprfclib.connect(
+            ashost="h",
+            sysnr="00",
+            client="001",
+            user="U",
+            passwd="SECRET-PW",
+            snc_partnername="p:CN=X",
+            snc_pse="x.pse",
+            snc_sso=True,
+        )
+    assert "SECRET-PW" not in caplog.text
+    assert "password is ignored" in caplog.text
+
+
+def test_snc_sso_without_snc_is_rejected():
+    import saprfclib
+
+    with pytest.raises(ValueError, match="snc_sso"):
+        saprfclib.connect(ashost="h", sysnr="00", client="001", snc_sso=True)

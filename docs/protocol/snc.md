@@ -3,8 +3,7 @@
 **Status:** CONFIRMED — live SNC handshake against CommonCryptoLib X.509 passed 2026-08-05,
 re-confirmed against a second lab system on 2026-11-08. The frame codec and GSS binding are
 additionally proven offline against a mock GSS library.
-**Confidence:** HIGH for every implemented path. SSO2 token mode remains unimplemented and
-raises `NotImplementedError` — see [Known Gaps](#known-gaps).
+**Confidence:** HIGH for every implemented path; see [Known Gaps](#known-gaps).
 
 ---
 
@@ -234,7 +233,7 @@ in the wrapped output) and is re-verified on the wire at the live checkpoint.
 | `snc_partnername` | `SNC_PARTNERNAME`  | Server GSS identity, e.g. `p:CN=SAP Server,...`            | —       |
 | `snc_myname`      | `SNC_MYNAME`       | Client identity (optional; lib default if absent)         | `None`  |
 | `snc_qop`         | `SNC_QOP`          | QOP level 1 / 2 / 3                                        | `3`     |
-| `snc_sso`         | `SNC_SSO`          | SSO2 token mode — not implemented, raises `NotImplementedError` | `False` |
+| `snc_sso`         | `SNC_SSO`          | Log on with the SNC identity instead of a password (see Known Gaps) | `False` |
 
 **Quote stripping:** `SNC_MYNAME` and `SNC_PARTNERNAME` may arrive wrapped in double quotes
 from the SAP environment. `GssBinding` strips a single enclosing quote pair before passing the
@@ -274,21 +273,18 @@ The 8-byte eye-catcher at frame offset `0x00` is **`b"SNCFRAME"`** — eight cha
 trailing NUL inside the field. `SncTransport` uses this as its default; the `eye_catcher`
 parameter remains injectable for testing.
 
-### SSO2 extension headers — OPEN
+### SNC logon without a password (`snc_sso`) — RESOLVED
 
-Extension headers beyond the mechanism header carry SNC SSO2 tokens and extended context
-data. That layout has not been established, so:
+`snc_sso=True` logs on with the SNC identity: the server maps the client certificate to a
+user (SU01 → SNC). It changes **only the logon records**; the SNC frames, including their
+extension header, are identical to a password logon. Compared with a password logon
+inside SNC, the logon omits the scrambled password (0x0117) and an empty 0x0675 record,
+and omits the user (0x0111) when no user is given. A password passed together with
+`snc_sso=True` is not sent, as with the reference client. Source: golden fixture
+`tests/golden/snc/snc_logon_tlvs.json`; confirmed live with both mechanisms (logged on as
+the mapped user; an unmapped user is refused with "Name or password is incorrect").
 
-- `snc_sso=True` raises `NotImplementedError` at `SncTransport.__init__`.
-- **No extension-header byte values are invented** beyond the mechanism header, whose OID
-  and context ID are confirmed.
-
-Inbound frames carrying extension headers are *not* rejected: `parse_snc_frame` seeks past
-them using `hdr_len` and reads the GSS token from there, so an unrecognised extension header
-costs nothing as long as the token position is right.
-
-**Consequence:** SSO2 ticket-based SNC logon is unavailable. Certificate and Kerberos SNC are
-unaffected.
+This is unrelated to SAP logon tickets (`MYSAPSSO2`), which saprfclib does not support.
 
 ### CommonCryptoLib GSS mechanism OID — RESOLVED
 
@@ -312,4 +308,4 @@ CommonCryptoLib X.509 handshake was confirmed end-to-end against a live system o
 ---
 
 *Live SNC handshake confirmed 2026-08-05 against CommonCryptoLib X.509, partner `p:CN=A4H`.*
-*Not implemented: SSO2 extension headers, and the acceptor (server) role.*
+*Not implemented: the acceptor (server) role.*

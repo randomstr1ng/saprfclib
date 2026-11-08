@@ -49,6 +49,23 @@ unprotected. Not supported yet: reading the PIN from a `cred_v2` file
     The built-in cryptography is pure Python and not constant-time. Run it on hosts you
     control. Keep the PSE file and its PIN as protected as any private key.
 
+## Logon with the certificate (no password)
+
+If the SAP user has the client certificate's SNC name maintained (SU01 → SNC), log on
+with the SNC identity alone:
+
+```python
+conn = saprfclib.connect(
+    ashost="sap-host", sysnr="00", client="100",
+    snc_partnername="p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE",
+    snc_pse="/secure/client.pse", snc_pse_pin="...",
+    snc_sso=True,          # user is optional; a password, if given, is not sent
+)
+```
+
+`snc_sso` defaults to `False` in saprfclib. The NW RFC SDK (and so pyrfc) defaults
+`SNC_SSO` to on, which means a password passed there is silently ignored.
+
 ## Native GSS library
 
 ```python

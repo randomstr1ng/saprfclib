@@ -13,7 +13,7 @@
 #   - single-step and two-step handshakes reach _established == True (SEC-06)
 #   - no data frame is sent before COMPLETE; send_message before COMPLETE raises
 #   - a GSS hard error during handshake raises SncError(major/minor), no leak
-#   - snc_sso=True raises NotImplementedError (D-23)
+#   - snc_sso=True is accepted: it changes only the logon records (Connection)
 #   - QOP-3 privacy wrap/unwrap round-trip (type-9 frames)
 #   - QOP-1 plain round-trip (type-7 frames)
 #   - non-eye-catcher inner frame passes through unchanged (D-05)
@@ -216,7 +216,7 @@ def test_handshake_gss_error_raises_snc_error_no_leak():
     _assert_no_leak(err)
 
 
-def test_snc_sso_raises_not_implemented():
+def test_snc_sso_is_accepted_by_the_transport():
     from tests._mocks import MockTransport
 
     binding = GssBinding(
@@ -224,14 +224,13 @@ def test_snc_sso_raises_not_implemented():
         snc_partnername="p:CN=X",
         loader=lambda _p: MockGssLib(),
     )
-    with pytest.raises(NotImplementedError):
-        SncTransport(
-            MockTransport(responses=[]),
-            snc_lib="/nonexistent/lib.so",
-            snc_partnername="p:CN=X",
-            snc_sso=True,
-            gss_binding=binding,
-        )
+    SncTransport(
+        MockTransport(responses=[]),
+        snc_lib="/nonexistent/lib.so",
+        snc_partnername="p:CN=X",
+        snc_sso=True,
+        gss_binding=binding,
+    )
 
 
 def test_injected_eye_catcher_is_used_in_frames():
