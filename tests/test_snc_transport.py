@@ -151,9 +151,14 @@ def _make_transport(*, mock=None, inner=None, snc_qop=3, snc_sso=False, eye_catc
     return t, mock, inner
 
 
-def _accept_frame(token: bytes, eye: bytes = _EYE) -> bytes:
+# Server QOP triple min=1, max=3, use=1: a server that permits every level, so the
+# client's own snc_qop decides. (A server with min=3 sends 0x7e; see the raise test.)
+_PERMISSIVE_SERVER_QOP = 0x3A
+
+
+def _accept_frame(token: bytes, eye: bytes = _EYE, qop: int = _PERMISSIVE_SERVER_QOP) -> bytes:
     """Build an FR_ACCEPT frame carrying a server handshake token."""
-    return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT), 0, 3, gss_token=token)
+    return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT), 0, qop, gss_token=token)
 
 
 def _assert_no_leak(err: SncError) -> None:

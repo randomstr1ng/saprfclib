@@ -2061,7 +2061,9 @@ class Connection:
                 # GW_DONE (not between GW_CONNECT and GW_INFO, as first assumed).
                 if prev_state is SessionState.GW_CONNECTED:
                     if hasattr(self._transport, "activate_snc"):
-                        self._transport.activate_snc(self._session.handle)
+                        self._transport.activate_snc(
+                            self._session.handle, self._session.conn_idx
+                        )
                 for req in self._build_leg_requests(
                     prev_state,
                     client=client,

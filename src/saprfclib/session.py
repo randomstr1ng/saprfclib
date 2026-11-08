@@ -60,6 +60,7 @@ _NI_UNICODE_CAPABLE = 0xFFFF  # unicode_capable marker (handshake.md line 57)
 # coordinates (NI header stripped) that is 40 (fixture-confirmed: "75568442"@40).
 _GW_HANDLE_OFFSET = 40  # 8B ASCII connection handle (payload offset)
 _GW_HANDLE_LEN = 8
+_GW_CONN_IDX_OFFSET = 78  # BE16 gateway-assigned connection index (payload offset)
 _GW_DONE_CODEPAGE_OFFSET = 69  # server codepage echo in GW_DONE (payload offset; raw 73 − 4)
 
 _CODEPAGE_UTF16LE = "4103"  # Unicode-mode codepage (handshake.md line 64)
@@ -157,6 +158,7 @@ class Session:
         self._attributes: ConnectionAttributes | None = None
         self._codepage: str | None = None
         self._handle: bytes | None = None  # 8-byte ASCII GW connection handle
+        self._conn_idx: int | None = None  # gateway-assigned connection index
         # When True, a logon that AUTHENTICATED (sys id present) but whose embedded
         # RFCPING was rejected -- typically S_RFC (RFC_NO_AUTHORITY) for a
         # low-privilege user -- returns a usable session instead of raising. See
@@ -174,6 +176,11 @@ class Session:
     def handle(self) -> bytes | None:
         """8-byte ASCII GW connection handle, set after GW_CONNECT_RESPONSE."""
         return self._handle
+
+    @property
+    def conn_idx(self) -> int | None:
+        """Connection index the gateway assigned in GW_CONNECT_RESPONSE [78:80]."""
+        return self._conn_idx
 
     @property
     def attributes(self) -> ConnectionAttributes | None:
@@ -263,6 +270,13 @@ class Session:
                 f"GW connect response too short: {len(data)} < {_GW_HANDLE_OFFSET + _GW_HANDLE_LEN}"
             )
         self._handle = data[_GW_HANDLE_OFFSET : _GW_HANDLE_OFFSET + _GW_HANDLE_LEN]
+        # [76:78] echoes the client's local index; [78:80] is the connection index
+        # the gateway assigned, which the client echoes in every later frame.
+        # Source: golden fixture snc/snc_frame_headers.json ("connection_index").
+        if len(data) >= _GW_CONN_IDX_OFFSET + 2:
+            self._conn_idx = int.from_bytes(
+                data[_GW_CONN_IDX_OFFSET : _GW_CONN_IDX_OFFSET + 2], "big"
+            )
         self._state = SessionState.GW_CONNECTED
         # GW_INFO + client GW_DONE + the RFC logon TLV frame embed the handle +
         # credentials and are emitted by the facade (out of the pure SM's concern).
