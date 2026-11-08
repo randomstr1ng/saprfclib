@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
+import functools
 import logging
 import os
 import random
@@ -47,8 +48,9 @@ import time
 import uuid
 import warnings
 from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from saprfclib.exceptions import (
     AbapApplicationError,
@@ -114,6 +116,7 @@ from saprfclib.types import (
     TypeDesc,
 )
 
+_T = TypeVar("_T")
 _logger = logging.getLogger(__name__)
 
 __all__ = ["Connection", "AsyncConnection", "connect", "connect_async"]
@@ -5749,6 +5752,114 @@ class AsyncConnection:
 # ---------------------------------------------------------------------------
 
 
+class _ThreadedAsyncConnection(AsyncConnection):
+    """AsyncConnection backed by a synchronous :class:`Connection` (issue #17).
+
+    SNC and WebSocket RFC are implemented once, in the synchronous connection.
+    Rather than duplicate that wire logic for asyncio — two implementations of a
+    security handshake that can drift apart — this class runs the synchronous
+    connection on a dedicated single worker thread and awaits it. The thread owns
+    the connection for its whole life, which is the ownership model the library
+    already requires (one thread per connection), and the event loop never blocks.
+
+    A cancelled await does not interrupt the operation already running on the
+    worker: it finishes there, and the next call queues behind it, so the
+    connection's byte stream stays consistent.
+    """
+
+    def __init__(self, sync_conn: Connection, executor: ThreadPoolExecutor) -> None:
+        # Deliberately not calling AsyncConnection.__init__: there is no async
+        # transport or session here; every operation is delegated.
+        self._sync = sync_conn
+        self._executor = executor
+        self._closed = False
+        self.metrics = sync_conn.metrics  # same counters as the sync connection
+
+    @classmethod
+    async def open(cls, **kwargs: Any) -> _ThreadedAsyncConnection:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saprfclib-conn")
+        loop = asyncio.get_running_loop()
+        try:
+            sync_conn = await loop.run_in_executor(executor, functools.partial(connect, **kwargs))
+        except BaseException:
+            executor.shutdown(wait=False)
+            raise
+        return cls(sync_conn, executor)
+
+    async def _run(self, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+        if self._closed:
+            raise ValueError("connection is closed")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, functools.partial(fn, *args, **kwargs))
+
+    @property
+    def sys_id(self) -> str | None:
+        return self._sync.sys_id
+
+    def get_connection_attributes(self) -> ConnectionAttributes:
+        return self._sync.get_connection_attributes()
+
+    async def call(self, func_name: str, **params: object) -> dict[str, Any]:
+        return await self._run(self._sync.call, func_name, **params)
+
+    async def ping(self) -> bool:
+        return await self._run(self._sync.ping)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            await self._run(self._sync.close)
+        finally:
+            self._closed = True
+            self._executor.shutdown(wait=False)
+
+    async def call_transactional(
+        self,
+        func_name: str,
+        *,
+        tid: str,
+        queue: str | None = None,
+        **params: object,
+    ) -> None:
+        await self._run(self._sync.call_transactional, func_name, tid=tid, queue=queue, **params)
+
+    async def confirm_tid(self, tid: str) -> None:
+        await self._run(self._sync.confirm_tid, tid)
+
+    def create_unit(
+        self,
+        uid: str | None = None,
+        queues: list[str] | None = None,
+    ) -> _AsyncUnitHandle:
+        handle = self._sync.create_unit(uid, queues)
+        return _AsyncUnitHandle(self, handle.unit_id, handle.unit_type, list(queues or []))
+
+    async def _submit_unit(
+        self,
+        uid: str,
+        unit_type: str,
+        queues: list[str],
+        buffered_calls: list[bytes],
+    ) -> None:
+        await self._run(self._sync._submit_unit, uid, unit_type, queues, buffered_calls)
+
+    async def confirm_unit(self, unit_id: str, unit_type: str = "T") -> None:
+        await self._run(self._sync.confirm_unit, unit_id, unit_type)
+
+    async def rollback_unit(self, unit_id: str, unit_type: str = "T") -> None:
+        await self._run(self._sync.rollback_unit, unit_id, unit_type)
+
+    async def get_unit_state(self, unit_id: str, unit_type: str = "T") -> UnitState:
+        return await self._run(self._sync.get_unit_state, unit_id, unit_type)
+
+    async def retry_parked(self, tid: str) -> None:
+        await self._run(self._sync.retry_parked, tid)
+
+    async def retry_parked_unit(self, unit_id: str, unit_type: str = "T") -> None:
+        await self._run(self._sync.retry_parked_unit, unit_id, unit_type)
+
+
 async def connect_async(
     ashost: str,
     sysnr: str | int,
@@ -5769,7 +5880,22 @@ async def connect_async(
     group: str | None = None,
     port: int | None = None,
     snc_lib: str | None = None,
+    snc_partnername: str | None = None,
+    snc_myname: str | None = None,
+    snc_qop: int | None = None,
+    snc_sso: bool | None = None,
+    snc_pse: str | os.PathLike[str] | None = None,
+    snc_pse_pin: str | None = None,
+    snc_credential: SncCredential | None = None,
     wshost: str | None = None,
+    wsport: int | None = None,
+    ws_path: str | None = None,
+    ws_proxy_host: str | None = None,
+    ws_proxy_port: int | None = None,
+    ws_proxy_user: str | None = None,
+    ws_proxy_pass: str | None = None,
+    ws_tls_verify: bool = True,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
     proxy_type: str | None = None,
     proxy_host: str | None = None,
     proxy_port: int | None = None,
@@ -5790,8 +5916,10 @@ async def connect_async(
     Supports direct TCP, SAProuter, and message-server (load-balanced) paths —
     the same three paths as the sync connect() classic branch.
 
-    Scope boundary (Phase 9): snc_lib and wshost paths raise NotImplementedError;
-    use the synchronous saprfclib.connect() for SNC/wRFC (SEC-02/03/05/06).
+    SNC (``snc_pse`` / ``snc_credential`` / ``snc_lib``) and WebSocket RFC
+    (``wshost``) connections are served by the synchronous implementation running on
+    a dedicated worker thread that owns the connection; every method is awaited
+    without blocking the event loop (issue #17). See :class:`_ThreadedAsyncConnection`.
 
     Credentials (passwd) are never logged or interpolated into exception messages
     (T-09-03-CRED). Returns a ready AsyncConnection usable as an async context
@@ -5808,13 +5936,60 @@ async def connect_async(
     saprfclib.connect(): False (default) drops undeclared keyword arguments with a
     warning, True raises.
     """
-    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
-
-    if snc_lib is not None or wshost is not None:
-        raise NotImplementedError(
-            "snc_lib/wshost async connections are not supported in Phase 9 — "
-            "use the synchronous saprfclib.connect() for SNC/wRFC"
+    snc_enabled = snc_lib is not None or snc_pse is not None or snc_credential is not None
+    if snc_enabled or wshost is not None:
+        return await _ThreadedAsyncConnection.open(
+            ashost=ashost,
+            sysnr=sysnr,
+            client=client,
+            user=user,
+            passwd=passwd,
+            lang=lang,
+            strict_params=strict_params,
+            allow_restricted_logon=allow_restricted_logon,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            metadata_cache=metadata_cache,
+            metadata_cache_key=metadata_cache_key,
+            saprouter=saprouter,
+            mshost=mshost,
+            sysid=sysid,
+            group=group,
+            port=port,
+            wshost=wshost,
+            wsport=wsport,
+            ws_path=ws_path,
+            ws_proxy_host=ws_proxy_host,
+            ws_proxy_port=ws_proxy_port,
+            ws_proxy_user=ws_proxy_user,
+            ws_proxy_pass=ws_proxy_pass,
+            ws_tls_verify=ws_tls_verify,
+            proxy_type=proxy_type,
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            proxy_jwt=proxy_jwt,
+            proxy_scc_location_id=proxy_scc_location_id,
+            proxy_client_id=proxy_client_id,
+            proxy_client_secret=proxy_client_secret,
+            proxy_token_url=proxy_token_url,
+            socket_factory=socket_factory,
+            gwhost=gwhost,
+            snc_lib=snc_lib,
+            snc_partnername=snc_partnername,
+            snc_myname=snc_myname,
+            snc_qop=snc_qop,
+            snc_sso=snc_sso,
+            snc_pse=snc_pse,
+            snc_pse_pin=snc_pse_pin,
+            snc_credential=snc_credential,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            tid_store=tid_store,
+            unit_store=unit_store,
         )
+
+    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
 
     # SOCKS5 proxy (issue #51, D-39/40/41). The handshake and the token fetch are
     # blocking; connect_tcp_async runs the socket_factory in a thread executor, and

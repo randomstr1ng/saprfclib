@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   given); the SNC frames are the same as for a password logon, so the "extension header"
   premise of #61 does not apply. Works with the built-in mechanism and with `snc_lib`.
   Confirmed live; record layout in `tests/golden/snc/snc_logon_tlvs.json`.
+- **`connect_async()` supports SNC and WebSocket RFC** (issue #17). These paths run the
+  synchronous implementation on a dedicated worker thread that owns the connection, so
+  every method is awaited without blocking the event loop and there is one implementation
+  of each security handshake rather than two. Confirmed live for SNC (built-in mechanism
+  and `snc_lib`); WebSocket RFC is covered offline.
 - `saprfclib.pse.load_pse()` reads `sapgenpse` PSE files (versions 2 and 4, default and
   PBES2 encryption, RSA keys).
 
