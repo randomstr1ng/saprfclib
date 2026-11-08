@@ -1,0 +1,9 @@
+{
+ "fixture": "cred_uid/cred_v2",
+ "capture_source": "created 2026-11-08 with 'sapgenpse seclogin' for the PSE tests/golden/pse/pse_v2_pbe_3des.pse (PIN test123), for OS user name 'fixtureuser' (seclogin -O fixtureuser); header form, CCL profile ccl/enable_credential_uid_from_os = 1.",
+ "evidence": "sapgenpse wrote it from the known PIN; the reader must recover exactly that PIN.",
+ "pin": "test123",
+ "os_user": "fixtureuser",
+ "pse_basename": "client.pse",
+ "sanitised": "the stored absolute PSE path was rewritten to /secudir/client.pse (DER re-encoded); the protected PIN blob is unchanged and does not depend on the path."
+}

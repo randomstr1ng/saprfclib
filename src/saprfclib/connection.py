@@ -794,15 +794,20 @@ def _builtin_snc_mechanism(
 
     Security: the PSE path, PIN and names never reach a log or exception message.
     """
-    from saprfclib.pse import load_pse
+    from saprfclib.pse import load_pse, load_secudir_credential, pin_for_pse
     from saprfclib.secgss import SecGssInitiator, own_name_matches
 
-    if (snc_pse is None) == (snc_credential is None):
-        raise ValueError("pass exactly one of snc_pse or snc_credential for built-in SNC")
+    if snc_pse is not None and snc_credential is not None:
+        raise ValueError("pass at most one of snc_pse or snc_credential for built-in SNC")
     if snc_credential is None:
-        assert snc_pse is not None
-        with open(snc_pse, "rb") as fh:
-            snc_credential = load_pse(fh.read(), snc_pse_pin)
+        if snc_pse is None:
+            # Neither given: pick the credential from SECUDIR the way CommonCryptoLib
+            # does (cred_v2 entry matching snc_myname, else the first usable one).
+            snc_credential = load_secudir_credential(myname=snc_myname)
+        else:
+            pin = snc_pse_pin if snc_pse_pin is not None else pin_for_pse(snc_pse)
+            with open(snc_pse, "rb") as fh:
+                snc_credential = load_pse(fh.read(), pin)
     if snc_myname is not None and not own_name_matches(snc_credential, snc_myname):
         raise ValueError("snc_myname does not match the certificate in the SNC credential")
     return SecGssInitiator(snc_credential, partner_name)
@@ -4345,7 +4350,15 @@ def connect(
         parse_route_string,
     )
 
-    snc_enabled = snc_lib is not None or snc_pse is not None or snc_credential is not None
+    # A partner name alone switches SNC on, as it does in the NW RFC SDK: silently
+    # connecting without SNC to a system the caller named an SNC partner for would
+    # be the wrong way to fail.
+    snc_enabled = (
+        snc_lib is not None
+        or snc_pse is not None
+        or snc_credential is not None
+        or snc_partnername is not None
+    )
     if snc_sso and not snc_enabled:
         raise ValueError("snc_sso logs on with the SNC identity; it needs SNC (snc_pse or snc_lib)")
     if snc_sso and passwd is not None:
@@ -5936,7 +5949,12 @@ async def connect_async(
     saprfclib.connect(): False (default) drops undeclared keyword arguments with a
     warning, True raises.
     """
-    snc_enabled = snc_lib is not None or snc_pse is not None or snc_credential is not None
+    snc_enabled = (
+        snc_lib is not None
+        or snc_pse is not None
+        or snc_credential is not None
+        or snc_partnername is not None
+    )
     if snc_enabled or wshost is not None:
         return await _ThreadedAsyncConnection.open(
             ashost=ashost,

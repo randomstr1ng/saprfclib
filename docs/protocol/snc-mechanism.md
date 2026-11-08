@@ -211,12 +211,24 @@ Revocation is not checked.
 A PSE file created with `sapgenpse` holds the own key, own certificate, its issuer chain
 and the trusted certificates (the "PK list"). Supported: container versions 2 and 4,
 protected with PKCS#12 `pbeWithSHAAnd3-KeyTripleDES-CBC` (the default) or PBES2 / PBKDF2
-(HMAC-SHA1/256/512) / AES-256-CBC, or unprotected; RSA keys only. Golden files:
-`tests/golden/pse/*.pse`, each paired with the key and certificates `sapgenpse` exported
-from it.
+(HMAC-SHA1/256/512) / AES-256-CBC, or unprotected; PSEs wrapped in local protected storage
+(LPS); RSA keys only.
 
-Not supported: PSEs inside local protected storage (LPS), reading the PIN from a
-`cred_v2` file (`sapgenpse seclogin`), EC and EdDSA own keys.
+PINs stored by `sapgenpse seclogin` in `SECUDIR/cred_v2` are read in all three forms
+`sapgenpse` writes outside Windows: the default (3DES), the AES-256 header form, and LPS.
+The first two are keyed on the OS user name the entry was created for; LPS is not.
+
+Which PSE is used when none is named follows CommonCryptoLib: `SECUDIR` (or
+`$HOME/sec`), the `cred_v2` entry whose name matches `snc_myname` (case-insensitive,
+blanks after commas ignored), else the first entry whose PIN can be recovered, else an
+unprotected `SAPSNCS.pse`.
+
+Golden files: `tests/golden/pse/*.pse` (each paired with the key and certificates
+`sapgenpse` exported from it) and `tests/golden/pse/cred_*/cred_v2` (each written by
+`sapgenpse seclogin` for a known PIN).
+
+Not supported: Windows DPAPI-protected LPS and `cred_v2` entries (host-bound), LPS records
+carrying a host or user restriction, EC and EdDSA own keys.
 
 ---
 
@@ -229,6 +241,10 @@ Not supported: PSEs inside local protected storage (LPS), reading the PIN from a
 - **Performance.** Pure-Python AES runs at roughly a few MB/s; reading a 40 000-row table
   over SNC took 2.4 s in the live test. `tlslite-ng` switches to a native backend
   automatically if one is installed.
+- **`cred_v2` and LPS are obfuscation, not protection.** Outside Windows their keys are
+  derived from constants and, for `cred_v2`, the OS user name. Anyone who can read the
+  `SECUDIR` files can recover the PIN and the private key — this library does exactly that
+  to be compatible. Protect `SECUDIR` with file permissions like any private key.
 - **Trust anchors are explicit.** Only certificates in the PSE's PK list (or the
   credential's `trusted` tuple) are trusted; there is no system trust store fallback.
 

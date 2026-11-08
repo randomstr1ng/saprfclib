@@ -26,9 +26,11 @@ The GSS mechanism underneath is either saprfclib's own implementation of SAP's X
 mechanism ([snc-mechanism.md](snc-mechanism.md)) or a native GSS-API library loaded with
 `ctypes` from `snc_lib`. The frame layer described here is the same for both.
 
-**Activation:** `snc_pse` / `snc_credential` (built-in mechanism) or `snc_lib` (native
-library) switch SNC on; `snc_partnername` is then required. Without them the plain TCP
-path is byte-for-byte unchanged.
+**Activation:** `snc_partnername` switches SNC on, as in the NW RFC SDK. The mechanism is
+the native library when `snc_lib` is given, otherwise the built-in one, whose credential
+comes from `snc_credential`, else `snc_pse` (PIN from `snc_pse_pin` or `cred_v2`), else
+`SECUDIR` (see [snc-mechanism.md](snc-mechanism.md#credentials-psepy)). Without any SNC
+parameter the plain TCP path is byte-for-byte unchanged.
 
 ---
 
