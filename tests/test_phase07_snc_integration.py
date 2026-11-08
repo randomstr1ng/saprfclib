@@ -97,3 +97,42 @@ def test_live_snc_handshake() -> None:
             pass  # Phase 4 invoke path not yet available — gap documented
     finally:
         conn.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SAPRFC_SNC_PSE"),
+    reason="SAPRFC_SNC_PSE not set — no live SNC-enabled SAP system available",
+)
+def test_live_builtin_snc() -> None:
+    """Built-in SNC mechanism end to end: handshake, logon, calls.
+
+    Env: SAPRFC_SNC_PSE (+ SAPRFC_SNC_PSE_PIN), SAPRFC_SNC_PARTNERNAME and the usual
+    SAPRFC_ASHOST / SYSNR / CLIENT / USER / PASSWD. Covers a response larger than one
+    16 KiB record chunk and a request larger than one chunk.
+    """
+    conn = saprfclib.connect(
+        ashost=os.environ["SAPRFC_ASHOST"],
+        sysnr=os.environ.get("SAPRFC_SYSNR", "00"),
+        client=os.environ["SAPRFC_CLIENT"],
+        user=os.environ["SAPRFC_USER"],
+        passwd=os.environ["SAPRFC_PASSWD"],
+        snc_partnername=os.environ["SAPRFC_SNC_PARTNERNAME"],
+        snc_pse=os.environ["SAPRFC_SNC_PSE"],
+        snc_pse_pin=os.environ.get("SAPRFC_SNC_PSE_PIN"),
+    )
+    try:
+        assert conn.call("RFC_SYSTEM_INFO")["RFCSI_EXPORT"]["RFCSYSID"]
+        fields = [{"FIELDNAME": "TABNAME"}, {"FIELDNAME": "FIELDNAME"}]
+        rows = conn.call("RFC_READ_TABLE", QUERY_TABLE="DD03L", ROWCOUNT=5000, FIELDS=fields)
+        assert len(rows["DATA"]) == 5000
+        opts = [{"TEXT": "TABNAME = 'T000'"}] + [{"TEXT": "OR TABNAME = 'T000'"}] * 150
+        res = conn.call(
+            "RFC_READ_TABLE",
+            QUERY_TABLE="DD02L",
+            ROWCOUNT=5,
+            OPTIONS=opts,
+            FIELDS=[{"FIELDNAME": "TABNAME"}],
+        )
+        assert [r["WA"].strip() for r in res["DATA"]] == ["T000"]
+    finally:
+        conn.close()

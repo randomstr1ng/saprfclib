@@ -1,53 +1,85 @@
 # SNC Connection
 
-Use SNC (Secure Network Communications) to establish an encrypted and optionally
-certificate-authenticated connection to an SAP system without sending user credentials
-over the wire.  Pass `snc_lib` pointing to your GSS-API provider library (e.g.
-CommonCryptoLib `libsapcrypto.so`) and `snc_partnername` identifying the SAP server.
+SNC (Secure Network Communications) encrypts the RFC connection and authenticates both
+ends with X.509 certificates. `saprfclib` speaks SAP's X.509 SNC mechanism itself, so no
+SAP library is needed. If you already run CommonCryptoLib (or another GSS-API library),
+you can still use it through `snc_lib`.
 
-## X.509 SNC connection
+## Built-in SNC (no SAP library)
+
+You need a PSE file with your client key and certificate, and the server's certificate
+in that PSE's trusted list. `sapgenpse` creates both:
+
+```bash
+sapgenpse get_pse -p client.pse -x <pin> "CN=my-client, O=MyOrg, C=DE"
+sapgenpse maintain_pk -a server.crt -p client.pse -x <pin>      # trust the SAP server
+sapgenpse export_own_cert -o client.crt -p client.pse -x <pin>  # import into STRUST (SNC SAPCryptolib)
+```
 
 ```python
 import saprfclib
 
-# snc_lib presence activates SNC.  The path must point to a GSS-API provider
-# shared library, typically SAP's CommonCryptoLib (libsapcrypto.so on Linux).
 conn = saprfclib.connect(
     ashost="sap-host",
-    sysnr=0,
+    sysnr="00",
     client="100",
-    user="",                        # Empty string: certificate provides the identity
-    passwd="",                      # Empty string: SNC provides authentication
-    snc_lib="/usr/sap/sapcryptolib/libsapcrypto.so",
-    snc_partnername="p:CN=A4H, OU=SAP, O=SAP SE, C=DE",   # SAP server's SNC name
-    snc_myname="p:CN=myclient, O=MyOrg, C=DE",             # Client SNC name (optional)
-    snc_qop=3,                      # Quality of protection: 3 = privacy (encrypt + auth)
+    user="ALICE",
+    passwd="...",                   # sent inside the encrypted channel
+    snc_partnername="p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE",
+    snc_pse="/secure/client.pse",
+    snc_pse_pin="...",
 )
-
-result = conn.call("STFC_CONNECTION", REQUTEXT="SNC-encrypted call")
-print(result["ECHOTEXT"])
-print(result["RESPTEXT"])
-
+print(conn.call("RFC_SYSTEM_INFO")["RFCSI_EXPORT"]["RFCSYSID"])
 conn.close()
 ```
 
-## Quality of Protection levels
+- `snc_partnername` must be the server certificate's **complete** subject, most specific
+  RDN first. `p:CN=A4H` alone is rejected when the certificate has more RDNs. Letter case
+  and spaces after commas do not matter; RDN order does.
+- The port defaults to the secure gateway port `48NN`. Pass `port=` if yours differs.
+- Instead of a PSE file you can pass `snc_credential=SncCredential(private_key=...,
+  certificate_chain=(...,), trusted=(...,))` built from DER bytes you load yourself.
+- `snc_myname` is optional; when given it must name the PSE's own certificate.
 
-| `snc_qop` | Level | Description |
-|-----------|-------|-------------|
-| 1 | Authentication | Verifies peer identity only; data is not encrypted |
-| 2 | Integrity | Authentication + message integrity check (no encryption) |
-| 3 | Privacy (default) | Authentication + integrity + full encryption |
+Supported: RSA client keys; PSE files protected with the default or PBES2 encryption, or
+unprotected. Not supported yet: reading the PIN from a `cred_v2` file
+(`sapgenpse seclogin`), PSEs in local protected storage, EC client keys.
+
+!!! warning "Security"
+    The built-in cryptography is pure Python and not constant-time. Run it on hosts you
+    control. Keep the PSE file and its PIN as protected as any private key.
+
+## Native GSS library
+
+```python
+conn = saprfclib.connect(
+    ashost="sap-host",
+    sysnr="00",
+    client="100",
+    user="ALICE",
+    passwd="...",
+    snc_lib="/usr/sap/sapcryptolib/libsapcrypto.so",   # absolute path
+    snc_partnername="p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE",
+    snc_myname="p:CN=my-client, O=MyOrg, C=DE",         # optional
+)
+```
+
+The library finds its own credentials (for CommonCryptoLib: `SECUDIR` and `cred_v2`).
+
+## Quality of protection
+
+| `snc_qop` | Level |
+|-----------|-------|
+| 1 | Authentication only |
+| 2 | Integrity |
+| 3 | Privacy (default) |
+| 8 | System default |
+| 9 | Maximum available |
+
+The server can raise the level: a system configured with
+`snc/data_protection/min = 3` encrypts every message regardless of what the client asks
+for.
 
 ## Notes
 
-- `snc_lib` must be the **absolute path** to the shared library — a relative path is
-  not portable across working-directory changes.
-- `snc_partnername` must match the Distinguished Name configured in the SAP system's
-  SNC settings (transaction SNC0 / STRUST).
-- When SNC provides the authentication (certificate-based), `user` and `passwd` can be
-  empty strings.  The GSS-API library derives the identity from the client certificate.
-- `snc_myname` is optional; if omitted the library uses the default identity configured
-  in the GSS-API provider.
-- SNC and wRFC (`wshost`) cannot be combined in the same connection (SNC-over-wRFC is
-  out of scope for the current release).
+- SNC and WebSocket RFC (`wshost`) cannot be combined in one connection.

@@ -80,6 +80,7 @@ nav:
     - Handshake: protocol/handshake.md
     - Message Server: protocol/message_server.md
     - SNC: protocol/snc.md
+    - SNC mechanism (built in): protocol/snc-mechanism.md
     - tRFC / bgRFC: protocol/trfc.md
     - RE Methodology: protocol/methodology.md
 

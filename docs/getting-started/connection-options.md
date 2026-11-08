@@ -53,31 +53,28 @@ conn = saprfclib.connect(
 )
 ```
 
-## SNC (X.509 / Kerberos)
+## SNC (X.509)
 
-Use SAP Secure Network Communications for encrypted and mutually authenticated
-connections. Set `snc_lib` to the path of your SNC library
-(e.g. SAP CommonCryptoLib `libsapcrypto.so`).
+SAP Secure Network Communications encrypts the connection and authenticates both ends
+with certificates. The X.509 mechanism is built in — point `snc_pse` at a PSE file
+created with `sapgenpse`:
 
 ```python
 conn = saprfclib.connect(
     ashost="sap-host",
-    sysnr=0,
+    sysnr="00",
     client="100",
     user="USER",
-    passwd="",                # Empty when SNC provides auth
-    snc_lib="/usr/sap/sapcryptolib/libsapcrypto.so",
-    snc_partnername="p:CN=SAPserver, O=Example, C=DE",
-    snc_myname="p:CN=myclient, O=Example, C=DE",  # optional
-    snc_qop=3,                # 1=auth, 2=integrity, 3=privacy (default)
+    passwd="...",
+    snc_partnername="p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE",
+    snc_pse="/secure/client.pse",
+    snc_pse_pin="...",
 )
 ```
 
-| `snc_qop` | Protection level |
-|-----------|-----------------|
-| 1 | Authentication only |
-| 2 | Authentication + integrity |
-| 3 | Authentication + integrity + privacy (encryption) |
+To use a native GSS-API library instead (e.g. CommonCryptoLib), pass `snc_lib` with its
+absolute path and leave out `snc_pse`. See the [SNC cookbook](../cookbook/snc-connection.md)
+for setup, partner-name rules and the protection levels (`snc_qop`).
 
 ## WebSocket RFC (BTP / Cloud)
 

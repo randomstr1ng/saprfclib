@@ -28,10 +28,17 @@ classifiers = [
     "Typing :: Typed",
 ]
 # wsproto + h11 are CORE deps per D-27 (wRFC transport imports them unconditionally).
+# asn1crypto + ecdsa + tlslite-ng are CORE deps for the built-in SNC mechanism: all
+# three are pure Python (py3-none-any wheels, no build step). They supply DER/X.509
+# parsing, P-256 ECDH, and AES/3DES/RSA respectively, so the library implements no
+# cryptographic primitive itself.
 # There are NO [ws] / [snc] / [all] optional extras — test_packaging.py enforces this.
 dependencies = [
     "wsproto>=1.2",
     "h11>=0.16",
+    "asn1crypto>=1.5.1",
+    "ecdsa>=0.19",
+    "tlslite-ng>=0.8.2",
 ]
 
 [project.urls]

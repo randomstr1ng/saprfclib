@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in SNC — no SAP library needed** (issue #35). `connect(snc_partnername=...,
+  snc_pse=..., snc_pse_pin=...)` opens an SNC connection with saprfclib's own
+  implementation of SAP's X.509 SNC mechanism; `snc_credential=` accepts a key and
+  certificates loaded by the caller instead of a PSE file. `snc_lib` keeps working for a
+  native GSS-API library. Implemented: protocol 1.1, cipher suite `0x0009` (ECDHE P-256,
+  AES-256-CBC, HMAC-SHA256), RSA certificates. Confirmed live against an S/4HANA system
+  (handshake, logon, multi-chunk requests and responses) and byte for byte against SAP
+  CommonCryptoLib; see `docs/protocol/snc-mechanism.md`.
+- `saprfclib.pse.load_pse()` reads `sapgenpse` PSE files (versions 2 and 4, default and
+  PBES2 encryption, RSA keys).
+
+### Changed
+
+- New core dependencies `asn1crypto`, `ecdsa` and `tlslite-ng`, all pure Python. They
+  provide the DER/X.509 parsing, ECDH and AES/3DES/RSA the SNC mechanism needs; the
+  library implements no cryptographic primitive itself.
+
+### Fixed
+
+- `docs/protocol/snc.md` listed the SNC handshake frame types as 1/2; they are 2/4.
+
 ## [0.1.9] - 2026-10-27
 
 One fix, issue #58: the RFC server (`RfcServer`) now registers at the gateway with any

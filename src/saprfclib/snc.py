@@ -44,7 +44,7 @@ import ctypes
 import os
 import struct
 from enum import IntEnum
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from saprfclib.exceptions import CommunicationError, SncError
 from saprfclib.transport import Transport, connect_tcp
@@ -793,6 +793,24 @@ def _strip_snc_prefix(value: str) -> str:
 # or placed in exceptions. SncError carries GSS major/minor only.
 
 
+class GssMechanism(Protocol):
+    """What :class:`SncTransport` needs from a GSS mechanism.
+
+    Implemented by :class:`GssBinding` (a native GSS library over ctypes) and by
+    :class:`saprfclib.secgss.SecGssInitiator` (the built-in X.509 mechanism).
+    """
+
+    _real: bool
+    _lib: Any
+
+    def init_sec_context(self, input_token: bytes) -> tuple[int, bytes]: ...
+    def wrap(self, payload: bytes) -> bytes: ...
+    def unwrap(self, token: bytes) -> bytes: ...
+    def get_mic(self, payload: bytes) -> bytes: ...
+    def verify_mic(self, payload: bytes, mic: bytes) -> None: ...
+    def close(self) -> None: ...
+
+
 class SncTransport:
     """SNC transport: drive the GSS handshake, then QOP-dispatch send/recv.
 
@@ -809,12 +827,12 @@ class SncTransport:
         self,
         inner: Transport,
         *,
-        snc_lib: str,
+        snc_lib: str | None = None,
         snc_partnername: str,
         snc_myname: str | None = None,
         snc_qop: int = 3,
         snc_sso: bool = False,
-        gss_binding: GssBinding | None = None,
+        gss_binding: GssMechanism | None = None,
         eye_catcher: bytes | None = None,
     ) -> None:
         if snc_sso:
@@ -831,18 +849,24 @@ class SncTransport:
         # D-22 RESOLVED (protocol analysis 2026-07-21): snc_eyecatcher global at
         # points to "SNCFRAME\0" at. Injectable so tests can override.
         self._eye = eye_catcher or b"SNCFRAME"
-        self._gss = gss_binding or GssBinding(
-            snc_lib=snc_lib,
-            snc_partnername=snc_partnername,
-            snc_myname=snc_myname,
-            snc_qop=snc_qop,
-        )
+        if gss_binding is None:
+            if snc_lib is None:
+                raise SncError("no SNC mechanism: pass snc_lib or a gss_binding")
+            gss_binding = GssBinding(
+                snc_lib=snc_lib,
+                snc_partnername=snc_partnername,
+                snc_myname=snc_myname,
+                snc_qop=snc_qop,
+            )
+        self._gss: GssMechanism = gss_binding
         # D-24: build the 126-byte SNC extension header for the first FR_INIT.
         # _build_snc_ext_header is pure Python — no lib needed.
         _partner_dn = _strip_snc_prefix(_strip_quotes(snc_partnername))
         self._ext_header: bytes = _build_snc_ext_header(_partner_dn)
-        # D-24: adapter info string goes as app_data in every FR_INIT frame.
-        # Empty for mock/test bindings (_real == False) to keep test assertions stable.
+        # D-24: adapter info string goes as app_data in every FR_INIT frame when a
+        # native library is loaded. Empty otherwise: a live server completed the
+        # handshake with empty app_data from the built-in mechanism (2026-11-08,
+        # tests/golden/snc/secgss_live_a4h.json).
         self._adapter_info: bytes = (
             _get_snc_adapter_info(self._gss._lib) if self._gss._real else b""
         )

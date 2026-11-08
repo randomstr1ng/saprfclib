@@ -48,7 +48,7 @@ import uuid
 import warnings
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from saprfclib.exceptions import (
     AbapApplicationError,
@@ -102,6 +102,10 @@ from saprfclib.transport import (
     connect_tcp,
     connect_tcp_async,
 )
+
+if TYPE_CHECKING:
+    from saprfclib.secgss import SecGssInitiator, SncCredential
+
 from saprfclib.types import (
     RFC_EXPORT,
     RFC_IMPORT,
@@ -716,7 +720,12 @@ def _strip_gw_header(resp: bytes) -> bytes:
 
 
 def _resolve_credentials(
-    user: str | None, passwd: str | None, *, snc_lib: str | None, ashost: str
+    user: str | None,
+    passwd: str | None,
+    *,
+    snc_lib: str | None,
+    ashost: str,
+    snc: bool | None = None,
 ) -> tuple[str | None, str | None]:
     """Decide whether this connection carries credentials, and sanity-check them.
 
@@ -730,7 +739,7 @@ def _resolve_credentials(
     anonymously, it is a missing environment variable or a typo, and turning it into
     a silent anonymous attempt would replace a clear error with a confusing one.
     """
-    if snc_lib is not None:
+    if snc or (snc is None and snc_lib is not None):
         return user, passwd
     if user is None and passwd is None:
         _logger.warning(
@@ -747,6 +756,36 @@ def _resolve_credentials(
             f"to authenticate, or neither to attempt an anonymous connection."
         )
     return user, passwd
+
+
+def _builtin_snc_mechanism(
+    partner_name: str,
+    *,
+    snc_myname: str | None,
+    snc_pse: str | os.PathLike[str] | None,
+    snc_pse_pin: str | None,
+    snc_credential: SncCredential | None,
+) -> SecGssInitiator:
+    """Build the pure-Python SNC initiator from a PSE file or an explicit credential.
+
+    ``snc_myname``, when given, must name the own certificate: it is checked
+    against the certificate subject with the same rules the server applies to the
+    partner name, so a mismatch fails here instead of at the server.
+
+    Security: the PSE path, PIN and names never reach a log or exception message.
+    """
+    from saprfclib.pse import load_pse
+    from saprfclib.secgss import SecGssInitiator, own_name_matches
+
+    if (snc_pse is None) == (snc_credential is None):
+        raise ValueError("pass exactly one of snc_pse or snc_credential for built-in SNC")
+    if snc_credential is None:
+        assert snc_pse is not None
+        with open(snc_pse, "rb") as fh:
+            snc_credential = load_pse(fh.read(), snc_pse_pin)
+    if snc_myname is not None and not own_name_matches(snc_credential, snc_myname):
+        raise ValueError("snc_myname does not match the certificate in the SNC credential")
+    return SecGssInitiator(snc_credential, partner_name)
 
 
 def _filter_call_params(
@@ -4114,6 +4153,9 @@ def connect(
     snc_myname: str | None = None,
     snc_qop: int | None = None,
     snc_sso: bool | None = None,
+    snc_pse: str | os.PathLike[str] | None = None,
+    snc_pse_pin: str | None = None,
+    snc_credential: SncCredential | None = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     tid_store: TidStore | None = None,
@@ -4130,12 +4172,15 @@ def connect(
         ``connect_ws`` (SEC-05, D-16/D-17). ``wsport`` defaults to 443 and
         ``ws_path`` to ``/sap/bc/rfc`` (D-19). Optional ``ws_proxy_*`` params
         tunnel the connection through an HTTP CONNECT forward proxy (D-20).
-      - SNC (Secure Network Communications): ``snc_lib`` set (and ``wshost``
-        absent) → wrap the direct-TCP transport in an :class:`~saprfclib.snc.SncTransport`
-        that drives the GSS-API handshake to COMPLETE before any data is sent
-        (SEC-02/03/04/06, D-13). ``snc_lib`` presence is the activation switch —
-        there is no separate mode flag. ``snc_sso`` defaults to False (D-12).
-        ``wshost`` takes precedence: SNC-over-wRFC is out of scope for Phase 7.
+      - SNC (Secure Network Communications): ``snc_pse``, ``snc_credential`` or
+        ``snc_lib`` set (and ``wshost`` absent) → wrap the direct-TCP transport in an
+        :class:`~saprfclib.snc.SncTransport` that drives the GSS-API handshake to
+        COMPLETE before any data is sent (SEC-02/03/04/06, D-13). ``snc_partnername``
+        is required. With ``snc_pse`` (a PSE file, unlocked with ``snc_pse_pin``) or
+        ``snc_credential`` the built-in X.509 mechanism (:mod:`saprfclib.secgss`) is
+        used and no SAP library is needed; with ``snc_lib`` the named GSS-API library
+        is loaded instead. ``snc_sso`` defaults to False (D-12). ``wshost`` takes
+        precedence: SNC-over-wRFC is out of scope.
 
         ``snc_qop`` selects the protection level and defaults to 3. Accepted
         values are 1 (authentication only), 2 (integrity), 3 (privacy),
@@ -4227,7 +4272,8 @@ def connect(
     whether the entry count is carried in the header or only implied by the
     payload length. ``passwd``,
     ``ws_proxy_pass``, ``proxy_jwt``, ``proxy_client_secret``, ``snc_lib``,
-    ``snc_partnername`` and ``snc_myname`` are never logged or echoed into any log
+    ``snc_pse``, ``snc_pse_pin``, ``snc_credential``, ``snc_partnername`` and
+    ``snc_myname`` are never logged or echoed into any log
     message or exception string (threats T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
     # Imported lazily so the direct-TCP facade carries no hard dependency on the
@@ -4238,7 +4284,10 @@ def connect(
         parse_route_string,
     )
 
-    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
+    snc_enabled = snc_lib is not None or snc_pse is not None or snc_credential is not None
+    user, passwd = _resolve_credentials(
+        user, passwd, snc_lib=snc_lib, ashost=ashost, snc=snc_enabled
+    )
 
     # SOCKS5 proxy (issue #51, D-39/40/41). Build a socket_factory once; it reaches
     # the gateway through the proxy and everything above the socket is unchanged.
@@ -4287,7 +4336,7 @@ def connect(
     # gateway reachable at its own address; it does not survive NAT, a port-forward
     # or a jump host, and there the caller knows the port and the library cannot
     # derive it. When None nothing changes, so the SNC branch still defaults to 4800.
-    port = port if port is not None else (4800 if snc_lib is not None else 3300) + sysnr
+    port = port if port is not None else (4800 if snc_enabled else 3300) + sysnr
 
     # ------------------------------------------------------------------ #
     # Transport routing (Phase 7): wRFC first, then SNC, then plain TCP.  #
@@ -4324,7 +4373,7 @@ def connect(
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
-    elif snc_lib is not None:
+    elif snc_enabled:
         # SNC (SEC-02/03/04/06, D-13): SAP protocol order requires the NI
         # version exchange to complete on the plain channel BEFORE the GSS
         # frames are sent. SncTransport then drives FR_INIT/FR_ACCEPT to
@@ -4333,6 +4382,20 @@ def connect(
         # T-07-CRED: snc_lib / snc_partnername / snc_myname are passed
         # straight through — never placed into a log or an exception string.
         from saprfclib.snc import SncTransport, validate_snc_qop
+
+        if snc_partnername is None:
+            raise ValueError("SNC needs snc_partnername, the server's SNC name (p:CN=...)")
+        _mech = (
+            None
+            if snc_lib is not None
+            else _builtin_snc_mechanism(
+                snc_partnername,
+                snc_myname=snc_myname,
+                snc_pse=snc_pse,
+                snc_pse_pin=snc_pse_pin,
+                snc_credential=snc_credential,
+            )
+        )
 
         _inner = connect_tcp(
             ashost,
@@ -4358,10 +4421,11 @@ def connect(
         transport = SncTransport(  # type: ignore[assignment]
             _inner,
             snc_lib=snc_lib,
-            snc_partnername=snc_partnername,  # type: ignore[arg-type]
+            snc_partnername=snc_partnername,
             snc_myname=snc_myname,
             snc_qop=validate_snc_qop(snc_qop or 3),  # D-12: privacy is the default QOP
             snc_sso=snc_sso or False,  # D-12: SSO2 off by default (D-23 gap)
+            gss_binding=_mech,
         )
 
         # Step 3: Connection with the pre-versioned session so _handshake()
