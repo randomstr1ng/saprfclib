@@ -262,6 +262,44 @@ _AB_SCRAMBLE_KT = bytes.fromhex(
 )
 
 
+# --- Large requests: split into GW frames of at most 28000 payload bytes --------
+#
+# A gateway resets the connection when one client frame carries a TLV stream of
+# more than 28000 bytes: probed live, a 27998-byte stream (plus the 8-byte footer)
+# is accepted in one frame and a 28002-byte one is reset. The reference client
+# sends a larger request the TLV stream, without the 8-byte footer, in frames
+# of type 0x0608 carrying up to 28000 bytes each, followed by an 80-byte header-only
+# frame of type 0x0609. In the 0x0608 headers [24:32] are zero and [48:52] is the
+# payload length; the 0x0609 header carries 0x00000100 at [28:32] and 28000 at
+# [48:52] (whether that is the chunk size or a leftover is not established; it is
+# what the reference sends). Source: golden fixtures framing/multiframe_request_*.
+_GW_TYPE_REQUEST_CHUNK = 0x0608
+_GW_TYPE_REQUEST_END = 0x0609
+_GW_REQUEST_CHUNK = 28000
+
+
+def _gw_request_frames(frame: bytes) -> list[bytes]:
+    """Split one GW-framed request into the frames the gateway accepts."""
+    if len(frame) - 88 <= _GW_REQUEST_CHUNK:  # 80-byte header, 8-byte footer
+        return [frame]
+    header, body = frame[:80], frame[80:-8]  # the footer is not sent when chunked
+    out: list[bytes] = []
+    for i in range(0, len(body), _GW_REQUEST_CHUNK):
+        chunk = body[i : i + _GW_REQUEST_CHUNK]
+        h = bytearray(header)
+        struct.pack_into(">H", h, 0, _GW_TYPE_REQUEST_CHUNK)
+        h[24:32] = bytes(8)
+        struct.pack_into(">I", h, 48, len(chunk))
+        out.append(bytes(h) + chunk)
+    end = bytearray(header)
+    struct.pack_into(">H", end, 0, _GW_TYPE_REQUEST_END)
+    end[24:28] = bytes(4)
+    struct.pack_into(">I", end, 28, 0x100)
+    struct.pack_into(">I", end, 48, _GW_REQUEST_CHUNK)
+    out.append(bytes(end))
+    return out
+
+
 def _tlv(tag: int, value: bytes) -> bytes:
     """Build one TLV record: tag(2B BE) + length(2B BE) + value."""
     return tag.to_bytes(2, "big") + len(value).to_bytes(2, "big") + value
@@ -2375,9 +2413,15 @@ class Connection:
         so no WsTransport branch is needed here.
         """
         if self._snc_mode:
-            self._transport.send_message(frame[80:])
+            if len(frame) - 88 > _GW_REQUEST_CHUNK and hasattr(self._transport, "send_chunked"):
+                # The SNC transport wraps each chunk of the TLV stream (no footer)
+                # separately; see SncTransport.send_chunked.
+                self._transport.send_chunked(frame[80:-8], _GW_REQUEST_CHUNK)
+            else:
+                self._transport.send_message(frame[80:])
         else:
-            self._transport.send_message(frame)
+            for part in _gw_request_frames(frame):
+                self._transport.send_message(part)
 
     @staticmethod
     def _build_logon_request(
@@ -4976,7 +5020,7 @@ class AsyncConnection:
         )
         handle = self._session.handle or b"        "
         frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
-        await self._transport.send_message(frame)
+        await self._send_request(frame)
         response = await self._transport.recv_message()
 
         # A function module that is not remote-enabled answers GFI with a normal ABAP
@@ -5059,7 +5103,7 @@ class AsyncConnection:
         )
         handle = self._session.handle or b"        "
         frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
-        await self._transport.send_message(frame)
+        await self._send_request(frame)
         response = await self._transport.recv_message()
         raise_for_rfc_error(_strip_gw_header(response))
         rows = _parse_ddif_dfies_rows(response)
@@ -5128,7 +5172,7 @@ class AsyncConnection:
         )
         handle = self._session.handle or b"        "
         frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
-        await self._transport.send_message(frame)
+        await self._send_request(frame)
         response = await self._transport.recv_message()
         raise_for_rfc_error(_strip_gw_header(response))
         dfies_rows = _parse_dfies_rows(response)
@@ -5163,6 +5207,11 @@ class AsyncConnection:
             # NUL prefix: a real SID is 3 alphanumerics, so this cannot collide.
             self._anon_cache_key = f"\x00anon-{uuid.uuid4().hex}"
         return self._anon_cache_key
+
+    async def _send_request(self, frame: bytes) -> None:
+        """Send a GW-framed request, split into chunk frames when it is large."""
+        for part in _gw_request_frames(frame):
+            await self._transport.send_message(part)
 
     @property
     def sys_id(self) -> str | None:
@@ -5245,7 +5294,7 @@ class AsyncConnection:
                     handle, request_tlv, conn_idx=self._session.conn_idx
                 )
                 with _fail_closed(self._session, func_name):
-                    await self._transport.send_message(request)
+                    await self._send_request(request)
                     tlv_response = await _join_response_frames_async(
                         self._transport.recv_message, func_name
                     )
@@ -5275,7 +5324,7 @@ class AsyncConnection:
                     handle, Connection._rfcping_request_tlv(), conn_idx=self._session.conn_idx
                 )
                 with _fail_closed(self._session, "RFCPING"):
-                    await self._transport.send_message(frame)
+                    await self._send_request(frame)
                     resp = await self._transport.recv_message()
                 return Connection._rfcping_ok(resp)
             finally:
@@ -5432,7 +5481,7 @@ class AsyncConnection:
 
                 async def _do_send() -> None:
                     try:
-                        await self._transport.send_message(request)
+                        await self._send_request(request)
                         response = await _join_response_frames_async(
                             self._transport.recv_message, func_name
                         )
@@ -5474,7 +5523,7 @@ class AsyncConnection:
                     handle, request_tlv, conn_idx=self._session.conn_idx
                 )
                 try:
-                    await self._transport.send_message(request)
+                    await self._send_request(request)
                     response = await _join_response_frames_async(
                         self._transport.recv_message, "ARFC_DEST_CONFIRM"
                     )
@@ -5538,7 +5587,7 @@ class AsyncConnection:
 
                 async def _do_send() -> None:
                     try:
-                        await self._transport.send_message(request)
+                        await self._send_request(request)
                         response = await _join_response_frames_async(
                             self._transport.recv_message, "BGRFC_DEST_SHIP"
                         )
@@ -5662,7 +5711,7 @@ class AsyncConnection:
         # Re-send the raw request bytes without re-marshaling (D-03b).
         async def _do_resend() -> None:
             try:
-                await self._transport.send_message(payload)
+                await self._send_request(payload)
                 response = await _join_response_frames_async(
                     self._transport.recv_message, f"retry {tid}"
                 )
@@ -5719,7 +5768,7 @@ class AsyncConnection:
 
         async def _do_resend() -> None:
             try:
-                await self._transport.send_message(payload)
+                await self._send_request(payload)
                 response = await _join_response_frames_async(
                     self._transport.recv_message, f"retry unit {unit_id}"
                 )

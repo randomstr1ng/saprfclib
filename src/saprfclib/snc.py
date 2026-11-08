@@ -1111,6 +1111,52 @@ class SncTransport:
             # QOP 1 only: PLAIN (type 7), no data protection.
             self._send_snc_frame(SncFrameType.PLAIN, app_data=payload)
 
+    def send_chunked(self, payload: bytes, chunk_size: int) -> None:
+        """Send a large request as several protected chunks (GW-envelope mode).
+
+        The reference client splits a request whose TLV stream exceeds the
+        gateway's frame limit into ``chunk_size`` pieces, protects each piece as its
+        own SNC data frame and sends it in a GW frame of type 0x0608 — [24:32] zero,
+        [48:52] the SNC frame's length, no trailer — then an 80-byte header-only
+        frame of type 0x0609 with byte 10 = 0, [28:32] = 0x00000100 and
+        [48:52] = 00 00 85 00. Source: golden fixture framing/multiframe_request_snc.
+        """
+        if not self._established or not self._use_gw:
+            raise SncError("chunked send requires an established GW-envelope SNC channel")
+        for i in range(0, len(payload), chunk_size):
+            frame = self._protect(payload[i : i + chunk_size])
+            hdr = bytearray(self._build_gw_snc_frame(frame)[:80])
+            struct.pack_into(">H", hdr, 0, 0x0608)
+            hdr[24:32] = bytes(8)
+            struct.pack_into(">I", hdr, 48, len(frame))
+            self._send_raw(bytes(hdr) + frame)
+        end = bytearray(self._build_gw_snc_frame(b"")[:80])
+        struct.pack_into(">H", end, 0, 0x0609)
+        end[10] = 0
+        end[24:28] = bytes(4)
+        struct.pack_into(">I", end, 28, 0x100)
+        end[48:52] = b"\x00\x00\x85\x00"
+        self._send_raw(bytes(end))
+
+    def _protect(self, payload: bytes) -> bytes:
+        """Protect ``payload`` at the level in use; return the SNC frame (no envelope)."""
+        protection = _LEVEL_PROTECTION[self._quse]
+        if protection is SncFrameType.PRIVACY:
+            return build_snc_frame(
+                self._eye, int(protection), self._ctx_id, 0, self._gss.wrap(payload)
+            )
+        if protection is SncFrameType.INTEGRITY:
+            return build_snc_frame(
+                self._eye, int(protection), self._ctx_id, 0, self._gss.get_mic(payload), payload
+            )
+        return build_snc_frame(self._eye, int(protection), self._ctx_id, 0, b"", payload)
+
+    def _send_raw(self, wire: bytes) -> None:
+        try:
+            self._inner.send_message(wire)
+        except (OSError, EOFError) as exc:
+            raise CommunicationError(str(exc), original_exception=exc) from exc
+
     def recv_message(self) -> bytes:
         """Receive one frame; passthrough non-SNC frames, else QOP-dispatch."""
         try:

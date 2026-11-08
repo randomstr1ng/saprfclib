@@ -1147,6 +1147,35 @@ parsed out of the response TLV, and the tags carrying it on a system failure hav
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
 
+### Multi-frame requests — CONFIRMED (2026-11-08)
+
+The client side has the same limit: a gateway resets the connection when one client
+frame carries a TLV stream of more than **28000 bytes**. Probed live by growing one
+request byte by byte: a 27998-byte stream (plus the 8-byte footer) is accepted in a single
+`0x06CB` frame, a 28002-byte one is reset. Before this was handled, any call whose
+request exceeded it — a long `OPTIONS` table, a large table parameter — failed with
+`Connection reset by peer`, while the NW RFC SDK sent the same call fine.
+
+A larger request is sent as the reference client sends it (fixture
+`multiframe_request_plain_frames.bin`, reproduced byte for byte by `_gw_request_frames`):
+
+| frame | type | payload | header differences to `0x06CB` |
+|---|---|---|---|
+| 1 … n−1 | `0x0608` | 28000 bytes of the TLV stream | `[24:32]` zero, `[48:52]` payload length |
+| n | `0x0608` | the rest (≤ 28000) | same |
+| end | `0x0609` | none (80-byte header only) | `[24:28]` zero, `[28:32]` `00 00 01 00`, `[48:52]` 28000 |
+
+The 8-byte footer of a single-frame request is not sent. The server answers as usual
+(its reply may itself be multi-frame).
+
+Over SNC each 28000-byte piece is protected as its own SNC data frame and sent in a
+`0x0608` envelope without the 8-byte SNC trailer, `[48:52]` holding the SNC frame's
+length; the closing `0x0609` frame has byte 10 = 0 and `[48:52]` = `00 00 85 00`
+(fixture `multiframe_request_snc.json`, headers only). The terminator's `[48:52]` thus
+differs between the two paths — 28000 plain, `00 00 85 00` with SNC — which suggests a
+value left over from an earlier header rather than a defined field; both are sent
+exactly as observed.
+
 ### Multi-frame responses
 
 A reply larger than one gateway frame arrives as several NI frames whose TLV

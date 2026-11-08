@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Requests larger than 28000 bytes** reset the connection (`Connection reset by peer`),
+  on plain RFC and over SNC — a long `OPTIONS` table was enough. They are now split into
+  gateway frames the way the NW RFC SDK splits them (`0x0608` chunks and a `0x0609`
+  terminator; over SNC each chunk protected separately). The single-frame limit was probed
+  live; the chunk layout is byte-identical to the reference
+  (`tests/golden/framing/multiframe_request_*`).
 - **SAProuter routes** (issue #20). `connect(saprouter=...)` opened the TCP connection to
   `ashost` instead of the first router and sent the route there; on SNC connections it also
   sent the NI version exchange before the route. Routes with more than one router were
