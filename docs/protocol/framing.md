@@ -928,12 +928,11 @@ See `tests/golden/framing/stfc_connection_request.json` for full field-by-field 
 Items where the wire behaviour is documented but incompletely confirmed, or confirmed but not
 yet implemented. Each states what is known, what is not, and the consequence of the gap.
 
-### SAProuter NI_ROUTE prefix — CONFIRMED (2026-06-27)
+### SAProuter NI_ROUTE prefix — CONFIRMED (corrected 2026-11-08)
 
-Wire format confirmed from live capture: `NI_ROUTE\0` (9B) + talk_mode (`0x02`) + `0x28` +
-version (`0x02`) + hop_count (4B BE) + total_data_length (4B BE) + per-hop entries
-(entry_len [4B] + host`\0` + svc [6B]) + final destination (host`\0` + svc [6B]).
-Golden fixture: `tests/golden/router/ni_route_payload.bin`. Implemented and replayed in CI.
+Layout, the multi-router correction and where the client connects: see
+[message_server.md → NI_ROUTE layout](message_server.md#ni_route-layout-confirmed-corrected-2026-11-08).
+Golden fixtures under `tests/golden/router/`, replayed in CI.
 
 ### Message-server SAPMS group logon — CONFIRMED (2026-06-27)
 

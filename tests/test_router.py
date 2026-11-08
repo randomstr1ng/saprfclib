@@ -62,27 +62,58 @@ def test_parse_route_string_multi_hop() -> None:
 
 
 def test_build_ni_route_prefix_shape() -> None:
-    """build_ni_route confirmed format from live capture 2026-06-27 (TRANS-02).
+    """Header: marker, 0x02, NI version 0x28, entry count, then three BE32 fields.
 
-    NI_ROUTE\\0 (9B) + talk_mode(0x02) + 0x28 + version(0x02) +
-    hop_count(4B BE) + total_data(4B BE) + per-hop entries + final dest.
+    Entry count = routers + destination; then entries still to connect (count - 1),
+    total entry length, offset of entry 1. Entries carry no length prefix. Pinned by
+    the two-router captures below; a real router rejects the earlier length-prefixed
+    layout with -93 "invalid route".
     """
-    hops = parse_route_string("/H/host/S/3299/H/saprouter")
+    hops = parse_route_string("/H/host/S/3299/H/saprouter/S/3298")
     frame = build_ni_route(hops, "myapp", "3300")
-    assert isinstance(frame, (bytes, bytearray))
-    # Magic: "NI_ROUTE\0" (9 bytes, null-terminated)
     assert frame.startswith(b"NI_ROUTE\x00")
-    # talk_mode = 0x02, fixed byte = 0x28, version = 0x02
-    assert frame[9] == 0x02
-    assert frame[10] == 0x28
-    assert frame[11] == 0x02
-    # hop_count = 2 (4 bytes BE at offset 12)
-    hop_count = struct.unpack_from(">I", frame, 12)[0]
-    assert hop_count == 2
-    # Host strings appear in payload (null-terminated)
-    assert b"host\x00" in frame
-    assert b"saprouter\x00" in frame
-    assert b"myapp\x00" in frame
+    assert frame[9:12] == b"\x02\x28\x03"
+    remaining, total, offset = struct.unpack_from(">III", frame, 12)
+    entries = [b"host\x003299\x00\x00", b"saprouter\x003298\x00\x00", b"myapp\x003300\x00\x00"]
+    assert (remaining, total, offset) == (2, sum(map(len, entries)), len(entries[0]))
+    assert frame[24:] == b"".join(entries)
+
+
+@pytest.mark.parametrize(
+    "fixture,route",
+    [
+        ("ni_route_two_hops", "/H/127.0.0.1/S/3391/H/127.0.0.1/S/3392"),
+        ("ni_route_two_hops_passwords", "/H/127.0.0.1/S/3391/H/127.0.0.1/S/3392/P/pwone"),
+    ],
+)
+def test_build_ni_route_two_hops_golden(fixture, route) -> None:
+    """Byte-identical to the reference client's NI_ROUTE through two routers."""
+    from pathlib import Path
+
+    expected = (Path(__file__).parent / "golden" / "router" / f"{fixture}.bin").read_bytes()
+    assert build_ni_route(parse_route_string(route), "198.51.100.7", "3300") == expected
+
+
+def test_first_hop_address() -> None:
+    from saprfclib.router import first_hop_address
+
+    assert first_hop_address(parse_route_string("/H/r1/S/3299/H/r2/S/3298")) == ("r1", 3299)
+    with pytest.raises(ValueError, match="/S/"):
+        first_hop_address(parse_route_string("/H/r1/H/r2/S/1"))
+    with pytest.raises(ValueError, match="services database"):
+        first_hop_address(parse_route_string("/H/r1/S/no-such-service-xyz"))
+
+
+def test_ni_rterr_snc_failure_is_reported() -> None:
+    """A router-to-router SNC failure arrives as NI_RTERR with the router's text."""
+    from pathlib import Path
+
+    from saprfclib.exceptions import SapRfcError
+    from saprfclib.transport import raise_for_ni_error
+
+    frame = (Path(__file__).parent / "golden" / "router" / "ni_rterr_snc_failure.bin").read_bytes()
+    with pytest.raises(SapRfcError, match="SNC processing failed"):
+        raise_for_ni_error(frame)
 
 
 def test_build_ni_route_golden() -> None:
@@ -777,3 +808,50 @@ def test_the_service_name_lands_in_its_own_field() -> None:
     )
     assert service == b"tick-port"
     assert entry[40:104].rstrip(b" \x00") == b"vhcala4hci", "host is 64 bytes wide"
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize("snc", [False, True])
+def test_connect_opens_tcp_to_the_first_router(snc) -> None:
+    """The socket goes to the first router, not to ashost (which the route names)."""
+    import json
+    from pathlib import Path
+
+    import saprfclib
+
+    seen = []
+
+    def factory(host, port):
+        seen.append((host, port))
+        raise _Stop
+
+    kw = {}
+    if snc:
+        pse = Path(__file__).parent / "golden" / "pse" / "pse_v2_pbe_3des.pse"
+        kw = {
+            "snc_partnername": "p:CN=X",
+            "snc_pse": pse,
+            "snc_pse_pin": json.loads(pse.with_suffix(".json").read_text())["pin"],
+        }
+    with pytest.raises(_Stop):
+        saprfclib.connect(
+            ashost="sap-gw",
+            sysnr="00",
+            client="001",
+            user="U",
+            passwd="P",
+            saprouter="/H/router1/S/3299/H/router2/S/3298",
+            socket_factory=factory,
+            **kw,
+        )
+    assert seen == [("router1", 3299)]
+
+
+def test_saprouter_with_wshost_is_rejected() -> None:
+    import saprfclib
+
+    with pytest.raises(ValueError, match="wshost"):
+        saprfclib.connect(ashost="x", sysnr="00", client="001", wshost="h", saprouter="/H/r/S/3299")

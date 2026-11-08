@@ -1,0 +1,6 @@
+{
+ "fixture": "ni_rterr_snc_failure",
+ "capture_source": "live capture 2026-11-08, lab with two SAProuter 40.7 instances on one host and an S/4HANA gateway behind them. NI_RTERR returned to the client by the first SAProuter when the SNC handshake between the two routers failed (wrong partner name configured on the router). Return code -104.",
+ "sanitised": "destination address replaced by 198.51.100.7 (TEST-NET-2) and the router host name by host1, byte length preserved. No NI length prefix.",
+ "evidence": "tier 1"
+}

@@ -4336,6 +4336,7 @@ def connect(
     # Imported lazily so the direct-TCP facade carries no hard dependency on the
     # alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
+        first_hop_address,
         open_route,
         open_route_async,
         parse_route_string,
@@ -4401,6 +4402,15 @@ def connect(
     # derive it. When None nothing changes, so the SNC branch still defaults to 4800.
     port = port if port is not None else (4800 if snc_enabled else 3300) + sysnr
 
+    # SAProuter: the TCP connection goes to the FIRST router; the NI_ROUTE frame
+    # names the remaining routers and, last, the gateway (ashost:port). The route
+    # is opened before anything else is sent on the socket. Source: golden fixtures
+    # router/ni_route_two_hops*.bin (reference client through two routers).
+    route_hops = parse_route_string(saprouter) if saprouter is not None else None
+    if route_hops is not None and wshost is not None:
+        raise ValueError("saprouter cannot be combined with wshost (WebSocket RFC)")
+    tcp_host, tcp_port = first_hop_address(route_hops) if route_hops else (ashost, port)
+
     # ------------------------------------------------------------------ #
     # Transport routing (Phase 7): wRFC first, then SNC, then plain TCP.  #
     # Both branches are additive — when ``wshost`` and ``snc_lib`` are    #
@@ -4461,14 +4471,18 @@ def connect(
         )
 
         _inner = connect_tcp(
-            ashost,
-            port,
+            tcp_host,
+            tcp_port,
             timeout=timeout,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
             trace=trace,
             socket_factory=socket_factory,
         )
+        if route_hops is not None:
+            # The route comes first: routers forward everything after NI_PONG
+            # unchanged, so the SNC session runs end to end through them.
+            open_route(_inner, route_hops, ashost, str(port))
 
         # Step 1: NI version exchange on the plain inner transport.
         _snc_sess = Session(allow_restricted_logon=allow_restricted_logon)
@@ -4516,12 +4530,14 @@ def connect(
         # Capture locals for the async closure (avoid late-binding issues).
         _ashost = ashost
         _port = port
+        _tcp_host = tcp_host
+        _tcp_port = tcp_port
+        _route_hops = route_hops
         _timeout = timeout
         _connect_timeout = connect_timeout
         _read_timeout = read_timeout
         _metadata_cache = metadata_cache
         _metadata_cache_key = metadata_cache_key
-        _saprouter = saprouter
         _client = client
         _user = user
         _passwd = passwd
@@ -4541,8 +4557,8 @@ def connect(
             # connect_async() uses real asyncio open_connection for non-blocking I/O.
             # This keeps the existing test suite (which patches connect_tcp) green (D-07).
             sync_t = connect_tcp(
-                _ashost,
-                _port,
+                _tcp_host,
+                _tcp_port,
                 timeout=_timeout,
                 connect_timeout=_connect_timeout,
                 read_timeout=_read_timeout,
@@ -4550,9 +4566,8 @@ def connect(
                 socket_factory=_socket_factory,
             )
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
-            if _saprouter is not None:
-                hops = parse_route_string(_saprouter)
-                await open_route_async(at, hops, _ashost, str(_port))
+            if _route_hops is not None:
+                await open_route_async(at, _route_hops, _ashost, str(_port))
             ac = AsyncConnection(
                 at,  # type: ignore[arg-type]
                 max_retries=_max_retries,
@@ -4581,13 +4596,6 @@ def connect(
             loop_thread.close()
             raise
         return Connection._from_async(async_conn, loop_thread)
-
-    if saprouter is not None:
-        # Prepend the NI_ROUTE control frame before the handshake (TRANS-02).
-        # Wire format confirmed from live capture 2026-06-27.
-        # NOTE: only reached by SNC/wRFC branches (classic path returns above).
-        hops = parse_route_string(saprouter)
-        open_route(transport, hops, ashost, str(port))
 
     conn._handshake(
         client=client,
@@ -5834,6 +5842,7 @@ async def connect_async(
 
     from saprfclib.router import (
         MessageServerClient,
+        first_hop_address,
         open_route_async,
         parse_route_string,
     )
@@ -5856,17 +5865,19 @@ async def connect_async(
 
     # See connect(): an explicit port replaces the derivation.
     port = port if port is not None else 3300 + int(sysnr)
+    # SAProuter: connect to the first router; the route names the rest (see connect()).
+    route_hops = parse_route_string(saprouter) if saprouter is not None else None
+    tcp_host, tcp_port = first_hop_address(route_hops) if route_hops else (ashost, port)
     transport = await connect_tcp_async(
-        ashost,
-        port,
+        tcp_host,
+        tcp_port,
         timeout=timeout,
         connect_timeout=connect_timeout,
         socket_factory=socket_factory,
     )
 
-    if saprouter is not None:
-        hops = parse_route_string(saprouter)
-        await open_route_async(transport, hops, ashost, str(port))
+    if route_hops is not None:
+        await open_route_async(transport, route_hops, ashost, str(port))
 
     conn = AsyncConnection(
         transport,
