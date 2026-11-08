@@ -27,8 +27,10 @@
 #     0x16    2B    BE uint16: QOP flags
 #     [0x18]        GSS token bytes, then application data bytes
 #
-# Only the fixed 0x18 header is implemented. A hdrlen field != 0x18 (extension
-# headers, e.g. SSO2) is not reverse-engineered (D-23) and is rejected.
+# hdrlen > 0x18 means extension headers follow the fixed header. The outbound
+# mechanism extension header (first FR_INIT only) is built by
+# _build_snc_ext_header; on inbound frames parse_snc_frame seeks to hdrlen, so
+# an extension header is skipped rather than rejected.
 #
 # DoS guard (T-07-FRAME-DOS, T-03-DOS parity): parse rejects a declared
 # token_len+data_len above _MAX_FRAME_BYTES (128 MiB) BEFORE slicing.
