@@ -1,0 +1,10 @@
+{
+ "fixture": "multiframe_request_plain",
+ "capture_source": "live capture 2026-11-08: NW RFC SDK client (pyrfc 3.3) calling RFC_READ_TABLE with a 900-row OPTIONS table of random text against an S/4HANA gateway (kernel 793), plain RFC. The call succeeded.",
+ "evidence": "tier 1. The client's request frames, each with its 4-byte NI length prefix: two 0x0608 frames (28000 and 376 payload bytes) and an 80-byte 0x0609 frame. Joined, the payloads form the request's complete TLV stream (no 8-byte footer).",
+ "notes": [
+  "A request whose TLV stream fits in 28000 bytes travels as one 0x06CB frame with the footer instead.",
+  "Header differences to 0x06CB: [0:2] type, [24:32] zero, [48:52] payload length; the 0x0609 frame has [28:32] = 00 00 01 00 and [48:52] = 28000."
+ ],
+ "frames_file": "multiframe_request_plain_frames.bin"
+}
