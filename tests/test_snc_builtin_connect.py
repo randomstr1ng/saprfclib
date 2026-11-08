@@ -36,7 +36,7 @@ def test_snc_pse_requires_partner_name():
 
 def test_snc_pse_and_credential_are_exclusive():
     cred = load_pse(PSE.read_bytes(), PIN)
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="at most one"):
         saprfclib.connect(
             ashost="h",
             sysnr="00",

@@ -28,10 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of each security handshake rather than two. Confirmed live for SNC (built-in mechanism
   and `snc_lib`); WebSocket RFC is covered offline.
 - `saprfclib.pse.load_pse()` reads `sapgenpse` PSE files (versions 2 and 4, default and
-  PBES2 encryption, RSA keys).
+  PBES2 encryption, LPS-wrapped, RSA keys), and PINs stored by `sapgenpse seclogin` in
+  `cred_v2` are read in every form written outside Windows. An existing CommonCryptoLib
+  `SECUDIR` works unchanged: with only `snc_partnername` given, the PSE is chosen as
+  CommonCryptoLib chooses it.
 
 ### Changed
 
+- **`snc_partnername` alone now switches SNC on**, as in the NW RFC SDK. It used to be
+  ignored unless `snc_lib` was also given, which connected without SNC to a system the
+  caller had named an SNC partner for.
 - New core dependencies `asn1crypto`, `ecdsa` and `tlslite-ng`, all pure Python. They
   provide the DER/X.509 parsing, ECDH and AES/3DES/RSA the SNC mechanism needs; the
   library implements no cryptographic primitive itself.

@@ -41,13 +41,27 @@ conn.close()
   certificate_chain=(...,), trusted=(...,))` built from DER bytes you load yourself.
 - `snc_myname` is optional; when given it must name the PSE's own certificate.
 
-Supported: RSA client keys; PSE files protected with the default or PBES2 encryption, or
-unprotected. Not supported yet: reading the PIN from a `cred_v2` file
-(`sapgenpse seclogin`), PSEs in local protected storage, EC client keys.
+An existing CommonCryptoLib setup works unchanged. With `SECUDIR` set (or `~/sec`) and a
+PIN stored by `sapgenpse seclogin`, the partner name is enough:
+
+```python
+conn = saprfclib.connect(ashost="sap-host", sysnr="00", client="100",
+                         user="ALICE", passwd="...",
+                         snc_partnername="p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE")
+```
+
+The PSE is chosen as CommonCryptoLib chooses it (the `cred_v2` entry matching
+`snc_myname`, else the first usable one). `snc_pse=` without `snc_pse_pin=` also takes the
+PIN from `cred_v2`.
+
+Supported: RSA client keys; PSE files protected with the default or PBES2 encryption,
+in local protected storage, or unprotected; `cred_v2` in all forms written outside
+Windows. Not supported yet: Windows DPAPI protection, EC client keys.
 
 !!! warning "Security"
     The built-in cryptography is pure Python and not constant-time. Run it on hosts you
-    control. Keep the PSE file and its PIN as protected as any private key.
+    control. `cred_v2` and LPS (outside Windows) only obfuscate the PIN: anyone who can
+    read `SECUDIR` can recover it. Protect `SECUDIR` like a private key.
 
 ## Logon with the certificate (no password)
 

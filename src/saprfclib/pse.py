@@ -14,9 +14,17 @@ Every layout detail below is checked by the golden PSE files under
 ``tests/golden/pse/``, created with ``sapgenpse`` and paired with the key and
 certificates ``sapgenpse`` itself exported from them.
 
-Not supported (refused with :class:`PseError`): PSEs wrapped in local protected
-storage (container version 0x100) and PIN retrieval from ``cred_v2`` files — pass
-the PIN explicitly.
+PSEs wrapped in local protected storage (LPS, container version 0x100) and PINs
+stored by ``sapgenpse seclogin`` in ``cred_v2`` are read as well, on every platform,
+for the software protection CommonCryptoLib uses outside Windows. That protection is
+an obfuscation, not encryption under a secret: its keys are derived from constants
+and, for ``cred_v2``, the OS user name. Anyone who can read the files can recover
+the PIN — protect ``SECUDIR`` with file permissions. Windows DPAPI-protected entries
+are host-bound and refused with :class:`PseError`.
+
+:func:`load_secudir_credential` picks the PSE the way CommonCryptoLib does for a
+client: the ``cred_v2`` entry whose name matches ``snc_myname``, else the first
+entry that can be unlocked, else an unprotected ``SAPSNCS.pse``.
 
 Security: neither the PIN nor key material ever enters a log or an exception
 message.
@@ -24,8 +32,14 @@ message.
 
 from __future__ import annotations
 
+import getpass
 import hashlib
+import hmac
+import os
+import sys
+import zlib
 from dataclasses import dataclass
+from pathlib import Path
 
 from asn1crypto import core as _core
 from asn1crypto import keys as _keys
@@ -34,7 +48,16 @@ from tlslite.utils.cipherfactory import createAES, createTripleDES
 from saprfclib.exceptions import SncError
 from saprfclib.secgss import SncCredential
 
-__all__ = ["PseError", "load_pse"]
+__all__ = [
+    "CredEntry",
+    "PseError",
+    "cred_pin",
+    "load_pse",
+    "load_secudir_credential",
+    "pin_for_pse",
+    "read_cred_v2",
+    "secudir_path",
+]
 
 
 class PseError(SncError):
@@ -303,10 +326,15 @@ def load_pse(data: bytes, pin: str | None) -> SncCredential:
     version = kids[0].int()
     body = kids[1]
     if version == 0x100:
-        raise PseError(
-            "PSE is wrapped in local protected storage, which is not supported; "
-            "re-create it without LPS (sapgenpse ... -noreqlps / lps off)"
-        )
+        # LPS wrapper: SEQUENCE { LPS record, AlgId(AES-256-CBC, IV), ciphertext }
+        # around a complete version 2/4 PSE. Source: golden pse/pse_v2_lps.pse.
+        lps_rec, algid, lps_ct = body.kids()[:3]
+        key = _lps_unprotect(lps_rec.value, "PSEEncryption")
+        lps_alg, lps_iv = algid.kids()[:2]
+        if lps_alg.oid() != _OID_AES256_CBC or len(key) != 32:
+            raise PseError("unsupported LPS-protected PSE")
+        inner = _unpad(_cbc("aes", key, lps_iv.value, lps_ct.value, decrypt=True), 16)
+        return load_pse(inner, pin)
     if version == 2:
         if body.tag == 0x30:
             plain = body.raw
@@ -357,3 +385,276 @@ def load_pse(data: bytes, pin: str | None) -> SncCredential:
         certificate_chain=tuple(chain),
         trusted=trusted,
     )
+
+
+# ---------------------------------------------------------------------------
+# Local protected storage (software fallback used outside Windows)
+# ---------------------------------------------------------------------------
+#
+# Record: u8 version | u8 level | u16 ctx_len | ctx | u16 restriction_len |
+# restriction | u16 key_len | encrypted key | u32 data_len | encrypted data |
+# HMAC-SHA1 (20) | CRC32 (4), integers big-endian. Level 0 is the software
+# protection; its default key is derived from a fixed seed and the context string.
+# Source: golden files pse/pse_v2_lps.pse and pse/cred_lps/cred_v2, which decrypt
+# to the PSE and PIN that sapgenpse was given.
+
+
+def _lps_default_key(context: str) -> bytes:
+    r = 0x65
+    seed = bytearray()
+    for _ in range(24):
+        r = (r * 0x4E21) % 0x10001
+        seed.append(r & 0xFF)
+    mac = hmac.new(hashlib.sha1(bytes(seed)).digest(), context.encode("ascii"), hashlib.sha1)
+    return mac.digest()[:16]
+
+
+def _lps_unprotect(rec: bytes, context: str) -> bytes:
+    if len(rec) < 32 or zlib.crc32(rec[:-4]).to_bytes(4, "big") != rec[-4:]:
+        raise PseError("corrupt LPS record")
+    version, level = rec[0], rec[1]
+    if level != 0:
+        raise PseError(
+            "LPS record is protected by the operating system (DPAPI) and can only be "
+            "opened on the host that created it"
+        )
+    if version != 2:
+        raise PseError("unsupported LPS record version")
+    try:
+        p = 2
+        n = int.from_bytes(rec[p : p + 2], "big")
+        ctx = rec[p + 2 : p + 2 + n].decode("ascii")
+        p += 2 + n
+        n = int.from_bytes(rec[p : p + 2], "big")
+        restriction = rec[p + 2 : p + 2 + n]
+        p += 2 + n
+        n = int.from_bytes(rec[p : p + 2], "big")
+        enc_key = rec[p + 2 : p + 2 + n]
+        p += 2 + n
+        n = int.from_bytes(rec[p : p + 4], "big")
+        enc_data = rec[p + 4 : p + 4 + n]
+        mac_at = p + 4 + n
+        mac = rec[mac_at : mac_at + 20]
+    except (UnicodeDecodeError, IndexError):
+        raise PseError("corrupt LPS record") from None
+    if ctx != context:
+        raise PseError("LPS record belongs to a different purpose")
+    if restriction:
+        raise PseError("LPS record is bound to a host or user; not supported")
+    zero = b"\x00" * 16
+    rand_key = _cbc("aes", _lps_default_key(ctx), zero, enc_key, decrypt=True)
+    expect = hmac.new(hashlib.sha1(rand_key).digest(), rec[:mac_at], hashlib.sha1).digest()
+    if not hmac.compare_digest(expect, mac):
+        raise PseError("corrupt LPS record")
+    data = _cbc("aes", rand_key, zero, enc_data, decrypt=True)
+    return data[data[0] + 1 :]
+
+
+# ---------------------------------------------------------------------------
+# cred_v2 (sapgenpse seclogin)
+# ---------------------------------------------------------------------------
+
+# Key template of the seclogin PIN protection; the OS user name is inserted at %s.
+# Source: golden files pse/cred_*/cred_v2 (all decrypt to the PIN given to
+# sapgenpse for user name "fixtureuser").
+_CRED_TEMPLATE = "240657rsga&/%srwthgrtawe45hhtrtrsr35467b2dx3456j67mv67f89656f75"
+
+
+@dataclass(frozen=True, repr=False)
+class CredEntry:
+    """One ``cred_v2`` entry: the PSE it unlocks and its protected PIN."""
+
+    name: str  # own certificate subject as written by sapgenpse (may be empty)
+    pse_path: str
+    version: int
+    blob: bytes
+
+    def __repr__(self) -> str:
+        return f"CredEntry(name={self.name!r}, pse_path={self.pse_path!r})"
+
+
+def read_cred_v2(data: bytes) -> list[CredEntry]:
+    """Parse a ``cred_v2`` file (``SEQUENCE OF`` entries, in file order)."""
+    outer, _ = _read(data)
+    out: list[CredEntry] = []
+    for entry in outer.kids():
+        k = entry.kids()
+        if not k or k[-1].tag != 0x03:
+            raise PseError("unrecognised cred_v2 entry")
+        blob = k[-1].value[1:]
+        if k[0].tag == 0x02:  # versioned entry: INTEGER, ..., UTF8String path, BIT STRING
+            paths = [x for x in k if x.tag == 0x0C]
+            if not paths:
+                raise PseError("unrecognised cred_v2 entry")
+            out.append(CredEntry("", paths[-1].value.decode("utf-8"), k[0].int(), blob))
+        else:  # IA5 name, IA5 "", IA5 path, IA5 "", BIT STRING
+            if len(k) < 5:
+                raise PseError("unrecognised cred_v2 entry")
+            out.append(
+                CredEntry(k[0].value.decode("latin-1"), k[2].value.decode("latin-1"), 0, blob)
+            )
+    return out
+
+
+def _lcg_xor(data: bytes, seed: int) -> bytes:
+    x = seed & 0xFFFFFFFF
+    out = bytearray(data)
+    for i in range(len(out)):
+        x = (x * 0x15A4E35 + 1) & 0xFFFFFFFF
+        out[i] ^= x & 0xFF
+    return bytes(out)
+
+
+def _first_ia5(plain: bytes) -> str:
+    seq, _ = _read(plain)
+    kids = seq.kids()
+    if not kids:
+        raise PseError("cannot decrypt cred_v2 entry")
+    if len(kids) > 1 and kids[1].value == b"MSCryptProtect":
+        raise PseError("cred_v2 entry is protected by Windows DPAPI; not supported")
+    return kids[0].value.decode("latin-1")
+
+
+def _decrypt_cred_blob(blob: bytes, user: str) -> str:
+    u = user.encode("latin-1")
+    if len(blob) % 8 == 0:
+        # Default form: 3DES-CBC, zero IV, key = the template with the user name
+        # inserted, cut to 32 characters, first 24 bytes.
+        key = (_CRED_TEMPLATE.encode("latin-1").replace(b"%s", u))[:32][:24]
+        return _first_ia5(_unpad(_cbc("3des", key, b"\x00" * 8, blob, decrypt=True), 8))
+    hdr = blob[:4]
+    if len(blob) < 40 or hdr[0] != 1 or hdr[1] > 1 or hdr[3] != 0:
+        raise PseError("unrecognised cred_v2 protection")
+    salt = blob[4:20]
+    aes = hdr[1] == 1
+    ivlen = 16 if aes else 8
+    iv, ct = blob[20 : 20 + ivlen], blob[20 + ivlen :]
+    ux = _lcg_xor(u, salt[0])
+    k = _lcg_xor(
+        hashlib.sha256(_CRED_TEMPLATE.encode("latin-1") + hdr + salt + ux).digest(), salt[1]
+    )
+    name = "aes" if aes else "3des"
+    plain = _unpad(_cbc(name, k if aes else k[:24], iv, ct, decrypt=True), 16 if aes else 8)
+    return _first_ia5(_lcg_xor(plain, 0x64FB914E))
+
+
+def _os_user_names() -> list[str]:
+    """User names the PIN may have been protected for, in the order CCL tries them.
+
+    POSIX: the effective then the real user's name, then $USER. Windows: [ASSUMED]
+    the logon name — not verified against CommonCryptoLib on Windows, where seclogin
+    normally uses DPAPI instead (refused above). A Windows capture would settle it.
+    """
+    names: list[str] = []
+    if sys.platform != "win32":
+        import pwd
+
+        for uid in (os.geteuid(), os.getuid()):
+            try:
+                names.append(pwd.getpwuid(uid).pw_name)
+            except KeyError:
+                pass
+        names.append(os.environ.get("USER", ""))
+    else:
+        names.append(getpass.getuser())
+    seen: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.append(n)
+    return seen
+
+
+def cred_pin(entry: CredEntry, user: str | None = None) -> str:
+    """Recover the PIN of one ``cred_v2`` entry.
+
+    ``user`` overrides the OS user name the PIN was protected for (``seclogin -O``).
+    """
+    if entry.version == 2:
+        return _lps_unprotect(entry.blob, "CredEncryption").decode("latin-1")
+    for name in [user] if user else _os_user_names():
+        try:
+            return _decrypt_cred_blob(entry.blob, name)
+        except PseError:
+            continue
+    raise PseError("cred_v2 entry was not created for this user")
+
+
+def _norm_dn(name: str) -> str:
+    text = name.strip()
+    if text[:2].lower() == "p:":
+        text = text[2:]
+    return ",".join(part.strip() for part in text.split(",")).casefold()
+
+
+def secudir_path() -> Path:
+    """``$SECUDIR``, or ``$HOME/sec`` when it is not set — CommonCryptoLib's lookup."""
+    env = os.environ.get("SECUDIR")
+    return Path(env) if env else Path.home() / "sec"
+
+
+def load_secudir_credential(
+    secudir: str | os.PathLike[str] | None = None,
+    *,
+    myname: str | None = None,
+    user: str | None = None,
+) -> SncCredential:
+    """Load the client credential from a SECUDIR the way CommonCryptoLib picks it.
+
+    1. ``cred_v2`` entries in file order: with ``myname``, the entry whose name
+       matches it (case-insensitive, blanks after commas ignored); without, the
+       first entry whose PIN can be recovered.
+    2. Otherwise an unprotected ``SAPSNCS.pse``.
+
+    Raises:
+        PseError: when no usable PSE is found.
+    """
+    base = Path(secudir) if secudir is not None else secudir_path()
+    cred_file = base / "cred_v2"
+    if cred_file.is_file():
+        entries = read_cred_v2(cred_file.read_bytes())
+        if myname is not None:
+            want = _norm_dn(myname)
+            entries = [e for e in entries if _norm_dn(e.name) == want]
+        for entry in entries:
+            try:
+                pin = cred_pin(entry, user)
+            except PseError:
+                continue
+            pse = Path(entry.pse_path)
+            if not pse.is_absolute():
+                pse = base / pse
+            return load_pse(pse.read_bytes(), pin)
+    fallback = base / "SAPSNCS.pse"
+    if fallback.is_file():
+        return load_pse(fallback.read_bytes(), None)
+    raise PseError("no usable SNC credential in SECUDIR (no matching cred_v2 entry or PSE)")
+
+
+def pin_for_pse(
+    pse: str | os.PathLike[str],
+    secudir: str | os.PathLike[str] | None = None,
+    *,
+    user: str | None = None,
+) -> str | None:
+    """PIN stored by ``sapgenpse seclogin`` for the PSE at ``pse``, or None.
+
+    Looks in ``secudir`` (default: ``$SECUDIR``, else ``$HOME/sec``) and in the
+    PSE's own directory for a ``cred_v2`` entry naming this PSE.
+    """
+    target = Path(pse).resolve()
+    dirs = [Path(secudir) if secudir is not None else secudir_path(), target.parent]
+    for d in dict.fromkeys(dirs):
+        cred_file = d / "cred_v2"
+        if not cred_file.is_file():
+            continue
+        for entry in read_cred_v2(cred_file.read_bytes()):
+            path = Path(entry.pse_path)
+            if not path.is_absolute():
+                path = d / path
+            if path.resolve() != target:
+                continue
+            try:
+                return cred_pin(entry, user)
+            except PseError:
+                continue
+    return None
