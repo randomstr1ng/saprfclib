@@ -21,8 +21,10 @@ conn = saprfclib.connect(
 
 ## SAProuter hop
 
-Route the connection through an SAProuter when the SAP system is not directly
-reachable. The `saprouter` parameter accepts a router string in SAP NI format.
+Route the connection through one or more SAProuters when the SAP system is not directly
+reachable. `saprouter` lists the routers only (`/H/host/S/port[/P/password]` per router);
+the destination is `ashost` and the gateway port. The connection is opened to the first
+router.
 
 ```python
 conn = saprfclib.connect(
@@ -31,7 +33,7 @@ conn = saprfclib.connect(
     client="100",
     user="USER",
     passwd="pass",
-    saprouter="/H/saprouter.example.com/S/3299/H/sap-host",
+    saprouter="/H/saprouter.example.com/S/3299",
 )
 ```
 

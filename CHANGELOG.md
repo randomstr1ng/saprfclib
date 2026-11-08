@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SAProuter routes** (issue #20). `connect(saprouter=...)` opened the TCP connection to
+  `ashost` instead of the first router and sent the route there; on SNC connections it also
+  sent the NI version exchange before the route. Routes with more than one router were
+  malformed (a real router answered -93 `invalid route`). The connection now goes to the
+  first router, the route is the first frame on it, and `NI_ROUTE` is byte-identical to the
+  NW RFC SDK's for one and two routers, with and without hop passwords. Confirmed live
+  through two SAProuters, including SNC between the routers and end-to-end SNC through them.
+  `saprouter` together with `wshost` is now rejected.
+
 - **SNC protection-level negotiation.** The QOP field of the SNC handshake frames is three
   2-bit levels (minimum, maximum, in use), not a fixed `0x7E`. The client now sends the
   levels `snc_qop` asks for, raises its level when the server's minimum is higher, uses the
