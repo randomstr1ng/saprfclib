@@ -876,12 +876,10 @@ class SncTransport:
         gss_binding: GssMechanism | None = None,
         eye_catcher: bytes | None = None,
     ) -> None:
-        if snc_sso:
-            # D-23: SNC SSO2 rides in an extension header (hdrlen > 0x18) whose
-            # format is not reverse-engineered. Gate until a live capture.
-            raise NotImplementedError(
-                "SNC SSO2 extension headers are not reverse-engineered (D-23)"
-            )
+        # snc_sso (log on with the SNC identity) changes only the logon records,
+        # which Connection builds; the SNC frames are identical either way (golden
+        # fixture snc/snc_logon_tlvs.json). Accepted here for API compatibility.
+        del snc_sso
         self._inner = inner
         self._qop = validate_snc_qop(snc_qop)
         self._established = False  # SEC-06 gate; set by _handshake()

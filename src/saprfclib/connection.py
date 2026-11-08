@@ -134,6 +134,10 @@ _TAG_TERMINATOR = 0xFFFF
 _TAG_CLIENT = 0x0114
 _TAG_USER = 0x0111
 _TAG_PASSWORD = 0x0117
+# Empty record the reference client adds to an SNC logon that uses a password
+# (absent when it logs on with the SNC identity). Source: golden fixture
+# snc/snc_logon_tlvs.json.
+_TAG_SNC_PASSWORD_LOGON = 0x0675
 _RFCPING_NAME = b"RFCPING"
 
 # ---------------------------------------------------------------------------
@@ -1838,6 +1842,7 @@ class Connection:
         self._metrics = ConnectionMetrics()
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
+        self._snc_sso: bool = False
         # 16 bytes proposed by this client in the LOGON's 0x0514 and echoed in the
         # reply, so a caller can correlate the session.
         self._ws_session_token: bytes = b""
@@ -1870,6 +1875,7 @@ class Connection:
         inst._cache = async_conn._cache
         inst._struct_desc_cache = async_conn._struct_desc_cache
         inst._snc_mode = False
+        inst._snc_sso = False
         inst._ws_auth = None
         inst._async_conn = async_conn
         inst._loop_thread = loop_thread
@@ -2061,9 +2067,7 @@ class Connection:
                 # GW_DONE (not between GW_CONNECT and GW_INFO, as first assumed).
                 if prev_state is SessionState.GW_CONNECTED:
                     if hasattr(self._transport, "activate_snc"):
-                        self._transport.activate_snc(
-                            self._session.handle, self._session.conn_idx
-                        )
+                        self._transport.activate_snc(self._session.handle, self._session.conn_idx)
                 for req in self._build_leg_requests(
                     prev_state,
                     client=client,
@@ -2105,7 +2109,12 @@ class Connection:
                 ]
             case SessionState.GW_CONNECTED:
                 tlv = self._build_logon_request(
-                    client=client, user=user, passwd=passwd, local_ip=local_ip, lang=lang
+                    client=client,
+                    user=user,
+                    passwd=passwd,
+                    local_ip=local_ip,
+                    lang=lang,
+                    snc_password_logon=self._snc_mode and not self._snc_sso,
                 )
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
@@ -2346,8 +2355,15 @@ class Connection:
         local_ip: str = "127.0.0.1",
         program_name: bytes = b"python3",
         lang: str = _DEFAULT_LANG,
+        snc_password_logon: bool = False,
     ) -> bytes:
         """Build the RFC logon TLV body in extended wire format (tag+len+val+tag).
+
+        ``snc_password_logon`` marks an SNC connection that logs on with user and
+        password rather than with its SNC identity: the reference client then adds
+        an empty tag 0x0675 after the language record (golden fixture
+        snc/snc_logon_tlvs.json). An SNC-identity logon (``snc_sso``) passes
+        ``passwd=None`` and leaves the flag off, which omits 0x0117 and 0x0675.
 
         Emits the scrambled password record (tag 0x0117) per the RE-confirmed
         derivation (Plan 04-01: ``seed(4B) + scramble(password, seed)``). The
@@ -2381,6 +2397,7 @@ class Connection:
             # 0x0115 and 0x0011 both carry the logon language in the capture
             # (golden logon_request.bin: b"E" on each).
             _tlv_ext(0x0115, _encode_logon_language(lang)),
+            *([_tlv_ext(_TAG_SNC_PASSWORD_LOGON, b"")] if snc_password_logon else []),
             _tlv_ext(0x0501, b"\x01"),
             _tlv_ext(0x0007, b"127.0.0.1"),
             _tlv_ext(0x0011, _encode_logon_language(lang)),
@@ -4287,6 +4304,12 @@ def connect(
     )
 
     snc_enabled = snc_lib is not None or snc_pse is not None or snc_credential is not None
+    if snc_sso and not snc_enabled:
+        raise ValueError("snc_sso logs on with the SNC identity; it needs SNC (snc_pse or snc_lib)")
+    if snc_sso and passwd is not None:
+        # Same as the reference client: with SNC logon the password is not sent.
+        _logger.warning("snc_sso is set: the password is ignored and not sent")
+        passwd = None
     user, passwd = _resolve_credentials(
         user, passwd, snc_lib=snc_lib, ashost=ashost, snc=snc_enabled
     )
@@ -4426,7 +4449,6 @@ def connect(
             snc_partnername=snc_partnername,
             snc_myname=snc_myname,
             snc_qop=validate_snc_qop(snc_qop or 3),  # D-12: privacy is the default QOP
-            snc_sso=snc_sso or False,  # D-12: SSO2 off by default (D-23 gap)
             gss_binding=_mech,
         )
 
@@ -4441,6 +4463,7 @@ def connect(
         )
         conn._session = _snc_sess
         conn._snc_mode = True
+        conn._snc_sso = bool(snc_sso)
     else:
         # ------------------------------------------------------------------ #
         # Classic async-core path (D-06/D-07): direct TCP / SAProuter /       #

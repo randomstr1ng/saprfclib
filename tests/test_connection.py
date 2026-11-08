@@ -695,7 +695,7 @@ def test_connect_routes_to_snc_transport_with_defaults(monkeypatch) -> None:
     assert calls["snc_partnername"] == "p:CN=S"
     assert calls["snc_myname"] is None
     assert calls["snc_qop"] == 3  # D-12 default
-    assert calls["snc_sso"] is False  # D-12 default
+    assert conn._snc_sso is False  # D-12 default: password logon inside SNC
 
 
 def test_connect_snc_qop_and_myname_flow_through(monkeypatch) -> None:
@@ -716,7 +716,7 @@ def test_connect_snc_qop_and_myname_flow_through(monkeypatch) -> None:
 
     monkeypatch.setattr(_snc, "SncTransport", _fake_snc_transport)
 
-    _connect(
+    conn = _connect(
         ashost="sap.example",
         sysnr="00",
         client="001",
@@ -730,7 +730,7 @@ def test_connect_snc_qop_and_myname_flow_through(monkeypatch) -> None:
 
     assert calls["snc_myname"] == "p:CN=Client"
     assert calls["snc_qop"] == 2
-    assert calls["snc_sso"] is False
+    assert conn._snc_sso is False
 
 
 def test_connect_wshost_wins_over_snc_lib(monkeypatch) -> None:
