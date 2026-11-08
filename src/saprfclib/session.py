@@ -159,6 +159,9 @@ class Session:
         self._codepage: str | None = None
         self._handle: bytes | None = None  # 8-byte ASCII GW connection handle
         self._conn_idx: int | None = None  # gateway-assigned connection index
+        # Set by the connection when its transport strips the GW header from server
+        # frames (SNC): replies are live even though they do not start with one.
+        self.gw_header_stripped = False
         # When True, a logon that AUTHENTICATED (sys id present) but whose embedded
         # RFCPING was rejected -- typically S_RFC (RFC_NO_AUTHORITY) for a
         # low-privilege user -- returns a usable session instead of raising. See
@@ -377,7 +380,12 @@ class Session:
                 f"validated against one. Continuing would decode every character "
                 f"field incorrectly rather than fail."
             )
-        dec = _decode_utf16le if (is_live and unicode_mode) else _decode_ascii
+        # Over SNC the transport removes the GW header before the session sees the
+        # reply, so the header test above cannot tell a live reply from a test
+        # double; the connection says so explicitly. Without this, SNC sessions
+        # decoded the UTF-16 attribute strings as ASCII ('A\x004\x00H').
+        live_reply = is_live or self.gw_header_stripped
+        dec = _decode_utf16le if (live_reply and unicode_mode) else _decode_ascii
         self._attributes = ConnectionAttributes(
             sys_id=dec(tags.get(_TAG_SYS_ID)),
             sys_number=dec(tags.get(_TAG_SYS_NUMBER)),

@@ -4461,6 +4461,7 @@ def connect(
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
+        _snc_sess.gw_header_stripped = True
         conn._session = _snc_sess
         conn._snc_mode = True
         conn._snc_sso = bool(snc_sso)

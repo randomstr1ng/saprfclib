@@ -285,3 +285,25 @@ def test_snc_sso_without_snc_is_rejected():
 
     with pytest.raises(ValueError, match="snc_sso"):
         saprfclib.connect(ashost="h", sysnr="00", client="001", snc_sso=True)
+
+
+def _logon_reply(**fields):
+    from saprfclib.connection import _tlv_ext
+    from saprfclib.session import _TAG_SYS_ID, _TAG_USER
+
+    tags = {_TAG_SYS_ID: fields["sys_id"], _TAG_USER: fields["user"]}
+    body = b"".join(_tlv_ext(t, v.encode("utf-16-le")) for t, v in tags.items())
+    return body + b"\xff\xff\x00\x00"
+
+
+@pytest.mark.parametrize("stripped,expected", [(True, "A4H"), (False, "A\x004\x00H")])
+def test_logon_reply_without_gw_header_decodes_utf16_only_when_flagged(stripped, expected):
+    from saprfclib.session import Session
+
+    s = Session()
+    s._codepage = "4103"
+    s.gw_header_stripped = stripped
+    s._handle_logon_response(_logon_reply(sys_id="A4H", user="DEVELOPER"))
+    assert s.attributes.sys_id == expected
+    if stripped:
+        assert s.attributes.user == "DEVELOPER"
