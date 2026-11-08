@@ -157,3 +157,24 @@ def test_live_builtin_snc_sso() -> None:
         assert conn.call("RFC_SYSTEM_INFO")["RFCSI_EXPORT"]["RFCSYSID"]
     finally:
         conn.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SAPRFC_SNC_PSE"),
+    reason="SAPRFC_SNC_PSE not set — no live SNC-enabled SAP system available",
+)
+async def test_live_builtin_snc_async() -> None:
+    """connect_async() over built-in SNC (issue #17)."""
+    async with await saprfclib.connect_async(
+        ashost=os.environ["SAPRFC_ASHOST"],
+        sysnr=os.environ.get("SAPRFC_SYSNR", "00"),
+        client=os.environ["SAPRFC_CLIENT"],
+        user=os.environ["SAPRFC_USER"],
+        passwd=os.environ["SAPRFC_PASSWD"],
+        snc_partnername=os.environ["SAPRFC_SNC_PARTNERNAME"],
+        snc_pse=os.environ["SAPRFC_SNC_PSE"],
+        snc_pse_pin=os.environ.get("SAPRFC_SNC_PSE_PIN"),
+    ) as conn:
+        res = await conn.call("RFC_SYSTEM_INFO")
+        assert res["RFCSI_EXPORT"]["RFCSYSID"] == conn.get_connection_attributes().sys_id
+        assert await conn.ping()
