@@ -1053,7 +1053,10 @@ def test_ping_sends_a_gw_framed_invoke() -> None:
     assert frame[2:4] == b"\x02\x00", "missing GW version"
     # Omitting the APPC header version draws an immediate 0x06CE rejection.
     assert struct.unpack_from(">I", frame, 24)[0] == 8
-    assert frame[76:80] == b"\xff\xff\x00\x04", "missing RFC marker"
+    # FF FF + the connection index the gateway assigned in the (captured) CONNECT
+    # reply, which is 1 in the gw_connect_response fixture.
+    assert conn._session.conn_idx == 1
+    assert frame[76:80] == b"\xff\xff\x00\x01", "missing RFC marker"
     assert len(frame) > 80, "frame carries no TLV body"
 
 

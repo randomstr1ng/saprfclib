@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The SNC extension header encodes the partner DN like the reference client (T61String for
   characters outside PrintableString, upper-case `C`, `DC` and `SN`); non-ASCII partner
   names are refused instead of being mis-encoded.
+- **GW frames echo the gateway-assigned connection index** (plain RFC and SNC). Bytes
+  78:80 of every client frame after GW_CONNECT carried a fixed `00 04` (`00 09` on SNC);
+  the gateway assigns a per-connection index in its CONNECT reply and the reference client
+  echoes it. Gateways tolerated the fixed value; saprfclib now sends the assigned one.
 - Connection attributes of an SNC connection (`get_connection_attributes()`) were decoded
   as ASCII, giving `'A\x004\x00H'` instead of `'A4H'`: the SNC transport strips the GW
   header the decoder used to recognise a live reply. They are now decoded as UTF-16.
