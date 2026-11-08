@@ -15,11 +15,26 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.12", "3.13", "3.14"]
+        include:
+          # The library is pure Python, including the built-in SNC mechanism and its
+          # dependencies; run the offline suite on Windows and macOS too.
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.14"
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -50,6 +65,7 @@ jobs:
       - name: Verify importable wheel
         run: |
           pip install dist/*.whl --force-reinstall
+          python -c "import saprfclib.secgss, saprfclib.pse"
           python -c "import saprfclib; print(saprfclib.__version__)"
 
   docs-build:
