@@ -6,9 +6,10 @@
 #   - D-27: wsproto and h11 are CORE dependencies — `pip install saprfclib`
 #     pulls them with no extra, because the wRFC transport imports them
 #     unconditionally.
-#   - D-26: SNC needs NO install-time dependency — the user supplies the GSS
-#     `.so` at runtime via `snc_lib`; ctypes is stdlib. D-07 additionally
-#     forbids minikerberos (it cannot do gss_wrap/gss_unwrap).
+#   - D-26 (revised for v0.2.0): the built-in SNC mechanism needs asn1crypto,
+#     ecdsa and tlslite-ng — all pure Python, all core. The native-library path
+#     (`snc_lib`) still needs nothing at install time; ctypes is stdlib.
+#     minikerberos stays forbidden: it pulls pycryptodomex (a C extension).
 #
 # These tests parse the real repo pyproject.toml (not a fixture copy) so a
 # future edit cannot silently reintroduce the [ws]/[snc]/all extras or
@@ -33,6 +34,34 @@ def test_wsproto_h11_are_core_deps():
     deps = _load()["project"]["dependencies"]
     assert any(d.startswith("wsproto") for d in deps), f"wsproto not a core dep: {deps}"
     assert any(d.startswith("h11") for d in deps), f"h11 not a core dep: {deps}"
+
+
+# The complete set of runtime dependencies. Each one must be pure Python: a
+# py3-none-any wheel, no build step. Adding a dependency means adding it here
+# deliberately, after checking that.
+_ALLOWED_CORE = {"wsproto", "h11", "asn1crypto", "ecdsa", "tlslite-ng"}
+
+
+def _dist_name(req: str) -> str:
+    import re
+
+    return re.split(r"[<>=!~;\[ ]", req, maxsplit=1)[0].strip().lower()
+
+
+def test_core_deps_are_exactly_the_allowlist():
+    deps = {_dist_name(d) for d in _load()["project"]["dependencies"]}
+    assert deps == _ALLOWED_CORE, f"core dependency set changed: {sorted(deps)}"
+
+
+def test_snc_crypto_deps_are_core():
+    deps = {_dist_name(d) for d in _load()["project"]["dependencies"]}
+    assert {"asn1crypto", "ecdsa", "tlslite-ng"} <= deps
+
+
+def test_no_native_crypto_dependency():
+    raw = _raw().lower()
+    for banned in ("cryptography", "pycryptodome", "pyopenssl", "unicrypto", "gssapi"):
+        assert f'"{banned}' not in raw, f"{banned} must not be a dependency"
 
 
 def test_no_ws_or_snc_extras():
