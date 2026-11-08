@@ -194,17 +194,24 @@ successful registration returns zeros at both positions.
 ## RFC Marker (4 bytes)
 
 ```
-Client request:  FF FF 00 04
-Server response: 00 00 00 04
+Client GW_CONNECT request:  <BE16 local index> FF FF
+Gateway CONNECT reply:      <same local index> <BE16 connection index>
+Every later client frame:   FF FF <connection index>
+Later server frames:        00 00 <connection index>
 ```
 
 Immediately follows the APPC header (at frame offset 80, i.e. NI[4] + GW[76]).
 The `FF FF` vs `00 00` high bytes discriminate client→server from server→client frames. The
-low 2 bytes carry a conversation-protocol value, byte-swapped into `00 04`.
+low 2 bytes are a **connection index the gateway assigns** in its CONNECT reply; the client
+echoes it in every later frame. Three parallel connections from one process were assigned
+3, 0 and 1 (plain) and 1, 0 and 3 (SNC) — golden fixture
+`tests/golden/snc/snc_frame_headers.json` ("connection_index"). That is why committed
+captures show different values here (`00 04`, `00 01`): each recorded whatever the gateway
+had assigned to that connection.
 
-**Version note:** The golden fixture `stfc_connection_request.bin` was captured from an older
-client version and shows `FF FF 00 01` here. Newer clients emit `FF FF 00 04` on all client
-frames. Both are accepted by the systems tested; `saprfclib` emits `FF FF 00 04`.
+`saprfclib` echoes the assigned index (`Session.conn_idx`). Frames built without a live
+session fall back to `00 04` (`00 09` on SNC), the values earlier releases sent; gateways
+accepted those as well, and what a gateway does with the index is not known.
 
 ---
 
@@ -332,7 +339,7 @@ Confirmed by live STFC_CONNECTION capture. Golden fixtures:
 ### Request (client → server)
 
 ```
-NI header (4B) + APPC header (76B) + RFC marker ffff0004 (4B)
+NI header (4B) + APPC header (76B) + RFC marker ffff<conn idx> (4B)
 └── TLV stream:
     0x0502  len=0          call-start marker
     0x000b  len=6          RFC version "754" (UTF-16LE)

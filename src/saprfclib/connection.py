@@ -194,14 +194,11 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 # /SAPDS/RFC_ABAP_INSTALL_RUN, for one). Verified across all nine request
 # fixtures: the BE uint32 at [0:4] equals len(tlv_body) exactly in each.
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
-# Client tail at [76:80] of an 80-byte control frame (GW_INFO, GW_DONE_CLIENT):
-# [76:78] = 0xffff, [78:80] = 0x0004. Live logons complete with this value.
-# The low half is not universal -- committed request captures carry 0x0004 and
-# 0x0001 at [78:80] (compare framing/rfcping_request.bin against
-# framing/logon_request.bin), and the gateway accepted both, so it varies with the
-# connection rather than identifying a malformed frame. Do not validate on it.
+# Client tail at [76:80] of every client frame after GW_CONNECT: FF FF followed by
+# the connection index the gateway assigned (see _client_tail). These two are only
+# the fallbacks for frames built without a live session -- the values earlier
+# releases always sent, which gateways accepted. Do not validate on them.
 _GW_CLIENT_TAIL = 0xFFFF0004
-# With SNC active the low half is 0x0009. Source: live SNC capture, 2026-07.
 _GW_CLIENT_TAIL_SNC = 0xFFFF0009
 
 # RFC logon frame tail and header. Source: framing/logon_request.bin.
@@ -209,6 +206,22 @@ _GW_CLIENT_TAIL_SNC = 0xFFFF0009
 # low half is not a value to check incoming frames against.
 # _COM_HEAD: EBCDIC "RFC000000000" = 0xD9 0xC6 0xC3 = EBCDIC R/F/C, 0xF0*9 = EBCDIC '0'*9.
 _RFC_MARKER = b"\xff\xff\x00\x04"
+
+
+def _client_tail(conn_idx: int | None, *, snc: bool = False) -> int:
+    """Value of GW header bytes [76:80] on client frames after GW_CONNECT.
+
+    ``FF FF`` followed by the connection index the gateway assigned in its CONNECT
+    reply. Source: golden fixture snc/snc_frame_headers.json ("connection_index"):
+    three parallel connections, plain and SNC, each echo their own assigned index
+    (3/0/1 and 1/0/3). When the index is not known — frames built outside a live
+    session — the values earlier releases sent are kept; gateways accept them.
+    """
+    if conn_idx is None:
+        return _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL
+    return 0xFFFF0000 | (conn_idx & 0xFFFF)
+
+
 _COM_HEAD = b"\xd9\xc6\xc3\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0"  # EBCDIC "RFC000000000"
 
 # Fixed logon TLV values, taken from the PKT 14 wire capture and confirmed by live
@@ -2104,8 +2117,12 @@ class Connection:
                 return [self._build_gw_connect_request(gwhost, sysnr, snc=self._snc_mode)]
             case SessionState.NI_VERSIONED:
                 return [
-                    self._build_gw_info(handle, gwhost, snc=self._snc_mode),
-                    self._build_gw_done_client(handle, snc=self._snc_mode),
+                    self._build_gw_info(
+                        handle, gwhost, snc=self._snc_mode, conn_idx=self._session.conn_idx
+                    ),
+                    self._build_gw_done_client(
+                        handle, snc=self._snc_mode, conn_idx=self._session.conn_idx
+                    ),
                 ]
             case SessionState.GW_CONNECTED:
                 tlv = self._build_logon_request(
@@ -2121,7 +2138,7 @@ class Connection:
                     # Outer GW-SNC header (80B) is added by SncTransport._build_gw_snc_frame.
                     # protocol analysis STIntSend/the SNC output path: arg4 (plain data) = COM_HEAD + TLV — no GW header.
                     return [_COM_HEAD + tlv]
-                return [self._build_logon_frame(handle, tlv)]
+                return [self._build_logon_frame(handle, tlv, conn_idx=self._session.conn_idx)]
             case _:
                 return []
 
@@ -2199,7 +2216,9 @@ class Connection:
         return bytes(payload)
 
     @staticmethod
-    def _build_gw_info(handle: bytes, gwhost: str, *, snc: bool = False) -> bytes:
+    def _build_gw_info(
+        handle: bytes, gwhost: str, *, snc: bool = False, conn_idx: int | None = None
+    ) -> bytes:
         """Build the 224-byte GW_INFO payload (PKT 10 capture; no server response).
 
         ``gwhost`` is the gateway host written into the frame (see
@@ -2232,7 +2251,7 @@ class Connection:
         payload[40:48] = handle
         payload[48:56] = gwhost[:8].ljust(8).encode("ascii")
         struct.pack_into(">I", payload, 56, len(gwhost))
-        struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
+        struct.pack_into(">I", payload, 76, _client_tail(conn_idx, snc=snc))
         # Server IP padded with spaces to 112 bytes at payload[80]
         ip_b = gwhost.encode("ascii")
         padded = ip_b + b" " * (112 - len(ip_b))
@@ -2240,7 +2259,9 @@ class Connection:
         return bytes(payload)
 
     @staticmethod
-    def _build_gw_done_client(handle: bytes, *, snc: bool = False) -> bytes:
+    def _build_gw_done_client(
+        handle: bytes, *, snc: bool = False, conn_idx: int | None = None
+    ) -> bytes:
         """Build the 80-byte GW_DONE_CLIENT payload (golden fixture + confirmed).
 
         Confirmed from the GW_DONE frame builder.
@@ -2262,11 +2283,13 @@ class Connection:
         struct.pack_into(">I", payload, 4, _GW_FLAGS)
         payload[28:32] = b"\x00\x00\x01\x00"  # [30]=1 confirmed
         payload[40:48] = handle
-        struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
+        struct.pack_into(">I", payload, 76, _client_tail(conn_idx, snc=snc))
         return bytes(payload)
 
     @staticmethod
-    def _build_logon_frame(handle: bytes, tlv_body: bytes, *, snc: bool = False) -> bytes:
+    def _build_logon_frame(
+        handle: bytes, tlv_body: bytes, *, snc: bool = False, conn_idx: int | None = None
+    ) -> bytes:
         """Wrap TLV body in the RFC logon frame: GW header (76B) + RFC marker + COM_HEAD + TLV.
 
         Byte layout confirmed from stfc_connection.pcapng PKT 14 hex dump:
@@ -2286,11 +2309,13 @@ class Connection:
         struct.pack_into(">I", gw, 24, _GW_HDR_APPC_VER)
         struct.pack_into(">I", gw, 28, _GW_HDR_MAX_LEN)
         gw[40:48] = handle
-        marker = struct.pack(">I", _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
+        marker = struct.pack(">I", _client_tail(conn_idx, snc=snc))
         return bytes(gw) + marker + _COM_HEAD + tlv_body
 
     @staticmethod
-    def _build_invoke_frame(handle: bytes, tlv_body: bytes) -> bytes:
+    def _build_invoke_frame(
+        handle: bytes, tlv_body: bytes, *, conn_idx: int | None = None
+    ) -> bytes:
         """Wrap TLV body in an RFC invoke frame: GW header (76B) + RFC marker + TLV.
 
         Invoke frames omit COM_HEAD (present only in the logon frame). Confirmed by
@@ -2325,7 +2350,8 @@ class Connection:
         struct.pack_into(">I", gw, 28, _GW_HDR_MAX_LEN)
         gw[40:48] = handle
         footer = struct.pack(">I", len(tlv_body)) + _INVOKE_FOOTER_MAGIC
-        return bytes(gw) + _RFC_MARKER + tlv_body + footer
+        marker = struct.pack(">I", _client_tail(conn_idx))
+        return bytes(gw) + marker + tlv_body + footer
 
     def _send_invoke_frame(self, frame: bytes) -> None:
         """Send an RFC invoke frame to the transport.
@@ -2711,7 +2737,7 @@ class Connection:
             # Raw TLV cannot be sent directly — server validates the GW header and
             # rejects the frame with "wrong apppc header version" if bare TLV is sent.
             handle = self._session.handle or b"        "
-            frame = self._build_invoke_frame(handle, request_tlv)
+            frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
             self._send_invoke_frame(frame)
             # A function interface can be large -- 44 parameters already fill 2342
             # bytes -- so this reply chunks like any other.
@@ -2839,7 +2865,7 @@ class Connection:
             "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
         )
         handle = self._session.handle or b"        "
-        frame = self._build_invoke_frame(handle, request_tlv)
+        frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
         self._send_invoke_frame(frame)
         response = _join_response_frames(self._transport.recv_message, "DDIF_FIELDINFO_GET")
         raise_for_rfc_error(_strip_gw_header(response))
@@ -2937,7 +2963,7 @@ class Connection:
                 {"TABNAME": tabname},
             )
             handle = self._session.handle or b"        "
-            frame = self._build_invoke_frame(handle, request_tlv)
+            frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
             self._send_invoke_frame(frame)
 
         # A DDIC structure definition is a table of field rows and can exceed one
@@ -2992,7 +3018,11 @@ class Connection:
                     self._transport.send_message(frame)
                 else:
                     handle = self._session.handle or b"        "
-                    self._send_invoke_frame(self._build_invoke_frame(handle, request_tlv))
+                    self._send_invoke_frame(
+                        self._build_invoke_frame(
+                            handle, request_tlv, conn_idx=self._session.conn_idx
+                        )
+                    )
                 with _fail_closed(self._session, "RFCPING"):
                     resp = _join_response_frames(self._transport.recv_message, "RFCPING")
                     return self._rfcping_ok(resp)
@@ -3285,7 +3315,9 @@ class Connection:
                     request_tlv = build_invoke_request(func_name, desc, call_params)
                     dm_names = dm_table_ids(desc, call_params)
                     handle = self._session.handle or b"        "
-                    request = self._build_invoke_frame(handle, request_tlv)
+                    request = self._build_invoke_frame(
+                        handle, request_tlv, conn_idx=self._session.conn_idx
+                    )
                     with _fail_closed(self._session, func_name):
                         self._send_invoke_frame(request)
                         tlv_response = _join_response_frames(
@@ -3411,7 +3443,9 @@ class Connection:
             try:
                 request_tlv = build_trfc_request(tid, func_name, queue=queue)
                 handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
+                request = self._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     self._send_invoke_frame(request)
                     response = _join_response_frames(self._transport.recv_message, func_name)
@@ -3463,7 +3497,9 @@ class Connection:
             try:
                 request_tlv = build_trfc_confirm_request(tid)
                 handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
+                request = self._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     self._send_invoke_frame(request)
                     response = _join_response_frames(
@@ -3557,7 +3593,9 @@ class Connection:
             try:
                 request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
                 handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
+                request = self._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     self._send_invoke_frame(request)
                     response = _join_response_frames(
@@ -4841,10 +4879,14 @@ class AsyncConnection:
                     case SessionState.NI_VERSIONED:
                         # GW_INFO has no server response; send both in the same iteration.
                         await self._transport.send_message(
-                            Connection._build_gw_info(handle, gwhost, snc=False)
+                            Connection._build_gw_info(
+                                handle, gwhost, snc=False, conn_idx=self._session.conn_idx
+                            )
                         )
                         await self._transport.send_message(
-                            Connection._build_gw_done_client(handle, snc=False)
+                            Connection._build_gw_done_client(
+                                handle, snc=False, conn_idx=self._session.conn_idx
+                            )
                         )
                     case SessionState.GW_CONNECTED:
                         tlv = Connection._build_logon_request(
@@ -4855,7 +4897,9 @@ class AsyncConnection:
                             lang=lang,
                         )
                         await self._transport.send_message(
-                            Connection._build_logon_frame(handle, tlv)
+                            Connection._build_logon_frame(
+                                handle, tlv, conn_idx=self._session.conn_idx
+                            )
                         )
 
     # ------------------------------------------------------------------ #
@@ -4907,7 +4951,7 @@ class AsyncConnection:
             {"FUNCNAME": func_name},
         )
         handle = self._session.handle or b"        "
-        frame = Connection._build_invoke_frame(handle, request_tlv)
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
         await self._transport.send_message(frame)
         response = await self._transport.recv_message()
 
@@ -4990,7 +5034,7 @@ class AsyncConnection:
             "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
         )
         handle = self._session.handle or b"        "
-        frame = Connection._build_invoke_frame(handle, request_tlv)
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
         await self._transport.send_message(frame)
         response = await self._transport.recv_message()
         raise_for_rfc_error(_strip_gw_header(response))
@@ -5059,7 +5103,7 @@ class AsyncConnection:
             {"TABNAME": tabname},
         )
         handle = self._session.handle or b"        "
-        frame = Connection._build_invoke_frame(handle, request_tlv)
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
         await self._transport.send_message(frame)
         response = await self._transport.recv_message()
         raise_for_rfc_error(_strip_gw_header(response))
@@ -5173,7 +5217,9 @@ class AsyncConnection:
                 request_tlv = build_invoke_request(func_name, desc, call_params)
                 dm_names = dm_table_ids(desc, call_params)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 with _fail_closed(self._session, func_name):
                     await self._transport.send_message(request)
                     tlv_response = await _join_response_frames_async(
@@ -5201,7 +5247,9 @@ class AsyncConnection:
             self._session.mark_in_call()
             try:
                 handle = self._session.handle or b"        "
-                frame = Connection._build_invoke_frame(handle, Connection._rfcping_request_tlv())
+                frame = Connection._build_invoke_frame(
+                    handle, Connection._rfcping_request_tlv(), conn_idx=self._session.conn_idx
+                )
                 with _fail_closed(self._session, "RFCPING"):
                     await self._transport.send_message(frame)
                     resp = await self._transport.recv_message()
@@ -5354,7 +5402,9 @@ class AsyncConnection:
             try:
                 request_tlv = build_trfc_request(tid, func_name, queue=queue)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
 
                 async def _do_send() -> None:
                     try:
@@ -5396,7 +5446,9 @@ class AsyncConnection:
             try:
                 request_tlv = build_trfc_confirm_request(tid)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     await self._transport.send_message(request)
                     response = await _join_response_frames_async(
@@ -5456,7 +5508,9 @@ class AsyncConnection:
             try:
                 request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
 
                 async def _do_send() -> None:
                     try:
