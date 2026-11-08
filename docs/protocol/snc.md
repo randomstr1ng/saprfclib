@@ -1,8 +1,8 @@
 # SNC (Secure Network Communications) Layer
 
-**Status:** CONFIRMED — live SNC handshake against CommonCryptoLib X.509 passed 2026-08-05
-(partner `p:CN=A4H`). The frame codec and GSS binding are additionally proven offline against
-a mock GSS library.
+**Status:** CONFIRMED — live SNC handshake against CommonCryptoLib X.509 passed 2026-08-05,
+re-confirmed against a second lab system on 2026-11-08. The frame codec and GSS binding are
+additionally proven offline against a mock GSS library.
 **Confidence:** HIGH for every implemented path. SSO2 token mode remains unimplemented and
 raises `NotImplementedError` — see [Known Gaps](#known-gaps).
 
@@ -44,7 +44,7 @@ GSS token or protected application data.
 ```
 Offset  Length  Type        Name          Notes
  0x00     8      bytes       eye_catcher   b"SNCFRAME" (no trailing NUL in the field)
- 0x08     1      uint8       frame_type    1=FR_INIT, 2=FR_ACCEPT, 7=plain, 8=integrity, 9=privacy
+ 0x08     1      uint8       frame_type    2=FR_INIT, 4=FR_ACCEPT, 7=plain, 8=integrity, 9=privacy
  0x09     1      uint8       version       Protocol version = 6
  0x0a     2      uint16-BE   hdr_len       Total header length = 0x18 + extension-header size
  0x0c     4      uint32-BE   token_len     GSS token byte count
@@ -88,9 +88,9 @@ The SNC context is established with a standard GSS-API initiator/acceptor loop.
 
 ```
 Client                                Server
-  │  FR_INIT (type 1) + gss_init token  │   gss_init_sec_context() → output token
+  │  FR_INIT (type 2) + gss_init token  │   gss_init_sec_context() → output token
   │ ───────────────────────────────────▶│   gss_accept_sec_context()
-  │  FR_ACCEPT (type 2) + gss_accept tok │
+  │  FR_ACCEPT (type 4) + gss_accept tok │
   │ ◀───────────────────────────────────│
   │  (repeat while GSS_S_CONTINUE_NEEDED)│
   │  ...                                 │
@@ -98,8 +98,8 @@ Client                                Server
 ```
 
 1. Client calls `gss_init_sec_context` (input token empty on the first call →
-   `GSS_C_NO_BUFFER`) and sends the output token in an **FR_INIT** (type 1) frame.
-2. Server replies with an **FR_ACCEPT** (type 2) frame carrying its accept token.
+   `GSS_C_NO_BUFFER`) and sends the output token in an **FR_INIT** (type 2) frame.
+2. Server replies with an **FR_ACCEPT** (type 4) frame carrying its accept token.
 3. The loop repeats while `gss_init_sec_context` returns `GSS_S_CONTINUE_NEEDED`.
 4. On `GSS_S_COMPLETE`, the context is established and data frames (type 7/8/9) may flow.
 
@@ -193,6 +193,22 @@ in the wrapped output) and is re-verified on the wire at the live checkpoint.
 from the SAP environment. `GssBinding` strips a single enclosing quote pair before passing the
 value to GSS — matching SAP's own behaviour, which is why a quoted partner name works there
 and would otherwise fail here.
+
+**Partner name must be the server's full DN.** The server certificate's subject is compared
+with `snc_partnername` RDN by RDN. Observed against a live system (2026-11-08) whose
+certificate subject is `C=DE, O=SAP Trust Community, OU=SAP Web AS, OU=IDEMOSYSTEM, CN=A4H`:
+
+| `snc_partnername` | Result |
+|---|---|
+| `p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE` | accepted |
+| same, without spaces after the commas, or with `;` separators | accepted |
+| same, attribute names or values in a different letter case | accepted |
+| `p:CN=A4H` alone, or with any RDN missing | rejected, GSS minor `0xA2200202` |
+| RDNs in a different order (including the two `OU`s swapped) | rejected, `0xA2200202` |
+| a value with different inner whitespace (`SAP  Web AS`) | rejected, `0xA2200202` |
+
+The text form lists the most specific RDN first (`CN=` leftmost), the reverse of the
+certificate's DER order.
 
 **Credential discipline:** `snc_lib`, `snc_partnername`, and `snc_myname` are
 **never** logged, echoed into an exception message, or placed into any `repr`. `SncError`
