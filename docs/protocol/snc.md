@@ -23,14 +23,13 @@ RfcInvoke() / logon TLV                — RFC application + handshake payloads
         → inner Transport.send_message() — NI framing + TCP writev (framing.md)
 ```
 
-SNC is **runtime-optional and dependency-free**: `ctypes` is stdlib, and the GSS
-provider `.so` is supplied by the user at connect time via `snc_lib`. There is no build-time
-or install-time SNC dependency; `pip install saprfclib` works on any machine, and SNC activates
-only when `snc_lib` is passed to `connect()`.
+The GSS mechanism underneath is either saprfclib's own implementation of SAP's X.509
+mechanism ([snc-mechanism.md](snc-mechanism.md)) or a native GSS-API library loaded with
+`ctypes` from `snc_lib`. The frame layer described here is the same for both.
 
-**Activation:** the presence of `snc_lib` is the switch — there is no separate mode flag.
-`connect(..., snc_lib="/path/to/lib.so", snc_partnername="p:CN=...")` opens an SNC channel;
-omitting `snc_lib` leaves the plain TCP path byte-for-byte unchanged.
+**Activation:** `snc_pse` / `snc_credential` (built-in mechanism) or `snc_lib` (native
+library) switch SNC on; `snc_partnername` is then required. Without them the plain TCP
+path is byte-for-byte unchanged.
 
 ---
 
@@ -49,9 +48,9 @@ Offset  Length  Type        Name          Notes
  0x0a     2      uint16-BE   hdr_len       Total header length = 0x18 + extension-header size
  0x0c     4      uint32-BE   token_len     GSS token byte count
  0x10     4      uint32-BE   data_len      Application data byte count
- 0x14     2      uint16-BE   ctx_id        Context / adapter ID
- 0x16     2      uint16-BE   qop_flags     QOP flags (see QOP Levels)
-[0x18]    var    bytes       ext_headers   Extension headers, ONLY if hdr_len > 0x18 — see Known Gaps
+ 0x14     2      uint16-BE   mech_id       Mechanism id, 3 for the X.509 mechanism
+ 0x16     2      uint16-BE   qop_flags     QOP levels on handshake frames, 0 on data frames
+[0x18]    var    bytes       ext_headers   Extension headers, ONLY if hdr_len > 0x18
 [hdr_len] token_len bytes    gss_token     GSS token bytes
 [..]      data_len  bytes    app_data      Application data bytes
 ```
@@ -60,12 +59,36 @@ Offset  Length  Type        Name          Notes
 `src/saprfclib/snc.py` as `build_snc_frame` / `parse_snc_frame`.
 
 `hdr_len` includes the 8-byte eye-catcher, so the standard value is `0x18`. When it is
-larger, the frame carries extension headers and the GSS token starts at `hdr_len` rather
-than at `0x18` — `parse_snc_frame` skips them by seeking to `hdr_len`, so an inbound frame
-with extension headers parses correctly even though their internal layout is undocumented.
-On the outbound side, `_build_snc_ext_header()` emits the mechanism extension header
-(mechanism OID + context ID). What is *not* supported is SSO2 token mode — see
-[Known Gaps](#known-gaps).
+larger, extension headers follow and the GSS token starts at `hdr_len`; `parse_snc_frame`
+seeks there, so inbound extension headers are skipped.
+
+### Extension header
+
+Sent on the client's **first** FR_INIT only (later frames have `hdr_len = 0x18`):
+
+```
+BE32  slot bitmask        00 00 00 01 = slot 0 present
+per set bit:  BE16 length || slot bytes
+slot 0 = BE16 mechanism id (00 03)
+         || 04 01 || BE16 OID length (00 08) || 06 06 2B 24 03 01 25 01
+         || BE32 DN length || DN DER of the partner name
+```
+
+Slot 0 is the target name as a GSS exported-name token (RFC 2743 §3.2). The DN is encoded
+as the reference client does: RDNs reversed (C first), values as PrintableString, or
+T61String when a character falls outside that set, `C` upper-cased, `DC` as IA5String,
+`SN` meaning serialNumber. saprfclib refuses non-ASCII partner names: the reference
+encodes them as T.61 sequences, and whether a server accepts that is untested.
+Source: golden fixture `tests/golden/snc/snc_frame_headers.json` (byte-identical match).
+
+### GW envelope (SNC gateway port)
+
+On the secure gateway port each SNC frame travels inside an 80-byte GW header
+(type `06 CB`) followed by an 8-byte trailer `BE32 len(SNC frame) || 00 00 85 00`.
+Handshake and data frames differ in two places: byte 10 is `0x28` on handshake frames and
+`0x08` on data frames, and bytes 48:52 are `00 00 85 00` on handshake frames and zero on
+data frames. Bytes 78:80 carry the connection index the gateway assigned in its CONNECT
+reply, which the client echoes in every later frame. Source: same fixture.
 
 ### DoS Guard
 
@@ -167,7 +190,31 @@ Quality of protection:
 | 2   | integrity      | 8 (INTEG)  | `gss_get_mic` / `gss_verify_mic`  |
 | 3   | privacy        | 9 (PRIV)   | `gss_wrap` / `gss_unwrap`         |
 
-SAP's default is `min=1, max=3, use=3`. `saprfclib` defaults to `snc_qop=3` (privacy).
+### Negotiation
+
+Handshake frames carry three 2-bit levels in `qop_flags`: bits 1–2 minimum, bits 3–4
+maximum, bits 5–6 the level in use. `snc_qop` *q* = 1, 2 or 3 sends min = use = *q*,
+max = 3; `snc_qop` 8 and 9 both send 3/3/3. When the server's FR_ACCEPT announces a
+minimum above the level in use, the client raises its level to that minimum and sends the
+raised triple in its next FR_INIT. Data frames then use the frame type of the final level
+and carry 0 in `qop_flags`.
+
+| `snc_qop` | 1st FR_INIT | 2nd FR_INIT (server answered `0x7e`) | data frames |
+|---|---|---|---|
+| 1 | `0x3a` (1/3/1) | `0x7a` (1/3/3) | type 9 |
+| 2 | `0x5c` (2/3/2) | `0x7c` (2/3/3) | type 9 |
+| 3, 8, 9 | `0x7e` | `0x7e` | type 9 |
+
+Source: golden fixture `tests/golden/snc/snc_frame_headers.json`, a reference client against
+a server configured with `snc/data_protection/min = 3`. Types 7 and 8 on the wire need a
+server with a lower minimum and have not been observed live; the frame layouts follow the
+table above.
+
+On receive, saprfclib refuses any data frame protected below its own minimum, and any
+non-data frame once the channel is established. A frame's type is chosen by the sender,
+so this is where a downgrade is stopped.
+
+`saprfclib` defaults to `snc_qop=3` (privacy).
 
 **No cleartext password:** at QOP 3 every payload — including the logon
 TLV carrying the scrambled password — passes through `gss_wrap`, so the raw payload bytes

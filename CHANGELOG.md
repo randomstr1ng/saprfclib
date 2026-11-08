@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SNC protection-level negotiation.** The QOP field of the SNC handshake frames is three
+  2-bit levels (minimum, maximum, in use), not a fixed `0x7E`. The client now sends the
+  levels `snc_qop` asks for, raises its level when the server's minimum is higher, uses the
+  frame type of the resulting level for data, and refuses inbound data frames protected
+  below its own minimum. Data frames carry 0 in the field. Matches a reference client at
+  `snc_qop` 1, 2, 3, 8 and 9 (`tests/golden/snc/snc_frame_headers.json`).
+- The SNC GW envelope now distinguishes handshake from data frames (bytes 10 and 48:52) and
+  echoes the gateway-assigned connection index at bytes 78:80 instead of a fixed `0x0009`.
+- The SNC extension header encodes the partner DN like the reference client (T61String for
+  characters outside PrintableString, upper-case `C`, `DC` and `SN`); non-ASCII partner
+  names are refused instead of being mis-encoded.
 - `docs/protocol/snc.md` listed the SNC handshake frame types as 1/2; they are 2/4.
 
 ## [0.1.9] - 2026-10-27
