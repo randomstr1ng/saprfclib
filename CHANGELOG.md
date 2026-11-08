@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The SNC extension header encodes the partner DN like the reference client (T61String for
   characters outside PrintableString, upper-case `C`, `DC` and `SN`); non-ASCII partner
   names are refused instead of being mis-encoded.
+- Connection attributes of an SNC connection (`get_connection_attributes()`) were decoded
+  as ASCII, giving `'A\x004\x00H'` instead of `'A4H'`: the SNC transport strips the GW
+  header the decoder used to recognise a live reply. They are now decoded as UTF-16.
 - A password logon inside SNC now carries the empty record 0x0675 the reference client
   sends.
 - `docs/protocol/snc.md` listed the SNC handshake frame types as 1/2; they are 2/4.
