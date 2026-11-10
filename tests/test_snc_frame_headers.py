@@ -307,3 +307,48 @@ def test_logon_reply_without_gw_header_decodes_utf16_only_when_flagged(stripped,
     assert s.attributes.sys_id == expected
     if stripped:
         assert s.attributes.user == "DEVELOPER"
+
+
+# --- final initiator token: ACCEPT_ACK -------------------------------------------
+
+
+class _MechFinalToken(_Mech):
+    """Completes *with* an output token on its second call (Kerberos key exchange)."""
+
+    def init_sec_context(self, token):
+        self._step += 1
+        return (1, b"tok1") if self._step == 1 else (0, b"tok2")
+
+
+def _ack():
+    return build_snc_frame(_EYE, int(SncFrameType.FR_ACCEPT_ACK), 3, 0)
+
+
+def _kerberos_like(inbound):
+    inner = _Inner(inbound)
+    t = SncTransport(
+        inner, snc_partnername=FX["partner_name"], snc_qop=3, gss_binding=_MechFinalToken()
+    )
+    return t, inner
+
+
+def test_final_token_waits_for_accept_ack_before_data():
+    t, inner = _kerberos_like([_accept(0x7E), _ack()])
+    t.activate_snc(gw_handle=None, conn_idx=None)
+    assert [parse_snc_frame(f)[0] for f in inner.sent] == [2, 2]  # both tokens as FR_INIT
+    assert inner._in == []  # the ACK was consumed during the handshake
+    t.send_message(b"payload")
+    assert parse_snc_frame(inner.sent[-1])[0] == SncFrameType.PRIVACY
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        lambda: _accept(0x7E),  # another ACCEPT instead of the ACK
+        lambda: build_snc_frame(_EYE, int(SncFrameType.FR_ACCEPT_ACK), 3, 0, gss_token=b"x"),
+    ],
+)
+def test_missing_or_malformed_accept_ack_is_rejected(bad):
+    t, _ = _kerberos_like([_accept(0x7E), bad()])
+    with pytest.raises(SncError, match="acknowledge"):
+        t.activate_snc(gw_handle=None, conn_idx=None)

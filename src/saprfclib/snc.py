@@ -197,6 +197,10 @@ class SncFrameType(IntEnum):
 
     FR_INIT = 2  # client → server handshake init token (proxy capture confirmed)
     FR_ACCEPT = 4  # server → client handshake accept token (proxy capture confirmed)
+    # server → client, no token and no data: the acceptor completed on the
+    # initiator's last token without producing one of its own. Source: live capture
+    # 2026-11-10, Kerberos SNC handshake (client's final FR_INIT answered by type 5).
+    FR_ACCEPT_ACK = 5
     PLAIN = 7  # data frame, QOP 1 (authentication only, no protection)
     INTEGRITY = 8  # data frame, QOP 2 (gss_get_mic / gss_verify_mic)
     PRIVACY = 9  # data frame, QOP 3 (gss_wrap / gss_unwrap)
@@ -1026,6 +1030,14 @@ class SncTransport:
                 )
                 first_round = False
             if major == GSS_S_COMPLETE:
+                if out_token:
+                    # The acceptor still has to consume our last token; it confirms
+                    # with an empty ACCEPT_ACK frame, and the gateway refuses data
+                    # sent before that frame was read ("SEND_DATA in state
+                    # RECEIVE_WAIT_FOR_DATA"). Source: live capture 2026-11-10.
+                    ft, _ctx, _qop, token, app = self._recv_snc_frame()
+                    if ft != int(SncFrameType.FR_ACCEPT_ACK) or token or app:
+                        raise SncError("SNC partner did not acknowledge the handshake")
                 self._established = True  # SEC-06: only now may data be wrapped
                 break
             if not (major & GSS_S_CONTINUE_NEEDED):

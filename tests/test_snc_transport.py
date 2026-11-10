@@ -132,6 +132,13 @@ def _make_transport(*, mock=None, inner=None, snc_qop=3, snc_sso=False, eye_catc
 
     mock = mock or MockGssLib()
     inner = inner if inner is not None else MockTransport(responses=[])
+    # A handshake whose last step still produces a token is acknowledged by the
+    # server with an empty ACCEPT_ACK frame (live capture 2026-11-10); script it
+    # right after the FR_ACCEPT replies the CONTINUE steps consume.
+    script = mock._init_script
+    if script and script[-1][0] == GSS_S_COMPLETE and script[-1][1]:
+        continues = sum(1 for major, _ in script if major & GSS_S_CONTINUE_NEEDED)
+        inner._responses.insert(continues, _ack_frame(eye_catcher or _EYE))
     binding = GssBinding(
         snc_lib="/nonexistent/lib.so",
         snc_partnername="p:CN=SAP Server",
@@ -159,6 +166,11 @@ _PERMISSIVE_SERVER_QOP = 0x3A
 def _accept_frame(token: bytes, eye: bytes = _EYE, qop: int = _PERMISSIVE_SERVER_QOP) -> bytes:
     """Build an FR_ACCEPT frame carrying a server handshake token."""
     return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT), 0, qop, gss_token=token)
+
+
+def _ack_frame(eye: bytes = _EYE) -> bytes:
+    """The empty ACCEPT_ACK that answers an initiator's final token."""
+    return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT_ACK), 0, 0)
 
 
 def _assert_no_leak(err: SncError) -> None:
@@ -364,7 +376,8 @@ def test_connect_snc_returns_snctransport(monkeypatch):
     import saprfclib.snc as snc_mod
     from tests._mocks import MockTransport
 
-    fake_inner = MockTransport(responses=[])
+    # The default mock completes with a final token: the server acknowledges it.
+    fake_inner = MockTransport(responses=[_ack_frame()])
     monkeypatch.setattr(snc_mod, "connect_tcp", lambda *a, **k: fake_inner)
 
     real_binding_init = GssBinding.__init__
