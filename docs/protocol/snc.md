@@ -44,7 +44,7 @@ GSS token or protected application data.
 ```
 Offset  Length  Type        Name          Notes
  0x00     8      bytes       eye_catcher   b"SNCFRAME" (no trailing NUL in the field)
- 0x08     1      uint8       frame_type    2=FR_INIT, 4=FR_ACCEPT, 7=plain, 8=integrity, 9=privacy
+ 0x08     1      uint8       frame_type    2=FR_INIT, 4=FR_ACCEPT, 5=ACCEPT_ACK, 7=plain, 8=integrity, 9=privacy
  0x09     1      uint8       version       Protocol version = 6
  0x0a     2      uint16-BE   hdr_len       Total header length = 0x18 + extension-header size
  0x0c     4      uint32-BE   token_len     GSS token byte count
@@ -126,6 +126,14 @@ Client                                Server
 2. Server replies with an **FR_ACCEPT** (type 4) frame carrying its accept token.
 3. The loop repeats while `gss_init_sec_context` returns `GSS_S_CONTINUE_NEEDED`.
 4. On `GSS_S_COMPLETE`, the context is established and data frames (type 7/8/9) may flow.
+5. If the initiator's **last** `gss_init_sec_context` call returns `GSS_S_COMPLETE`
+   together with an output token, that token is sent as one more FR_INIT, and the server
+   answers with an **ACCEPT_ACK** (type 5) frame: no token, no data, QOP field 0. The
+   client must read it before sending data. A data frame sent before it was rejected by
+   the gateway with "called function SEND_DATA in state RECEIVE_WAIT_FOR_DATA". Source:
+   live capture 2026-11-10, Kerberos key exchange
+   ([snc-mechanism.md](snc-mechanism.md#kerberos-key-exchange)); the X.509 exchange ends
+   on a server token and has no ACCEPT_ACK.
 
 **Handshake before data:** no application data is
 wrapped or sent until the handshake reaches `GSS_S_COMPLETE`. `SncTransport` sets an
