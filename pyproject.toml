@@ -127,6 +127,12 @@ strict = true
 ignore_missing_imports = true
 exclude = ["tests/"]
 
+[[tool.mypy.overrides]]
+# asn1crypto ships no type information, so its Sequence/SequenceOf base classes are
+# Any; the Kerberos message definitions have to subclass them.
+module = "saprfclib.krb5.messages"
+disallow_subclassing_any = false
+
 
 [tool.coverage.run]
 source = ["saprfclib"]

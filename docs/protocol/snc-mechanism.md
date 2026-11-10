@@ -1,13 +1,20 @@
-# Built-in SNC Mechanism (X.509, OID 1.3.36.3.1.37.1)
+# Built-in SNC Mechanism (OID 1.3.36.3.1.37.1: X.509 and Kerberos)
 
-**Status:** CONFIRMED for the client role — a live handshake, logon and RFC calls against
-an SAP S/4HANA lab system on 2026-11-08, plus a full record-layer exchange with SAP
-CommonCryptoLib acting as the acceptor.
+**Status:** CONFIRMED for the client role.
+- X.509: a live handshake, logon and RFC calls against an SAP S/4HANA lab system on
+  2026-11-08, plus a full record-layer exchange with SAP CommonCryptoLib acting as the
+  acceptor.
+- Kerberos: a live handshake, SNC SSO logon and RFC calls against the same system with
+  Active Directory tickets on 2026-11-10, plus a full exchange with CommonCryptoLib as
+  the acceptor (see [Kerberos key exchange](#kerberos-key-exchange)).
+
 **Implemented in:** `src/saprfclib/secgss.py` (mechanism), `src/saprfclib/pse.py`
-(credentials).
-**Evidence:** golden fixtures `tests/golden/snc/secgss_live_handshake.json` (live server)
-and `tests/golden/snc/secgss_loopback_records.json` (CommonCryptoLib acceptor), replayed
-byte for byte by `tests/test_secgss.py`.
+(X.509 credentials), `src/saprfclib/krb5/` (Kerberos tickets, see
+[kerberos.md](kerberos.md)).
+**Evidence:** golden fixtures `tests/golden/snc/secgss_live_handshake.json` (live server),
+`tests/golden/snc/secgss_loopback_records.json` and
+`tests/golden/snc/secgss_kerberos_loopback.json` (CommonCryptoLib acceptor), replayed
+byte for byte by `tests/test_secgss.py` and `tests/test_secgss_kerberos.py`.
 
 This page describes the GSS tokens that travel inside the SNC frames of
 [snc.md](snc.md). The frame layer is unchanged: the built-in mechanism produces the same
@@ -19,15 +26,16 @@ tokens a native GSS library would, and `SncTransport` carries them the same way.
 
 Only what was observed end to end is implemented:
 
-| Parameter | Value |
-|---|---|
-| Protocol version | 1.1 |
-| Cipher suite | `0x0009` — ephemeral ECDH on P-256, AES-256-CBC, HMAC-SHA256, P_SHA256 PRF |
-| Authentication | X.509 certificates on both sides, RSA PKCS#1 v1.5 signatures (SHA-512 or SHA-256) |
-| Role | initiator (client) only |
+| Parameter | X.509 | Kerberos |
+|---|---|---|
+| Protocol version | 1.1 | 1.1 |
+| Cipher suite | `0x0009` — ephemeral ECDH on P-256, AES-256-CBC, HMAC-SHA256, P_SHA256 PRF | `0x0007` — Kerberos key exchange, AES-256-CBC, HMAC-SHA256, P_SHA256 PRF |
+| Authentication | X.509 certificates on both sides, RSA PKCS#1 v1.5 signatures (SHA-512 or SHA-256) | a Kerberos service ticket with an AES session key |
+| Role | initiator (client) only | initiator (client) only |
 
-Anything else the server selects is refused with `SncError`. Kerberos, RSA key
-transport, other curves and the older token formats are not implemented.
+Anything else the server selects is refused with `SncError`. Suite `0x0008` (Kerberos
+with AES-128), RSA key transport, other curves and the older token formats are not
+implemented.
 
 ---
 
@@ -189,6 +197,79 @@ built-in mechanism raises `ValueError` rather than produce one.
 
 ---
 
+## Kerberos key exchange
+
+Selected with `snc_kerberos` (see the cookbook). The server's SNC name has the form
+`p:CN=<service>@<REALM>`; the `CN` value is the Kerberos principal whose key the server
+holds, and the client gets a service ticket for exactly that principal
+([kerberos.md](kerberos.md)).
+
+### Message flow
+
+```
+Client                                          Server
+ token 1  ClientHello, KeyExchangeKey,
+          KeyTransport                      ──►
+ token 2                                    ◄──  ServerHello, Finished
+ token 3  Finished                          ──►
+          (SNC frame type 5, ACCEPT_ACK)    ◄──
+```
+
+`gss_init_sec_context` semantics: CONTINUE_NEEDED after token 1, then COMPLETE **with**
+token 3 as its output. The acceptor completes on token 3 without an output token, and the
+SNC layer answers with an empty ACCEPT_ACK frame (type 5, see [snc.md](snc.md)) that the
+client must read before it sends data; data sent earlier is refused by the gateway.
+There is no AuthRequest or AuthResponse.
+
+### ClientHello
+
+As for X.509, except the key-exchange list is `01` (Kerberos) and extension 3 offers
+suite `00 07` only. Live, the server answered with ServerHello `01 01 0007 00004000`
+(version 1.1, suite `0x0007`, chunk size 16384).
+
+### KeyExchangeKey and KeyTransport
+
+```
+A3 { A0 { OCTET STRING Ticket } }       -- the RFC 4120 Ticket, [APPLICATION 1] DER, as issued
+A6 { 81 <ciphertext> }
+```
+
+- The ticket is sent as the KDC issued it. No authenticator, AP-REQ or GSS-API
+  Kerberos framing is involved.
+- Pre-master secret = 48 bytes: `01 01` (the protocol version offered), then 46 random
+  bytes.
+- `ciphertext` = RFC 3961 encryption of the pre-master secret with the ticket's session
+  key, **key usage 2** (for AES: confounder, CBC with ciphertext stealing, HMAC-SHA1-96 —
+  76 bytes).
+
+The client proves it holds the session key by this encryption; the server proves it
+could decrypt the ticket (and so holds the service key) by producing a valid Finished.
+
+### Key schedule and Finished
+
+The same as for X.509, with the 48-byte pre-master secret above. The transcript is the
+concatenation of the handshake messages as sent: the **server's** Finished comes first
+and covers ClientHello, KeyExchangeKey, KeyTransport and ServerHello; the client's covers
+those plus the server's Finished element. The record layer is identical to suite
+`0x0009`.
+
+### Client identity on the server
+
+CommonCryptoLib as acceptor reported the peer name `CN=ALICE@EXAMPLE.COM` for a ticket
+issued to `alice@EXAMPLE.COM`: the user part is upper-cased (fixture
+`secgss_kerberos_loopback.json`). The SAP user is then found through its SNC name
+(`p:CN=<USER>@<REALM>` in SU01).
+
+### Not verified
+
+- Suite `0x0008` (AES-128): not offered, not implemented.
+- Session keys other than AES (RC4, DES): refused by the client. The ticket's own
+  encryption type does not matter to the client; the live tickets were RC4-encrypted
+  for the service and worked.
+- Cross-realm tickets: refused.
+
+---
+
 ## Server certificate checks (client side)
 
 All of these fail closed with `SncError`:
@@ -251,6 +332,10 @@ carrying a host or user restriction, EC and EdDSA own keys.
 ---
 
 ## Open questions
+
+- Kerberos: whether a server checks the requested partner name against the ticket's
+  service principal — a ticket for a different principal with a key in the same keytab
+  was not tried.
 
 - Which suites besides `0x0009` a server will accept from a client that offers them
   (P-384/P-521 variants, RSA key transport) — not exercised.

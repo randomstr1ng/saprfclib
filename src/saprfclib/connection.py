@@ -106,7 +106,9 @@ from saprfclib.transport import (
 )
 
 if TYPE_CHECKING:
-    from saprfclib.secgss import SecGssInitiator, SncCredential
+    from saprfclib.krb5.client import Principal
+    from saprfclib.krb5.login import KerberosLogin
+    from saprfclib.secgss import SecGssInitiator, SecGssKerberosInitiator, SncCredential
 
 from saprfclib.types import (
     RFC_EXPORT,
@@ -849,6 +851,54 @@ def _builtin_snc_mechanism(
     if snc_myname is not None and not own_name_matches(snc_credential, snc_myname):
         raise ValueError("snc_myname does not match the certificate in the SNC credential")
     return SecGssInitiator(snc_credential, partner_name)
+
+
+_OID_CN = "2.5.4.3"  # X.520 commonName, as parse_snc_name reports it
+
+
+def kerberos_service_principal(partner_name: str) -> Principal:
+    """The Kerberos principal named by a Kerberos SNC name ``p:CN=<name>@<REALM>``.
+
+    The SNC name of a Kerberos service is a single ``CN`` holding the principal in
+    ``name@REALM`` form; the server takes exactly that ``CN`` value as the
+    principal whose key decrypts the ticket.
+    """
+    from saprfclib.krb5.client import Principal
+    from saprfclib.secgss import parse_snc_name
+
+    rdns = parse_snc_name(partner_name)
+    if len(rdns) != 1 or rdns[0][0] != _OID_CN or "@" not in rdns[0][1]:
+        raise ValueError("a Kerberos SNC partner name has the form p:CN=<service>@<REALM>")
+    return Principal.parse(rdns[0][1])
+
+
+def _builtin_kerberos_mechanism(
+    partner_name: str,
+    *,
+    snc_myname: str | None,
+    login: KerberosLogin | None,
+    timeout: float | None,
+) -> SecGssKerberosInitiator:
+    """Get a service ticket for the partner and build the Kerberos SNC initiator.
+
+    ``snc_myname``, when given, must name the ticket's client principal
+    (``p:CN=<user>@<REALM>``, compared case-insensitively), so a mismatch fails here.
+
+    Security: the password, keys and tickets never reach a log or exception message.
+    """
+    from saprfclib.krb5.login import KerberosLogin, obtain_service_ticket
+    from saprfclib.secgss import SecGssKerberosInitiator, parse_snc_name
+
+    service = kerberos_service_principal(partner_name)
+    ticket = obtain_service_ticket(
+        login or KerberosLogin(), service, timeout=timeout if timeout is not None else 10.0
+    )
+    if snc_myname is not None:
+        mine = parse_snc_name(snc_myname)
+        want = ((_OID_CN, str(ticket.client)),)
+        if [(k, v.upper()) for k, v in mine] != [(k, v.upper()) for k, v in want]:
+            raise ValueError("snc_myname does not match the Kerberos client principal")
+    return SecGssKerberosInitiator(ticket)
 
 
 def _filter_call_params(
@@ -4265,6 +4315,7 @@ def connect(
     snc_pse: str | os.PathLike[str] | None = None,
     snc_pse_pin: str | None = None,
     snc_credential: SncCredential | None = None,
+    snc_kerberos: bool | KerberosLogin | None = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     tid_store: TidStore | None = None,
@@ -4288,8 +4339,11 @@ def connect(
         is required. With ``snc_pse`` (a PSE file, unlocked with ``snc_pse_pin``) or
         ``snc_credential`` the built-in X.509 mechanism (:mod:`saprfclib.secgss`) is
         used and no SAP library is needed; with ``snc_lib`` the named GSS-API library
-        is loaded instead. ``snc_sso`` defaults to False (D-12). ``wshost`` takes
-        precedence: SNC-over-wRFC is out of scope.
+        is loaded instead. ``snc_kerberos`` selects the built-in Kerberos key exchange
+        instead: ``True`` takes the ticket from the FILE ticket cache, a
+        :class:`saprfclib.krb5.KerberosLogin` from a password, keytab or named cache;
+        ``snc_partnername`` is then ``p:CN=<service>@<REALM>``. ``snc_sso`` defaults to
+        False (D-12). ``wshost`` takes precedence: SNC-over-wRFC is out of scope.
 
         ``snc_qop`` selects the protection level and defaults to 3. Accepted
         values are 1 (authentication only), 2 (integrity), 3 (privacy),
@@ -4381,8 +4435,8 @@ def connect(
     whether the entry count is carried in the header or only implied by the
     payload length. ``passwd``,
     ``ws_proxy_pass``, ``proxy_jwt``, ``proxy_client_secret``, ``snc_lib``,
-    ``snc_pse``, ``snc_pse_pin``, ``snc_credential``, ``snc_partnername`` and
-    ``snc_myname`` are never logged or echoed into any log
+    ``snc_pse``, ``snc_pse_pin``, ``snc_credential``, ``snc_kerberos``,
+    ``snc_partnername`` and ``snc_myname`` are never logged or echoed into any log
     message or exception string (threats T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
     # Imported lazily so the direct-TCP facade carries no hard dependency on the
@@ -4401,6 +4455,7 @@ def connect(
         snc_lib is not None
         or snc_pse is not None
         or snc_credential is not None
+        or bool(snc_kerberos)
         or snc_partnername is not None
     )
     if snc_sso and not snc_enabled:
@@ -4518,17 +4573,29 @@ def connect(
 
         if snc_partnername is None:
             raise ValueError("SNC needs snc_partnername, the server's SNC name (p:CN=...)")
-        _mech = (
-            None
-            if snc_lib is not None
-            else _builtin_snc_mechanism(
+        _mech: SecGssInitiator | SecGssKerberosInitiator | None
+        if snc_kerberos:
+            if snc_lib is not None or snc_pse is not None or snc_credential is not None:
+                raise ValueError(
+                    "snc_kerberos selects the built-in Kerberos mechanism; it cannot be "
+                    "combined with snc_lib, snc_pse or snc_credential"
+                )
+            _mech = _builtin_kerberos_mechanism(
+                snc_partnername,
+                snc_myname=snc_myname,
+                login=None if snc_kerberos is True else snc_kerberos,
+                timeout=connect_timeout,
+            )
+        elif snc_lib is not None:
+            _mech = None
+        else:
+            _mech = _builtin_snc_mechanism(
                 snc_partnername,
                 snc_myname=snc_myname,
                 snc_pse=snc_pse,
                 snc_pse_pin=snc_pse_pin,
                 snc_credential=snc_credential,
             )
-        )
 
         _inner = connect_tcp(
             tcp_host,
@@ -5949,6 +6016,7 @@ async def connect_async(
     snc_pse: str | os.PathLike[str] | None = None,
     snc_pse_pin: str | None = None,
     snc_credential: SncCredential | None = None,
+    snc_kerberos: bool | KerberosLogin | None = None,
     wshost: str | None = None,
     wsport: int | None = None,
     ws_path: str | None = None,
@@ -6002,6 +6070,7 @@ async def connect_async(
         snc_lib is not None
         or snc_pse is not None
         or snc_credential is not None
+        or bool(snc_kerberos)
         or snc_partnername is not None
     )
     if snc_enabled or wshost is not None:
@@ -6050,6 +6119,7 @@ async def connect_async(
             snc_pse=snc_pse,
             snc_pse_pin=snc_pse_pin,
             snc_credential=snc_credential,
+            snc_kerberos=snc_kerberos,
             max_retries=max_retries,
             retry_delay=retry_delay,
             tid_store=tid_store,

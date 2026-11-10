@@ -1,0 +1,10 @@
+{
+  "description": "Keytab written by MIT krb5 ktutil (addent -password, wkt) for a dummy principal; not a real credential.",
+  "source": "MIT Kerberos 1.22 ktutil, keytab format version 2",
+  "password": "test-password",
+  "entries": [
+    {"principal": "test@EXAMPLE.COM", "name_type": 1, "kvno": 3, "enctype": 18, "salt": "EXAMPLE.COMtest"},
+    {"principal": "HTTP/web.example.com@EXAMPLE.COM", "name_type": 1, "kvno": 300, "enctype": 17, "salt": "EXAMPLE.COMHTTPweb.example.com"},
+    {"principal": "test@EXAMPLE.COM", "name_type": 1, "kvno": 3, "enctype": 23, "salt": null}
+  ]
+}

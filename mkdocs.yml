@@ -81,6 +81,7 @@ nav:
     - Message Server: protocol/message_server.md
     - SNC: protocol/snc.md
     - SNC mechanism (built in): protocol/snc-mechanism.md
+    - Kerberos: protocol/kerberos.md
     - tRFC / bgRFC: protocol/trfc.md
     - RE Methodology: protocol/methodology.md
 
