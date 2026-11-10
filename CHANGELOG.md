@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cred_v2` are read in every form written outside Windows. An existing CommonCryptoLib
   `SECUDIR` works unchanged: with only `snc_partnername` given, the PSE is chosen as
   CommonCryptoLib chooses it.
+- **Kerberos SNC — single sign-on with Active Directory, no SAP library.**
+  `connect(snc_partnername="p:CN=<service>@<REALM>", snc_kerberos=True, snc_sso=True)`
+  logs on with the user's Kerberos ticket from the ticket cache; `snc_kerberos=
+  KerberosLogin(...)` takes a password, a keytab or a specific cache instead. A pure-Python
+  Kerberos 5 client (`saprfclib.krb5`: AES encryption types per RFC 3961/3962, AS and TGS
+  exchanges per RFC 4120, MIT ccache and keytab files) gets the service ticket; the SNC
+  mechanism's Kerberos key exchange (suite `0x0007`) carries it. No new dependency.
+  Confirmed live against an S/4HANA system with Active Directory tickets (password,
+  keytab, MIT and sssd ticket caches, user principal and SPN partner names, sync and
+  async, multi-chunk requests and responses) and byte for byte against SAP
+  CommonCryptoLib as the acceptor; see `docs/protocol/snc-mechanism.md` and
+  `docs/protocol/kerberos.md`.
 
 ### Changed
 
@@ -43,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   library implements no cryptographic primitive itself.
 
 ### Fixed
+
+- **SNC handshakes that end on a client token** now wait for the server's ACCEPT_ACK
+  frame (type 5) before data is sent. Data sent earlier was refused by the gateway
+  ("SEND_DATA in state RECEIVE_WAIT_FOR_DATA"). The X.509 exchange ends on a server
+  token and is unaffected; GSS libraries passed with `snc_lib` that finish with an
+  output token were affected.
 
 - **Requests larger than 28000 bytes** reset the connection (`Connection reset by peer`),
   on plain RFC and over SNC — a long `OPTIONS` table was enough. They are now split into

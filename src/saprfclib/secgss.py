@@ -53,12 +53,16 @@ from tlslite.utils.cipherfactory import createAES
 from tlslite.utils.python_rsakey import Python_RSAKey
 
 from saprfclib.exceptions import SncError
+from saprfclib.krb5.client import Credential
+from saprfclib.krb5.crypto import ENCTYPE_AES128, ENCTYPE_AES256
+from saprfclib.krb5.crypto import encrypt as krb5_encrypt
 
 __all__ = [
     "GSS_S_COMPLETE",
     "GSS_S_CONTINUE_NEEDED",
     "SncCredential",
     "SecGssInitiator",
+    "SecGssKerberosInitiator",
     "own_name_matches",
     "parse_snc_name",
 ]
@@ -88,6 +92,16 @@ _PRF_PHASH_SHA256 = 2
 _ENCODING_DATA_HEADER_V1 = 2
 _KEX_SERVER_ECDHE = 4
 _SUITE_ECDHE_P256_AES256_SHA256 = 0x0009
+# Kerberos key exchange: key-exchange list id 1, suite 0x0007 (AES-256-CBC,
+# HMAC-SHA256, P_SHA256: the suite 9 record layer with a Kerberos key exchange).
+# Source: live handshake against an SAP system, 2026-11-10 — a ClientHello offering
+# key exchange 01 / suite 00 07 was answered with ServerHello 01 01 0007 00004000.
+_KEX_KERBEROS = 1
+_SUITE_KERBEROS_AES256_SHA256 = 0x0007
+# Key usage for the encrypted pre-master secret. Source: the same live handshake —
+# the server accepted a pre-master secret encrypted with usage 2 and answered with
+# a valid Finished.
+_KRB5_USAGE_PMS = 2
 
 # Hello extension ids. 3 = client cipher-suite list (BE u16 ids), 5 = NULL flag
 # sent by the reference client. Source: golden fixture ClientHello extensions.
@@ -528,86 +542,58 @@ Signer = Callable[[bytes, str], bytes]
 Clock = Callable[[], float]
 
 
-class SecGssInitiator:
-    """Client side of the mechanism; drop-in for :class:`saprfclib.snc.GssBinding`.
+class _SecGssContext:
+    """Record layer, key schedule and token framing shared by both key exchanges.
 
-    ``init_sec_context`` is called with the peer's last token (``b""`` first) and
-    returns ``(major, output_token)`` exactly like ``gss_init_sec_context``:
-    ``CONTINUE_NEEDED`` twice, then ``COMPLETE`` with an empty output token.
-
-    ``random`` and ``clock`` exist for deterministic replay in tests; production
-    callers leave them at their defaults (``os.urandom``, ``time.time``).
-    ``ecdh_private_key`` likewise pins the ephemeral scalar for replay only, and
-    ``signer`` replaces signing with the credential's private key (it receives the
-    data to sign and the hash name, and returns an RSA PKCS#1 v1.5 signature).
+    A subclass runs the handshake: it sets ``_client_random``, ``_server_random``
+    and ``_chunk_size`` and calls :meth:`_derive_keys`.
     """
 
     # Attributes SncTransport reads on a binding.
     _real = False
     _lib: Any = None
+    # Suites this context accepts in the ServerHello.
+    _accepted_suites: frozenset[int] = frozenset()
 
-    def __init__(
-        self,
-        credential: SncCredential,
-        partner_name: str,
-        *,
-        random: RandomSource = os.urandom,
-        clock: Clock = time.time,
-        ecdh_private_key: bytes | None = None,
-        signer: Signer | None = None,
-    ) -> None:
-        self._cred = credential
-        self._partner = parse_snc_name(partner_name)
+    def _init_state(self, random: RandomSource, clock: Clock) -> None:
         self._random = random
         self._clock = clock
-        self._ecdh_fixed = ecdh_private_key
-        if signer is None:
-            rsa = _rsa_private(credential.private_key)
-
-            def signer(data: bytes, hash_name: str) -> bytes:
-                return bytes(rsa.hashAndSign(bytearray(data), "PKCS1", hash_name))
-
-        self._sign: Signer = signer
-        self._own_cert = _x509.Certificate.load(credential.certificate)
-        if self._own_cert.public_key.algorithm != "rsa":
-            raise SncError("own certificate key is not RSA; only RSA keys are supported")
         self._step = 0
         self._transcript = bytearray()
         self._client_random = b""
         self._server_random = b""
-        self._server_sigalgs: list[int] = []
-        self._ecdh: ECDH | None = None
         self._master = b""
         self._send: _Direction | None = None
         self._recv: _Direction | None = None
         self._chunk_size = 0
-        self.peer_certificate: bytes | None = None
         self.established = False
 
-    # -- GssBinding surface ------------------------------------------------
+    def _discard_handshake_state(self) -> None:
+        self._master = b""
+        self._transcript = bytearray()
 
-    def init_sec_context(self, input_token: bytes) -> tuple[int, bytes]:
-        try:
-            if self._step == 0:
-                if input_token:
-                    raise SncError("unexpected input token on first call")
-                self._step = 1
-                return GSS_S_CONTINUE_NEEDED, self._token1()
-            if self._step == 1:
-                out = self._process_server_first(input_token)
-                self._step = 2
-                return GSS_S_CONTINUE_NEEDED, out
-            if self._step == 2:
-                self._process_server_final(input_token)
-                self._step = 3
-                self.established = True
-                self._discard_handshake_state()
-                return GSS_S_COMPLETE, b""
-            raise SncError("security context already established")
-        except SncError:
-            self._step = 99  # a failed handshake cannot be resumed
-            self._discard_handshake_state()
-            raise
+    def _client_hello(self, kex: int, suite: int) -> bytes:
+        # random = BE32 seconds since the epoch || 28 random bytes.
+        self._client_random = struct.pack(">I", int(self._clock()) & 0xFFFFFFFF) + self._random(28)
+        params = (
+            bytes([2]) + bytes(_VERSION_1_1)
+            + bytes([1, _MAC_HMAC_SHA256])
+            + bytes([1, _CIPHER_AES256])
+            + bytes([1, _HS_HASH_SHA256])
+            + bytes([1, _PRF_PHASH_SHA256])
+            + bytes([1, _ENCODING_DATA_HEADER_V1])
+            + bytes([1, kex])
+        )  # fmt: skip
+        ext_suites = _tlv(
+            0x30, _der_int(_EXT_CLIENT_CIPHER_SUITES) + _tlv(0x04, struct.pack(">H", suite))
+        )
+        ext_not_slc = _tlv(0x30, _der_int(_EXT_CLIENT_IS_NOT_SLC) + b"\x05\x00")
+        return _tlv(
+            _TAG_CLIENT_HELLO,
+            _tlv(0x04, params)
+            + _tlv(0x04, self._client_random)
+            + _tlv(0xA1, ext_suites + ext_not_slc),
+        )
 
     def wrap(self, payload: bytes) -> bytes:
         self._require_established()
@@ -656,8 +642,6 @@ class SecGssInitiator:
         self._send = None
         self._recv = None
         self.established = False
-
-    # -- record layer --------------------------------------------------------
 
     def _chunks(self, payload: bytes) -> list[bytes]:
         size = self._chunk_size
@@ -710,16 +694,9 @@ class SecGssInitiator:
         d.seq += 1
         return bytes(out)
 
-    # -- handshake -------------------------------------------------------------
-
     def _require_established(self) -> None:
         if not self.established:
             raise SncError("SNC security context is not established")
-
-    def _discard_handshake_state(self) -> None:
-        self._ecdh = None
-        self._master = b""
-        self._transcript = bytearray()
 
     def _emit(self, messages: Sequence[bytes]) -> bytes:
         for m in messages:
@@ -741,31 +718,114 @@ class SecGssInitiator:
             raise SncError("SNC partner aborted the handshake", major=_GSS_S_FAILURE)
         return msgs
 
+    def _finished_token(self, label: str) -> bytes:
+        verify = _p_sha256(
+            self._master,
+            label.encode("ascii") + hashlib.sha256(self._transcript).digest(),
+            _FINISHED_LEN,
+        )
+        assert self._send is not None
+        self._send.seq = 0  # Finished is record 0; data records start at 1
+        return self._wrap(self._send, verify)
+
+    def _derive_keys(self, pms: bytes) -> None:
+        cr, sr = self._client_random, self._server_random
+        self._master = _p_sha256(pms, b"master secret" + cr + sr, _MASTER_LEN)
+        cw = _p_sha256(self._master, b"client write key expansion" + sr + cr, _KEY_BLOCK_LEN)
+        sw = _p_sha256(self._master, b"server write key expansion" + sr + cr, _KEY_BLOCK_LEN)
+        # Each block: mac key[32] || enc key[32] || iv[16]; the iv is unused because
+        # every record carries its own.
+        self._send = _Direction(cw[:32], cw[32:64])
+        self._recv = _Direction(sw[:32], sw[32:64])
+
+    def _parse_server_hello(self, m: _Tlv) -> None:
+        fields = _read_all(m.value)
+        if len(fields) < 2:
+            raise SncError("malformed ServerHello", major=_GSS_S_DEFECTIVE_TOKEN)
+        params = _expect(fields[0], 0x04, "ServerHello").value
+        rnd = _expect(fields[1], 0x04, "ServerHello").value
+        if len(rnd) != 32:
+            raise SncError("malformed ServerHello random", major=_GSS_S_DEFECTIVE_TOKEN)
+        if len(params) != 8 or tuple(params[:2]) != _VERSION_1_1:
+            raise SncError("server selected an unsupported SNC protocol version")
+        suite, chunk = struct.unpack(">HI", params[2:8])
+        if suite not in self._accepted_suites:
+            raise SncError("server selected an unsupported SNC cipher suite")
+        if chunk == 0 or chunk > _MAX_TOKEN_BYTES:
+            raise SncError("server announced an invalid chunk size")
+        self._server_random = rnd
+        self._chunk_size = chunk
+
+
+class SecGssInitiator(_SecGssContext):
+    """Client side of the mechanism; drop-in for :class:`saprfclib.snc.GssBinding`.
+
+    ``init_sec_context`` is called with the peer's last token (``b""`` first) and
+    returns ``(major, output_token)`` exactly like ``gss_init_sec_context``:
+    ``CONTINUE_NEEDED`` twice, then ``COMPLETE`` with an empty output token.
+
+    ``random`` and ``clock`` exist for deterministic replay in tests; production
+    callers leave them at their defaults (``os.urandom``, ``time.time``).
+    ``ecdh_private_key`` likewise pins the ephemeral scalar for replay only, and
+    ``signer`` replaces signing with the credential's private key (it receives the
+    data to sign and the hash name, and returns an RSA PKCS#1 v1.5 signature).
+    """
+
+    _accepted_suites = frozenset({_SUITE_ECDHE_P256_AES256_SHA256})
+
+    def __init__(
+        self,
+        credential: SncCredential,
+        partner_name: str,
+        *,
+        random: RandomSource = os.urandom,
+        clock: Clock = time.time,
+        ecdh_private_key: bytes | None = None,
+        signer: Signer | None = None,
+    ) -> None:
+        self._cred = credential
+        self._partner = parse_snc_name(partner_name)
+        self._ecdh_fixed = ecdh_private_key
+        if signer is None:
+            rsa = _rsa_private(credential.private_key)
+
+            def signer(data: bytes, hash_name: str) -> bytes:
+                return bytes(rsa.hashAndSign(bytearray(data), "PKCS1", hash_name))
+
+        self._sign: Signer = signer
+        self._own_cert = _x509.Certificate.load(credential.certificate)
+        if self._own_cert.public_key.algorithm != "rsa":
+            raise SncError("own certificate key is not RSA; only RSA keys are supported")
+        self._init_state(random, clock)
+        self._server_sigalgs: list[int] = []
+        self._ecdh: ECDH | None = None
+        self.peer_certificate: bytes | None = None
+
+    def init_sec_context(self, input_token: bytes) -> tuple[int, bytes]:
+        try:
+            if self._step == 0:
+                if input_token:
+                    raise SncError("unexpected input token on first call")
+                self._step = 1
+                return GSS_S_CONTINUE_NEEDED, self._token1()
+            if self._step == 1:
+                out = self._process_server_first(input_token)
+                self._step = 2
+                return GSS_S_CONTINUE_NEEDED, out
+            if self._step == 2:
+                self._process_server_final(input_token)
+                self._step = 3
+                self.established = True
+                self._discard_handshake_state()
+                return GSS_S_COMPLETE, b""
+            raise SncError("security context already established")
+        except SncError:
+            self._step = 99  # a failed handshake cannot be resumed
+            self._discard_handshake_state()
+            raise
+
     def _token1(self) -> bytes:
-        # random = BE32 seconds since the epoch || 28 random bytes.
-        self._client_random = struct.pack(">I", int(self._clock()) & 0xFFFFFFFF) + self._random(28)
-        params = (
-            bytes([2]) + bytes(_VERSION_1_1)
-            + bytes([1, _MAC_HMAC_SHA256])
-            + bytes([1, _CIPHER_AES256])
-            + bytes([1, _HS_HASH_SHA256])
-            + bytes([1, _PRF_PHASH_SHA256])
-            + bytes([1, _ENCODING_DATA_HEADER_V1])
-            + bytes([1, _KEX_SERVER_ECDHE])
-        )  # fmt: skip
-        ext_suites = _tlv(
-            0x30,
-            _der_int(_EXT_CLIENT_CIPHER_SUITES)
-            + _tlv(0x04, struct.pack(">H", _SUITE_ECDHE_P256_AES256_SHA256)),
-        )
-        ext_not_slc = _tlv(0x30, _der_int(_EXT_CLIENT_IS_NOT_SLC) + b"\x05\x00")
-        hello = _tlv(
-            _TAG_CLIENT_HELLO,
-            _tlv(0x04, params)
-            + _tlv(0x04, self._client_random)
-            + _tlv(0xA1, ext_suites + ext_not_slc),
-        )
-        return self._emit([hello])
+        return self._emit([self._client_hello(_KEX_SERVER_ECDHE, _SUITE_ECDHE_P256_AES256_SHA256)])
 
     def _process_server_first(self, token: bytes) -> bytes:
         msgs = self._open(token)
@@ -843,46 +903,6 @@ class SecGssInitiator:
         if not hmac.compare_digest(got, expect):
             raise SncError("server Finished verification failed", major=_GSS_S_FAILURE)
 
-    def _finished_token(self, label: str) -> bytes:
-        verify = _p_sha256(
-            self._master,
-            label.encode("ascii") + hashlib.sha256(self._transcript).digest(),
-            _FINISHED_LEN,
-        )
-        assert self._send is not None
-        self._send.seq = 0  # Finished is record 0; data records start at 1
-        return self._wrap(self._send, verify)
-
-    def _derive_keys(self, pms: bytes) -> None:
-        cr, sr = self._client_random, self._server_random
-        self._master = _p_sha256(pms, b"master secret" + cr + sr, _MASTER_LEN)
-        cw = _p_sha256(self._master, b"client write key expansion" + sr + cr, _KEY_BLOCK_LEN)
-        sw = _p_sha256(self._master, b"server write key expansion" + sr + cr, _KEY_BLOCK_LEN)
-        # Each block: mac key[32] || enc key[32] || iv[16]; the iv is unused because
-        # every record carries its own.
-        self._send = _Direction(cw[:32], cw[32:64])
-        self._recv = _Direction(sw[:32], sw[32:64])
-
-    # -- message parsers -------------------------------------------------------
-
-    def _parse_server_hello(self, m: _Tlv) -> None:
-        fields = _read_all(m.value)
-        if len(fields) < 2:
-            raise SncError("malformed ServerHello", major=_GSS_S_DEFECTIVE_TOKEN)
-        params = _expect(fields[0], 0x04, "ServerHello").value
-        rnd = _expect(fields[1], 0x04, "ServerHello").value
-        if len(rnd) != 32:
-            raise SncError("malformed ServerHello random", major=_GSS_S_DEFECTIVE_TOKEN)
-        if len(params) != 8 or tuple(params[:2]) != _VERSION_1_1:
-            raise SncError("server selected an unsupported SNC protocol version")
-        suite, chunk = struct.unpack(">HI", params[2:8])
-        if suite != _SUITE_ECDHE_P256_AES256_SHA256:
-            raise SncError("server selected an unsupported SNC cipher suite")
-        if chunk == 0 or chunk > _MAX_TOKEN_BYTES:
-            raise SncError("server announced an invalid chunk size")
-        self._server_random = rnd
-        self._chunk_size = chunk
-
     def _parse_key_exchange(self, m: _Tlv) -> bytes:
         inner, end = _read_tlv(m.value)
         if inner.tag != 0xA2 or end != len(m.value):
@@ -934,6 +954,101 @@ class SecGssInitiator:
         if len(fields) > 1:
             chain = [c.raw for c in _read_all(_expect(fields[1], 0x30, "AuthResponse").value)]
         return sigalg, bits[1:], chain
+
+    def _discard_handshake_state(self) -> None:
+        super()._discard_handshake_state()
+        self._ecdh = None
+
+
+class SecGssKerberosInitiator(_SecGssContext):
+    """Client side of the mechanism with a Kerberos key exchange (suite ``0x0007``).
+
+    ``service_ticket`` is a ticket for the server's Kerberos principal — the name in
+    the ``CN`` of its SNC name ``p:CN=<service>@<REALM>`` — with an AES session key.
+    The client proves it holds that session key by encrypting the pre-master secret
+    with it; the server proves it could decrypt the ticket by producing a valid
+    Finished. There is no authenticator and no AP-REQ (see
+    ``docs/protocol/snc-mechanism.md``).
+
+    ``init_sec_context`` returns ``CONTINUE_NEEDED`` with the first token, then
+    ``COMPLETE`` *with* a final output token (the client Finished), which the SNC
+    layer sends and the server acknowledges with an ACCEPT_ACK frame.
+
+    ``random`` and ``clock`` are injectable for deterministic replay only.
+    """
+
+    _accepted_suites = frozenset({_SUITE_KERBEROS_AES256_SHA256})
+
+    def __init__(
+        self,
+        service_ticket: Credential,
+        *,
+        random: RandomSource = os.urandom,
+        clock: Clock = time.time,
+    ) -> None:
+        if service_ticket.session_key.enctype not in (ENCTYPE_AES128, ENCTYPE_AES256):
+            raise SncError("Kerberos session key type is not supported")
+        self._ticket = service_ticket
+        self._pms = b""
+        self._init_state(random, clock)
+
+    def init_sec_context(self, input_token: bytes) -> tuple[int, bytes]:
+        try:
+            if self._step == 0:
+                if input_token:
+                    raise SncError("unexpected input token on first call")
+                self._step = 1
+                return GSS_S_CONTINUE_NEEDED, self._token1()
+            if self._step == 1:
+                out = self._process_server(input_token)
+                self._step = 2
+                self.established = True
+                self._discard_handshake_state()
+                return GSS_S_COMPLETE, out
+            raise SncError("security context already established")
+        except SncError:
+            self._step = 99  # a failed handshake cannot be resumed
+            self._discard_handshake_state()
+            raise
+
+    def _discard_handshake_state(self) -> None:
+        super()._discard_handshake_state()
+        self._pms = b""
+
+    def _token1(self) -> bytes:
+        hello = self._client_hello(_KEX_KERBEROS, _SUITE_KERBEROS_AES256_SHA256)
+        # KeyExchangeKey, Kerberos alternative: A3 { A0 { OCTET STRING Ticket } }.
+        kek = _tlv(_TAG_KEY_EXCHANGE_KEY, _tlv(0xA0, _tlv(0x04, self._ticket.ticket)))
+        # Pre-master secret: 48 bytes, the first two the protocol version offered
+        # (1.1), the rest random. Encrypted with the ticket's session key, RFC 3961
+        # encryption with key usage 2, and sent as KeyTransport alternative [1].
+        self._pms = bytes(_VERSION_1_1) + self._random(46)
+        ct = krb5_encrypt(self._ticket.session_key, _KRB5_USAGE_PMS, self._pms, random=self._random)
+        key_transport = _tlv(_TAG_KEY_TRANSPORT, _tlv(0x81, ct))
+        return self._emit([hello, kek, key_transport])
+
+    def _process_server(self, token: bytes) -> bytes:
+        msgs = self._open(token)
+        if [m.tag for m in msgs] != [_TAG_SERVER_HELLO, _TAG_FINISHED]:
+            raise SncError("unexpected handshake message sequence", major=_GSS_S_DEFECTIVE_TOKEN)
+        sh, fin = msgs
+        self._parse_server_hello(sh)
+        self._transcript += sh.raw
+        self._derive_keys(self._pms)
+        # Server Finished first, over ClientHello..ServerHello.
+        expect = _p_sha256(
+            self._master,
+            b"server finished" + hashlib.sha256(self._transcript).digest(),
+            _FINISHED_LEN,
+        )
+        assert self._recv is not None
+        self._recv.seq = 0
+        got = self._unwrap(self._recv, fin.value)
+        if not hmac.compare_digest(got, expect):
+            raise SncError("server Finished verification failed", major=_GSS_S_FAILURE)
+        self._transcript += fin.raw
+        finished = _tlv(_TAG_FINISHED, self._finished_token("client finished"))
+        return _tlv_long2(0x30, _MECH_OID_TLV + _tlv_long2(_TAG_CONTAINER, finished))
 
 
 def own_name_matches(credential: SncCredential, snc_name: str) -> bool:

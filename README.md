@@ -8,7 +8,7 @@
 
 `saprfclib` is a pure-Python reimplementation of the SAP RFC wire protocol - zero
 native/C dependencies. Call any SAP function module from Python with just a `pip install`.
-Supports direct TCP, SAProuter, message server (load-balanced), SNC (X.509, built in — no SAP library needed),
+Supports direct TCP, SAProuter, message server (load-balanced), SNC (X.509 and Kerberos/Active Directory SSO, built in — no SAP library needed),
 and WebSocket RFC (SAP BTP/cloud) connections. Requires Python 3.12 or later.
 
 No SAP NetWeaver RFC SDK. No C compiler. No `LD_LIBRARY_PATH`. No container image built
@@ -53,6 +53,7 @@ it in-process - no configuration needed.
 | SAProuter | `ashost`, `sysnr`, `saprouter="/H/router/S/3299/H/target"` |
 | Message server | `mshost`, `sysid`, `group` |
 | SNC (X.509, built in) | `snc_partnername`, `snc_pse`, `snc_pse_pin` (or `snc_lib` for a native GSS library) |
+| SNC (Kerberos SSO, built in) | `snc_partnername="p:CN=<service>@<REALM>"`, `snc_kerberos=True` (ticket cache) or `KerberosLogin(...)`, `snc_sso=True` |
 | WebSocket RFC | `wshost`, `wsport`, `ws_path` |
 | SOCKS5 proxy (SAP BTP) | `proxy_type="socks5"`, `proxy_host`, `proxy_port` (+ `proxy_jwt` / OAuth triple) |
 

@@ -174,7 +174,7 @@ a `.json` describing the field breakdown.
 | `aiohttp` | `wsproto` + `h11` over `asyncio` + `ssl` | Heavyweight, C-accelerated, owns its own loop. |
 | `cryptography` / `pyOpenSSL` / `pycryptodome` as core dep | `tlslite-ng` (AES, 3DES, RSA), `ecdsa` (EC), `asn1crypto` (DER/X.509), stdlib `ssl`/`hashlib`/`hmac` | Rust/C build step — violates the zero-native-dep constraint. |
 | `pyaes`, `pyDes`, hand-written ciphers | `tlslite-ng` | Unmaintained since 2016/2017, or self-built crypto. |
-| `python-gssapi` / `pykerberos` | pure-Python Kerberos (to be selected) | Both require MIT/Heimdal C libraries at build and runtime. `minikerberos` pulls `pycryptodomex` (C) via `unicrypto`, so it is not acceptable as a core dep either. |
+| `python-gssapi` / `pykerberos` / `impacket` / `minikerberos` | the in-tree `saprfclib.krb5` | The first two require MIT/Heimdal C libraries at build and runtime; `impacket` and `minikerberos` pull `pycryptodomex` (C). `saprfclib.krb5` builds the RFC 3961/3962/4120 constructions on `tlslite-ng` AES and `hashlib`. |
 | `numpy` for binary parsing | `struct` + `memoryview` + `bytearray` | Massive C dependency for what stdlib handles natively. |
 | `float` for ABAP decimal/BCD types | `decimal.Decimal` | Binary float can't represent base-10 exactly — corrupts financial data. |
 | bare `utf-16` codec | `utf-16-le` / `utf-16-be` | Bare `utf-16` emits and consumes a BOM the wire format does not have. |
@@ -216,8 +216,10 @@ src/saprfclib/
   session.py         client RFC session state machine           — sans-I/O
   server_session.py  server-side registration/listen machine    — sans-I/O
   snc.py             SNC frame codec + transport; GSS-API binding (ctypes to user-supplied lib)
-  secgss.py          built-in X.509 SNC mechanism (client), replaces the native lib — sans-I/O
+  secgss.py          built-in SNC mechanism (client, X.509 and Kerberos key exchange) — sans-I/O
   pse.py             PSE file reader → SncCredential                              — sans-I/O
+  krb5/              pure-Python Kerberos 5 client: RFC 3961/3962 AES crypto, RFC 4120
+                     messages + AS/TGS exchanges, MIT ccache/keytab readers, KerberosLogin
   transport.py       blocking NI/TCP socket transport (4-byte BE length prefix)
   ws.py              WebSocket RFC transport (wsproto + h11 over ssl)
   router.py          SAProuter route strings, message-server group logon
@@ -239,7 +241,7 @@ should not parse bytes itself. Keep new protocol logic in the sans-I/O layer.
 |------|---------|-------|
 | WebSocket framing | `wsproto` (sans-I/O) | Drives over our own `asyncio` + `ssl` transport. |
 | HTTP/1.1 upgrade | `h11` (sans-I/O) | Used for the WebSocket `Upgrade` handshake. |
-| Kerberos / SPNEGO | not selected yet | Must be pure Python end to end; see the table above. |
+| Kerberos | in-tree `saprfclib.krb5` | RFC constructions on `tlslite-ng` AES + `hashlib`; AES enctypes only. Used only when `snc_kerberos` is given. |
 | ASN.1 / X.509 | `asn1crypto` (pure Python) | Certificates, keys, SPKI for SNC. |
 | AES / 3DES / RSA | `tlslite-ng` (pure Python) | Record cipher, PSE decryption, handshake signatures. Uses faster backends automatically if installed. |
 | ECDH | `ecdsa` (pure Python) | Ephemeral P-256 key agreement in the SNC handshake. |
