@@ -38,7 +38,7 @@ def load_fixture(fixture_dir: Path, name: str) -> Fixture:
     json_path = fixture_dir / f"{name}.json"
     bin_path = fixture_dir / f"{name}.bin"
 
-    meta = json.loads(json_path.read_text())
+    meta = json.loads(json_path.read_text(encoding="utf-8"))
     raw = bin_path.read_bytes()
 
     # Validate required JSON schema keys (D-07)

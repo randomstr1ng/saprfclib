@@ -183,7 +183,11 @@ def default_ccache_path() -> str:
             f"credential cache type {kind.upper()}: cannot be read; use a FILE: cache"
         )
     if not hasattr(os, "getuid"):
-        raise CredentialCacheError("no KRB5CCNAME set and no default cache on this platform")
+        # Windows keeps logon tickets in LSA, which is not a file.
+        raise CredentialCacheError(
+            "no KRB5CCNAME set; Windows logon tickets cannot be read — pass "
+            "KerberosLogin(principal=..., password=... or keytab=...) or a FILE ccache"
+        )
     return f"/tmp/krb5cc_{os.getuid()}"
 
 

@@ -201,7 +201,7 @@ def test_key_repr_is_redacted():
 
 
 def test_keytab_from_mit_ktutil():
-    exp = json.loads((GOLDEN / "mit_keytab_v2.json").read_text())
+    exp = json.loads((GOLDEN / "mit_keytab_v2.json").read_text(encoding="utf-8"))
     entries = read_keytab((GOLDEN / "mit_keytab_v2.keytab").read_bytes())
     assert len(entries) == len(exp["entries"])
     for e, want in zip(entries, exp["entries"], strict=True):
@@ -215,7 +215,7 @@ def test_keytab_from_mit_ktutil():
 
 
 def test_ccache_from_mit():
-    exp = json.loads((GOLDEN / "mit_ccache_v4.json").read_text())
+    exp = json.loads((GOLDEN / "mit_ccache_v4.json").read_text(encoding="utf-8"))
     default, creds = read_ccache((GOLDEN / "mit_ccache_v4.ccache").read_bytes())
     assert str(default) == exp["default_principal"]
     assert [(str(c.server), c.session_key.enctype, len(c.ticket)) for c in creds] == [

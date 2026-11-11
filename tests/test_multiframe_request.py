@@ -90,7 +90,7 @@ class _Inner:
 
 
 def test_snc_chunked_send_matches_reference_headers():
-    ref = json.loads((G / "multiframe_request_snc.json").read_text())["frames"]
+    ref = json.loads((G / "multiframe_request_snc.json").read_text(encoding="utf-8"))["frames"]
     acc = b"\x06\xcb" + bytes(78) + build_snc_frame(b"SNCFRAME", 4, 3, 0x7E, gss_token=b"s")
     inner = _Inner([acc, acc])
     t = SncTransport(inner, snc_partnername="p:CN=X", gss_binding=_Mech())
