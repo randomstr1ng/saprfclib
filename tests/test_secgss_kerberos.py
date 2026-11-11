@@ -22,7 +22,9 @@ from saprfclib.krb5.crypto import Key
 from saprfclib.secgss import GSS_S_COMPLETE, GSS_S_CONTINUE_NEEDED, SecGssKerberosInitiator
 
 FX = json.loads(
-    (pathlib.Path(__file__).parent / "golden" / "snc" / "secgss_kerberos_loopback.json").read_text()
+    (pathlib.Path(__file__).parent / "golden" / "snc" / "secgss_kerberos_loopback.json").read_text(
+        encoding="utf-8"
+    )
 )
 
 

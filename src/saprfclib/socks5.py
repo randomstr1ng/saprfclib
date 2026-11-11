@@ -564,17 +564,19 @@ def _credentials_from_service_binding_root(root: str) -> Mapping[str, Any]:
         if not entry.is_dir():
             continue
         type_file = entry / "type"
-        is_connectivity = type_file.is_file() and type_file.read_text().strip() == "connectivity"
+        is_connectivity = (
+            type_file.is_file() and type_file.read_text(encoding="utf-8").strip() == "connectivity"
+        )
         creds_file = entry / "credentials"
         if creds_file.is_file():
-            creds: dict[str, Any] = json.loads(creds_file.read_text())
+            creds: dict[str, Any] = json.loads(creds_file.read_text(encoding="utf-8"))
             if is_connectivity or _SOCKS5_PORT_KEY in creds:
                 return creds
             continue
         # One file per key.
         files = {f.name: f for f in entry.iterdir() if f.is_file()}
         if is_connectivity or _SOCKS5_PORT_KEY in files:
-            return {name: f.read_text().strip() for name, f in files.items()}
+            return {name: f.read_text(encoding="utf-8").strip() for name, f in files.items()}
     raise ProxyError(f"no connectivity service binding found under {root!r}")
 
 

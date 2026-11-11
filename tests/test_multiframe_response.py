@@ -200,7 +200,9 @@ def test_every_response_read_reassembles() -> None:
     import re
     from pathlib import Path
 
-    src = (Path(__file__).parent.parent / "src" / "saprfclib" / "connection.py").read_text()
+    src = (Path(__file__).parent.parent / "src" / "saprfclib" / "connection.py").read_text(
+        encoding="utf-8"
+    )
     bare = re.findall(r"^\s*(?:\w+) = self\._transport\.recv_message\(\)", src, re.MULTILINE)
 
     # What legitimately remains is the NI/GW handshake loop, which exchanges

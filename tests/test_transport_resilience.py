@@ -27,7 +27,9 @@ def _listener() -> tuple[socket.socket, int]:
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
+    # Backlog above 1: Windows refuses a second pending connection at backlog 1,
+    # and these tests open more than one connection without accepting.
+    srv.listen(8)
     return srv, srv.getsockname()[1]
 
 

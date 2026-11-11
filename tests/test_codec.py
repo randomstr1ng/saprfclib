@@ -299,7 +299,7 @@ def test_decfloat_gap_marker_records_the_closure():
     """
     import json
 
-    marker = json.loads((SERIALIZATION_DIR / "type_decf16_GAP.json").read_text())
+    marker = json.loads((SERIALIZATION_DIR / "type_decf16_GAP.json").read_text(encoding="utf-8"))
     assert marker["gap_id"] == "GAP-B-01"
     assert marker["status"].startswith("CLOSED")
     assert marker["rfctype"]["RFCTYPE_DECF16"] == DECF16
@@ -334,7 +334,7 @@ def test_no_bare_utf16_in_codec_source():
 
     import saprfclib.codec as codec_mod
 
-    src = pathlib.Path(codec_mod.__file__).read_text()
+    src = pathlib.Path(codec_mod.__file__).read_text(encoding="utf-8")
     for line in src.splitlines():
         if "utf-16" in line and "-le" not in line and "-be" not in line:
             raise AssertionError(f"bare utf-16 found: {line!r}")
