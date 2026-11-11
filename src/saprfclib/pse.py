@@ -159,7 +159,8 @@ def _pkcs12_kdf(password: bytes, salt: bytes, purpose: int, iterations: int, n: 
     while len(out) < n:
         a = d + bytes(buf)
         for _ in range(iterations):
-            a = hashlib.sha1(a).digest()
+            # SHA-1 is fixed by the PKCS#12 KDF (RFC 7292 appendix B) the PSE uses.
+            a = hashlib.sha1(a).digest()  # nosemgrep: insecure-hash-algorithm-sha1
         out += a
         b = int.from_bytes((a * (v // u + 1))[:v], "big")
         for j in range(0, len(buf), v):
@@ -362,7 +363,8 @@ def load_pse(data: bytes, pin: str | None) -> SncCredential:
             plain = _unpad(_cbc(name, key, iv, ct.value, decrypt=True), _block(name))
         else:
             plain = ct.value
-        if hashlib.sha1(plain).digest() != digest.value:
+        # The PSE stores a SHA-1 digest of its content; reading it means checking SHA-1.
+        if hashlib.sha1(plain).digest() != digest.value:  # nosemgrep: insecure-hash-algorithm-sha1
             raise PseError("PSE integrity check failed (wrong PIN?)")
     else:
         raise PseError("unsupported PSE version")
@@ -405,7 +407,9 @@ def _lps_default_key(context: str) -> bytes:
     for _ in range(24):
         r = (r * 0x4E21) % 0x10001
         seed.append(r & 0xFF)
-    mac = hmac.new(hashlib.sha1(bytes(seed)).digest(), context.encode("ascii"), hashlib.sha1)
+    # SHA-1 is fixed by the LPS record format written by CommonCryptoLib.
+    seed_key = hashlib.sha1(bytes(seed)).digest()  # nosemgrep: insecure-hash-algorithm-sha1
+    mac = hmac.new(seed_key, context.encode("ascii"), hashlib.sha1)
     return mac.digest()[:16]
 
 
@@ -443,7 +447,9 @@ def _lps_unprotect(rec: bytes, context: str) -> bytes:
         raise PseError("LPS record is bound to a host or user; not supported")
     zero = b"\x00" * 16
     rand_key = _cbc("aes", _lps_default_key(ctx), zero, enc_key, decrypt=True)
-    expect = hmac.new(hashlib.sha1(rand_key).digest(), rec[:mac_at], hashlib.sha1).digest()
+    # SHA-1 is fixed by the LPS record format written by CommonCryptoLib.
+    mac_key = hashlib.sha1(rand_key).digest()  # nosemgrep: insecure-hash-algorithm-sha1
+    expect = hmac.new(mac_key, rec[:mac_at], hashlib.sha1).digest()
     if not hmac.compare_digest(expect, mac):
         raise PseError("corrupt LPS record")
     data = _cbc("aes", rand_key, zero, enc_data, decrypt=True)
