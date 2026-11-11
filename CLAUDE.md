@@ -313,5 +313,6 @@ hatch run lint:type                   # mypy strict over src/
 - Prefer a narrow, well-evidenced change over a broad plausible one.
 - When a capture contradicts this document, the capture wins — and update this document.
 - Propose changes as PRs; don't push directly to `main`.
-- For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, SNC SSO2, async wRFC/SNC),
+- For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, Kerberos suite `0x0008`,
+  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`),
   check the GitHub issues before starting — a capture requirement may be blocking.

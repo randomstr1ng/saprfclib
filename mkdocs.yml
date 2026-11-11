@@ -71,6 +71,7 @@ nav:
     - ConnectionPool: api/connection-pool.md
     - RfcServer: api/rfc-server.md
     - Logon Language: api/language.md
+    - SNC credentials: api/snc.md
     - Exceptions: api/exceptions.md
     - Stores: api/stores.md
     - Codec: api/codec.md
@@ -79,6 +80,7 @@ nav:
     - Serialization: protocol/serialization.md
     - Handshake: protocol/handshake.md
     - Message Server: protocol/message_server.md
+    - SOCKS5 / Cloud Connector: protocol/socks5.md
     - SNC: protocol/snc.md
     - SNC mechanism (built in): protocol/snc-mechanism.md
     - Kerberos: protocol/kerberos.md

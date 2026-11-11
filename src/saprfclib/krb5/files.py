@@ -10,9 +10,11 @@ keytab version 2 — the big-endian versions every current MIT and Heimdal relea
 writes. Versions 1 and 2 of the ccache format and version 1 of the keytab format
 use the writer's native byte order and are refused rather than guessed at.
 
-Only FILE ccaches can be read. ``KEYRING:``, ``KCM:``, ``API:`` and ``MSLSA:``
-caches live in the kernel, a daemon or the OS and are not reachable from pure
-Python; :func:`default_ccache_path` reports them as unsupported.
+Only FILE ccaches can be read. ``KEYRING:``, ``KCM:`` and ``API:`` caches live in the
+kernel or a daemon and are not reachable from pure Python;
+:func:`default_ccache_path` reports them as unsupported. Windows logon-session
+tickets (``MSLSA:``) are read through the OS API instead, see
+:mod:`saprfclib.krb5.lsa`.
 
 Entries whose encryption type this library does not implement (see
 :mod:`saprfclib.krb5.crypto`) are kept but carry no usable key: ``key`` is None.

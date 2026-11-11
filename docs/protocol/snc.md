@@ -181,8 +181,8 @@ released is a leak in a long-lived pooled connection.
 
 This binding is **provider-agnostic**: CommonCryptoLib (`libsapcrypto.so`, X.509),
 `libgssapi_krb5.so` (Kerberos), or any RFC 2744-compliant library works unchanged.
-`minikerberos` is deliberately **not** used — it does not implement `gss_wrap` / `gss_unwrap`
-for message protection above QOP 1.
+Without `snc_lib`, no GSS library is loaded at all: the built-in mechanism
+([snc-mechanism.md](snc-mechanism.md)) handles X.509 and Kerberos in Python.
 
 `ctypes` struct definitions (`gss_buffer_desc`, `gss_OID_desc`) follow RFC 2744 §3.1–3.2
 and were verified against `libgssapi_krb5.so.2`.

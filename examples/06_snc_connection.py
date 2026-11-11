@@ -14,6 +14,8 @@ def main() -> None:
     #   SAPRFC_SNC_PSE         PSE file for the built-in SNC mechanism, with SAPRFC_SNC_PSE_PIN
     #   SAPRFC_SNC_LIB         ...or the path to a GSS-API library (e.g. libsapcrypto.so)
     #   SAPRFC_SNC_PARTNERNAME Server's SNC name (e.g. "p:CN=A4H, OU=SAP, O=SAP SE, C=DE")
+    #   SAPRFC_SNC_SSO=1       optional: log on as the user mapped to the certificate's SNC
+    #                          name (SU01); no user/password is sent
     missing = [
         v for v in ("SAPRFC_ASHOST", "SAPRFC_SNC_PARTNERNAME") if not os.environ.get(v)
     ]
@@ -38,14 +40,15 @@ def main() -> None:
         ashost=os.environ["SAPRFC_ASHOST"],
         sysnr=int(os.environ.get("SAPRFC_SYSNR", "0")),
         client=os.environ.get("SAPRFC_CLIENT", "100"),
-        user=os.environ.get("SAPRFC_USER", ""),
-        passwd=os.environ.get("SAPRFC_PASSWD", ""),
+        user=os.environ.get("SAPRFC_USER") or None,
+        passwd=os.environ.get("SAPRFC_PASSWD") or None,
         snc_lib=None if snc_pse else snc_lib,
         snc_pse=snc_pse,
         snc_pse_pin=os.environ.get("SAPRFC_SNC_PSE_PIN"),
         snc_partnername=snc_partnername,
         snc_myname=snc_myname,      # None if not set — library uses its default identity
         snc_qop=snc_qop,
+        snc_sso=os.environ.get("SAPRFC_SNC_SSO") == "1",
     )
     try:
         result = conn.call("STFC_CONNECTION", REQUTEXT="SNC-encrypted call via saprfclib")
