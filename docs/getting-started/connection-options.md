@@ -75,8 +75,10 @@ conn = saprfclib.connect(
 ```
 
 For Kerberos SNC (single sign-on with Active Directory), pass `snc_kerberos=True` to use
-the ticket cache, or `snc_kerberos=KerberosLogin(...)` for a password, keytab or specific
-cache, with `snc_partnername="p:CN=<service>@<REALM>"` and usually `snc_sso=True`.
+the Windows logon session (on Windows) or the ticket cache, or
+`snc_kerberos=KerberosLogin(...)` for a password, keytab or specific cache, with
+`snc_partnername="p:CN=<name>@<REALM>"` (the same partner name as in SAP Logon) and
+usually `snc_sso=True`.
 
 To use a native GSS-API library instead (e.g. CommonCryptoLib), pass `snc_lib` with its
 absolute path and leave out `snc_pse`. See the [SNC cookbook](../cookbook/snc-connection.md)

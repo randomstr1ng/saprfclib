@@ -328,9 +328,10 @@ def parse_snc_frame(buf: bytes) -> tuple[int, int, int, bytes, bytes]:
         raise ValueError(
             f"SNC frame payload {token_len + data_len} exceeds cap {_MAX_FRAME_BYTES} (DoS guard)"
         )
-    # hdrlen=0 means no extension headers; otherwise token starts at hdrlen bytes
-    # from the start of the frame (hdrlen includes the 8-byte eye — confirmed by
-    # protocol analysis of the SNC frame builder). Standard hdrlen=0x18; extended (SSO2) hdrlen>0x18.
+    # hdrlen counts from the start of the frame, the 8-byte eye-catcher included: 0x18
+    # for the plain header, larger when an extension header follows (the reference
+    # client's first INIT frame carries the partner-name extension; golden fixture
+    # snc/snc_frame_headers.json). The GSS token starts at hdrlen.
     token_start = hdrlen if hdrlen >= _SNC_HEADER_SIZE else _SNC_HEADER_SIZE
     data_start = token_start + token_len
     gss_token = buf[token_start:data_start]
