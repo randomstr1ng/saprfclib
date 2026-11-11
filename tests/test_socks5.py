@@ -143,7 +143,16 @@ def test_parse_connect_reply_truncated() -> None:
         socks5.parse_connect_reply(b"\x05\x00")
 
 
-@given(st.text(min_size=1, max_size=400), st.text(max_size=100))
+# The location id's length prefix is one byte, so its base64 form is at most 255
+# bytes: 189 UTF-8 bytes encode to 252, 190 to 256. Characters, not bytes, would
+# let non-ASCII text cross that limit; the limit itself is tested separately.
+_LOC_MAX_UTF8 = 189
+
+
+@given(
+    st.text(min_size=1, max_size=400),
+    st.text(max_size=100).filter(lambda s: len(s.encode("utf-8")) <= _LOC_MAX_UTF8),
+)
 def test_jwt_auth_frame_roundtrips(jwt: str, loc: str) -> None:
     import base64 as _b64
 
@@ -157,6 +166,16 @@ def test_jwt_auth_frame_roundtrips(jwt: str, loc: str) -> None:
     expected_loc = _b64.b64encode(loc.encode("utf-8")) if loc else b""
     assert loc_len == len(expected_loc)
     assert body[jlen + 1 : jlen + 1 + loc_len] == expected_loc
+
+
+def test_jwt_auth_location_id_at_length_limit() -> None:
+    frame = socks5.build_jwt_auth("t", "é" * 94 + "a")  # 189 UTF-8 bytes
+    assert frame[6] == 252
+
+
+def test_jwt_auth_location_id_over_length_limit_raises() -> None:
+    with pytest.raises(ValueError, match="exceeds 255 bytes"):
+        socks5.build_jwt_auth("t", "é" * 95)  # 190 UTF-8 bytes -> 256 base64
 
 
 @given(st.integers(min_value=1, max_value=0xFFFF))
