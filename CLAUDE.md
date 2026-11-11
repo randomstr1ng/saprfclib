@@ -219,7 +219,8 @@ src/saprfclib/
   secgss.py          built-in SNC mechanism (client, X.509 and Kerberos key exchange) — sans-I/O
   pse.py             PSE file reader → SncCredential                              — sans-I/O
   krb5/              pure-Python Kerberos 5 client: RFC 3961/3962 AES crypto, RFC 4120
-                     messages + AS/TGS exchanges, MIT ccache/keytab readers, KerberosLogin
+                     messages + AS/TGS exchanges, MIT ccache/keytab readers, Windows
+                     logon-session tickets (LSA via ctypes to secur32.dll), KerberosLogin
   transport.py       blocking NI/TCP socket transport (4-byte BE length prefix)
   ws.py              WebSocket RFC transport (wsproto + h11 over ssl)
   router.py          SAProuter route strings, message-server group logon
@@ -241,7 +242,7 @@ should not parse bytes itself. Keep new protocol logic in the sans-I/O layer.
 |------|---------|-------|
 | WebSocket framing | `wsproto` (sans-I/O) | Drives over our own `asyncio` + `ssl` transport. |
 | HTTP/1.1 upgrade | `h11` (sans-I/O) | Used for the WebSocket `Upgrade` handshake. |
-| Kerberos | in-tree `saprfclib.krb5` | RFC constructions on `tlslite-ng` AES + `hashlib`; AES enctypes only. Used only when `snc_kerberos` is given. |
+| Kerberos | in-tree `saprfclib.krb5` | RFC constructions on `tlslite-ng` AES + `hashlib`; AES enctypes only. Used only when `snc_kerberos` is given. On Windows, tickets come from LSA through `ctypes` to `secur32.dll` — an OS API, not a third-party or SAP library. |
 | ASN.1 / X.509 | `asn1crypto` (pure Python) | Certificates, keys, SPKI for SNC. |
 | AES / 3DES / RSA | `tlslite-ng` (pure Python) | Record cipher, PSE decryption, handshake signatures. Uses faster backends automatically if installed. |
 | ECDH | `ecdsa` (pure Python) | Ephemeral P-256 key agreement in the SNC handshake. |

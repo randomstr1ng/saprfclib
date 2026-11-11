@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   async, multi-chunk requests and responses) and byte for byte against SAP
   CommonCryptoLib as the acceptor; see `docs/protocol/snc-mechanism.md` and
   `docs/protocol/kerberos.md`.
+- **Windows single sign-on for Kerberos SNC.** On Windows, `snc_kerberos=True` takes the
+  service ticket from the user's logon session through the Win32 LSA API
+  (`KerbRetrieveEncodedTicketMessage`), so a domain user logs on without a password,
+  KDC address or ticket cache. Confirmed live on Windows 11.
+- **Kerberos partner names as in SAP Logon.** For `p:CN=<name>@<REALM>` the ticket is
+  requested for `SAP/<name>@<REALM>` first, as SAP's own client does, then for
+  `<name>@<REALM>` when the domain does not know the SPN. Partner names that work in SAP
+  Logon now work unchanged.
 
 ### Changed
 
@@ -61,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("SEND_DATA in state RECEIVE_WAIT_FOR_DATA"). The X.509 exchange ends on a server
   token and is unaffected; GSS libraries passed with `snc_lib` that finish with an
   output token were affected.
+- **Text files are read as UTF-8 on every platform.** The SOCKS5 service-binding files
+  were read with the locale's codec, which is cp1252 on Windows. The offline test suite
+  now passes on Windows as well.
 
 - **Requests larger than 28000 bytes** reset the connection (`Connection reset by peer`),
   on plain RFC and over SNC — a long `OPTIONS` table was enough. They are now split into
