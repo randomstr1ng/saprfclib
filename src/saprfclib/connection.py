@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
+import functools
 import logging
 import os
 import random
@@ -47,13 +48,15 @@ import time
 import uuid
 import warnings
 from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
     CommunicationError,
+    LogonError,
     RetryExhausted,
     TransactionalError,
     WebSocketError,
@@ -102,6 +105,12 @@ from saprfclib.transport import (
     connect_tcp,
     connect_tcp_async,
 )
+
+if TYPE_CHECKING:
+    from saprfclib.krb5.client import Principal
+    from saprfclib.krb5.login import KerberosLogin
+    from saprfclib.secgss import SecGssInitiator, SecGssKerberosInitiator, SncCredential
+
 from saprfclib.types import (
     RFC_EXPORT,
     RFC_IMPORT,
@@ -110,6 +119,7 @@ from saprfclib.types import (
     TypeDesc,
 )
 
+_T = TypeVar("_T")
 _logger = logging.getLogger(__name__)
 
 __all__ = ["Connection", "AsyncConnection", "connect", "connect_async"]
@@ -130,6 +140,10 @@ _TAG_TERMINATOR = 0xFFFF
 _TAG_CLIENT = 0x0114
 _TAG_USER = 0x0111
 _TAG_PASSWORD = 0x0117
+# Empty record the reference client adds to an SNC logon that uses a password
+# (absent when it logs on with the SNC identity). Source: golden fixture
+# snc/snc_logon_tlvs.json.
+_TAG_SNC_PASSWORD_LOGON = 0x0675
 _RFCPING_NAME = b"RFCPING"
 
 # ---------------------------------------------------------------------------
@@ -186,14 +200,11 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 # /SAPDS/RFC_ABAP_INSTALL_RUN, for one). Verified across all nine request
 # fixtures: the BE uint32 at [0:4] equals len(tlv_body) exactly in each.
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
-# Client tail at [76:80] of an 80-byte control frame (GW_INFO, GW_DONE_CLIENT):
-# [76:78] = 0xffff, [78:80] = 0x0004. Live logons complete with this value.
-# The low half is not universal -- committed request captures carry 0x0004 and
-# 0x0001 at [78:80] (compare framing/rfcping_request.bin against
-# framing/logon_request.bin), and the gateway accepted both, so it varies with the
-# connection rather than identifying a malformed frame. Do not validate on it.
+# Client tail at [76:80] of every client frame after GW_CONNECT: FF FF followed by
+# the connection index the gateway assigned (see _client_tail). These two are only
+# the fallbacks for frames built without a live session -- the values earlier
+# releases always sent, which gateways accepted. Do not validate on them.
 _GW_CLIENT_TAIL = 0xFFFF0004
-# With SNC active the low half is 0x0009. Source: live SNC capture, 2026-07.
 _GW_CLIENT_TAIL_SNC = 0xFFFF0009
 
 # RFC logon frame tail and header. Source: framing/logon_request.bin.
@@ -201,6 +212,22 @@ _GW_CLIENT_TAIL_SNC = 0xFFFF0009
 # low half is not a value to check incoming frames against.
 # _COM_HEAD: EBCDIC "RFC000000000" = 0xD9 0xC6 0xC3 = EBCDIC R/F/C, 0xF0*9 = EBCDIC '0'*9.
 _RFC_MARKER = b"\xff\xff\x00\x04"
+
+
+def _client_tail(conn_idx: int | None, *, snc: bool = False) -> int:
+    """Value of GW header bytes [76:80] on client frames after GW_CONNECT.
+
+    ``FF FF`` followed by the connection index the gateway assigned in its CONNECT
+    reply. Source: golden fixture snc/snc_frame_headers.json ("connection_index"):
+    three parallel connections, plain and SNC, each echo their own assigned index
+    (3/0/1 and 1/0/3). When the index is not known — frames built outside a live
+    session — the values earlier releases sent are kept; gateways accept them.
+    """
+    if conn_idx is None:
+        return _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL
+    return 0xFFFF0000 | (conn_idx & 0xFFFF)
+
+
 _COM_HEAD = b"\xd9\xc6\xc3\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0\xf0"  # EBCDIC "RFC000000000"
 
 # Fixed logon TLV values, taken from the PKT 14 wire capture and confirmed by live
@@ -236,6 +263,44 @@ _AB_SCRAMBLE_KT = bytes.fromhex(
     "5e5398789a17a33cd383a8b829fbdca5"
     "55d7027784 13acddf9b8311 6610e6dfa".replace(" ", "")
 )
+
+
+# --- Large requests: split into GW frames of at most 28000 payload bytes --------
+#
+# A gateway resets the connection when one client frame carries a TLV stream of
+# more than 28000 bytes: probed live, a 27998-byte stream (plus the 8-byte footer)
+# is accepted in one frame and a 28002-byte one is reset. The reference client
+# sends a larger request the TLV stream, without the 8-byte footer, in frames
+# of type 0x0608 carrying up to 28000 bytes each, followed by an 80-byte header-only
+# frame of type 0x0609. In the 0x0608 headers [24:32] are zero and [48:52] is the
+# payload length; the 0x0609 header carries 0x00000100 at [28:32] and 28000 at
+# [48:52] (whether that is the chunk size or a leftover is not established; it is
+# what the reference sends). Source: golden fixtures framing/multiframe_request_*.
+_GW_TYPE_REQUEST_CHUNK = 0x0608
+_GW_TYPE_REQUEST_END = 0x0609
+_GW_REQUEST_CHUNK = 28000
+
+
+def _gw_request_frames(frame: bytes) -> list[bytes]:
+    """Split one GW-framed request into the frames the gateway accepts."""
+    if len(frame) - 88 <= _GW_REQUEST_CHUNK:  # 80-byte header, 8-byte footer
+        return [frame]
+    header, body = frame[:80], frame[80:-8]  # the footer is not sent when chunked
+    out: list[bytes] = []
+    for i in range(0, len(body), _GW_REQUEST_CHUNK):
+        chunk = body[i : i + _GW_REQUEST_CHUNK]
+        h = bytearray(header)
+        struct.pack_into(">H", h, 0, _GW_TYPE_REQUEST_CHUNK)
+        h[24:32] = bytes(8)
+        struct.pack_into(">I", h, 48, len(chunk))
+        out.append(bytes(h) + chunk)
+    end = bytearray(header)
+    struct.pack_into(">H", end, 0, _GW_TYPE_REQUEST_END)
+    end[24:28] = bytes(4)
+    struct.pack_into(">I", end, 28, 0x100)
+    struct.pack_into(">I", end, 48, _GW_REQUEST_CHUNK)
+    out.append(bytes(end))
+    return out
 
 
 def _tlv(tag: int, value: bytes) -> bytes:
@@ -547,7 +612,7 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
             msg = err.decode("utf-8", errors="replace")
         except Exception:
             msg = err.hex()
-        raise ValueError(f"wRFC logon failed: {msg}")
+        raise LogonError(f"wRFC logon failed: {msg}")
 
     raise ValueError("wRFC logon response missing system ID (0x0450)")
 
@@ -716,7 +781,12 @@ def _strip_gw_header(resp: bytes) -> bytes:
 
 
 def _resolve_credentials(
-    user: str | None, passwd: str | None, *, snc_lib: str | None, ashost: str
+    user: str | None,
+    passwd: str | None,
+    *,
+    snc_lib: str | None,
+    ashost: str,
+    snc: bool | None = None,
 ) -> tuple[str | None, str | None]:
     """Decide whether this connection carries credentials, and sanity-check them.
 
@@ -730,7 +800,7 @@ def _resolve_credentials(
     anonymously, it is a missing environment variable or a typo, and turning it into
     a silent anonymous attempt would replace a clear error with a confusing one.
     """
-    if snc_lib is not None:
+    if snc or (snc is None and snc_lib is not None):
         return user, passwd
     if user is None and passwd is None:
         _logger.warning(
@@ -747,6 +817,112 @@ def _resolve_credentials(
             f"to authenticate, or neither to attempt an anonymous connection."
         )
     return user, passwd
+
+
+def _builtin_snc_mechanism(
+    partner_name: str,
+    *,
+    snc_myname: str | None,
+    snc_pse: str | os.PathLike[str] | None,
+    snc_pse_pin: str | None,
+    snc_credential: SncCredential | None,
+) -> SecGssInitiator:
+    """Build the pure-Python SNC initiator from a PSE file or an explicit credential.
+
+    ``snc_myname``, when given, must name the own certificate: it is checked
+    against the certificate subject with the same rules the server applies to the
+    partner name, so a mismatch fails here instead of at the server.
+
+    Security: the PSE path, PIN and names never reach a log or exception message.
+    """
+    from saprfclib.pse import load_pse, load_secudir_credential, pin_for_pse
+    from saprfclib.secgss import SecGssInitiator, own_name_matches
+
+    if snc_pse is not None and snc_credential is not None:
+        raise ValueError("pass at most one of snc_pse or snc_credential for built-in SNC")
+    if snc_credential is None:
+        if snc_pse is None:
+            # Neither given: pick the credential from SECUDIR the way CommonCryptoLib
+            # does (cred_v2 entry matching snc_myname, else the first usable one).
+            snc_credential = load_secudir_credential(myname=snc_myname)
+        else:
+            pin = snc_pse_pin if snc_pse_pin is not None else pin_for_pse(snc_pse)
+            with open(snc_pse, "rb") as fh:
+                snc_credential = load_pse(fh.read(), pin)
+    if snc_myname is not None and not own_name_matches(snc_credential, snc_myname):
+        raise ValueError("snc_myname does not match the certificate in the SNC credential")
+    return SecGssInitiator(snc_credential, partner_name)
+
+
+_OID_CN = "2.5.4.3"  # X.520 commonName, as parse_snc_name reports it
+
+
+def kerberos_service_principal(partner_name: str) -> Principal:
+    """The Kerberos principal written in a Kerberos SNC name ``p:CN=<name>@<REALM>``.
+
+    The SNC name of a Kerberos service is a single ``CN`` holding a principal in
+    ``name@REALM`` form. See :func:`kerberos_service_principals` for the principals
+    a ticket is requested for.
+    """
+    from saprfclib.krb5.client import Principal
+    from saprfclib.secgss import parse_snc_name
+
+    rdns = parse_snc_name(partner_name)
+    if len(rdns) != 1 or rdns[0][0] != _OID_CN or "@" not in rdns[0][1]:
+        raise ValueError("a Kerberos SNC partner name has the form p:CN=<service>@<REALM>")
+    return Principal.parse(rdns[0][1])
+
+
+def kerberos_service_principals(partner_name: str) -> tuple[Principal, ...]:
+    """The principals to request a ticket for, in order, for a Kerberos SNC partner.
+
+    For ``p:CN=<name>@<REALM>`` with a single-component ``<name>``, SAP's own
+    Kerberos SNC client requests a ticket for the service principal
+    ``SAP/<name>@<REALM>`` (observed: its TGS-REQ for partner ``CN=A4H@<REALM>``
+    names ``SAP/A4H``, NT-SRV-INST), which is the SPN SAP has administrators
+    register on the service account. That is tried first. ``<name>@<REALM>``
+    itself follows, since Active Directory also issues a ticket for the service
+    account's own name (observed live), so partner names that name the account
+    keep working. A ``<name>`` that already has an instance (``SAP/A4H``) is used
+    as written.
+    """
+    from saprfclib.krb5.client import Principal
+    from saprfclib.krb5.messages import NT_SRV_INST
+
+    written = kerberos_service_principal(partner_name)
+    if len(written.components) > 1:
+        return (written,)
+    spn = Principal(("SAP", *written.components), written.realm, NT_SRV_INST)
+    return (spn, written)
+
+
+def _builtin_kerberos_mechanism(
+    partner_name: str,
+    *,
+    snc_myname: str | None,
+    login: KerberosLogin | None,
+    timeout: float | None,
+) -> SecGssKerberosInitiator:
+    """Get a service ticket for the partner and build the Kerberos SNC initiator.
+
+    ``snc_myname``, when given, must name the ticket's client principal
+    (``p:CN=<user>@<REALM>``, compared case-insensitively), so a mismatch fails here.
+
+    Security: the password, keys and tickets never reach a log or exception message.
+    """
+    from saprfclib.krb5.login import KerberosLogin, obtain_service_ticket
+    from saprfclib.secgss import SecGssKerberosInitiator, parse_snc_name
+
+    services = kerberos_service_principals(partner_name)
+    ticket = obtain_service_ticket(
+        login or KerberosLogin(), services, timeout=timeout if timeout is not None else 10.0
+    )
+    if snc_myname is not None:
+        mine = parse_snc_name(snc_myname)
+        want = ((_OID_CN, str(ticket.client)),)
+        if [(k, v.upper()) for k, v in mine] != [(k, v.upper()) for k, v in want]:
+            raise ValueError("snc_myname does not match the Kerberos client principal")
+    return SecGssKerberosInitiator(ticket)
 
 
 def _filter_call_params(
@@ -1799,6 +1975,7 @@ class Connection:
         self._metrics = ConnectionMetrics()
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
         self._snc_mode: bool = False
+        self._snc_sso: bool = False
         # 16 bytes proposed by this client in the LOGON's 0x0514 and echoed in the
         # reply, so a caller can correlate the session.
         self._ws_session_token: bytes = b""
@@ -1831,6 +2008,7 @@ class Connection:
         inst._cache = async_conn._cache
         inst._struct_desc_cache = async_conn._struct_desc_cache
         inst._snc_mode = False
+        inst._snc_sso = False
         inst._ws_auth = None
         inst._async_conn = async_conn
         inst._loop_thread = loop_thread
@@ -2022,7 +2200,7 @@ class Connection:
                 # GW_DONE (not between GW_CONNECT and GW_INFO, as first assumed).
                 if prev_state is SessionState.GW_CONNECTED:
                     if hasattr(self._transport, "activate_snc"):
-                        self._transport.activate_snc(self._session.handle)
+                        self._transport.activate_snc(self._session.handle, self._session.conn_idx)
                 for req in self._build_leg_requests(
                     prev_state,
                     client=client,
@@ -2059,19 +2237,28 @@ class Connection:
                 return [self._build_gw_connect_request(gwhost, sysnr, snc=self._snc_mode)]
             case SessionState.NI_VERSIONED:
                 return [
-                    self._build_gw_info(handle, gwhost, snc=self._snc_mode),
-                    self._build_gw_done_client(handle, snc=self._snc_mode),
+                    self._build_gw_info(
+                        handle, gwhost, snc=self._snc_mode, conn_idx=self._session.conn_idx
+                    ),
+                    self._build_gw_done_client(
+                        handle, snc=self._snc_mode, conn_idx=self._session.conn_idx
+                    ),
                 ]
             case SessionState.GW_CONNECTED:
                 tlv = self._build_logon_request(
-                    client=client, user=user, passwd=passwd, local_ip=local_ip, lang=lang
+                    client=client,
+                    user=user,
+                    passwd=passwd,
+                    local_ip=local_ip,
+                    lang=lang,
+                    snc_password_logon=self._snc_mode and not self._snc_sso,
                 )
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
                     # Outer GW-SNC header (80B) is added by SncTransport._build_gw_snc_frame.
                     # protocol analysis STIntSend/the SNC output path: arg4 (plain data) = COM_HEAD + TLV — no GW header.
                     return [_COM_HEAD + tlv]
-                return [self._build_logon_frame(handle, tlv)]
+                return [self._build_logon_frame(handle, tlv, conn_idx=self._session.conn_idx)]
             case _:
                 return []
 
@@ -2149,7 +2336,9 @@ class Connection:
         return bytes(payload)
 
     @staticmethod
-    def _build_gw_info(handle: bytes, gwhost: str, *, snc: bool = False) -> bytes:
+    def _build_gw_info(
+        handle: bytes, gwhost: str, *, snc: bool = False, conn_idx: int | None = None
+    ) -> bytes:
         """Build the 224-byte GW_INFO payload (PKT 10 capture; no server response).
 
         ``gwhost`` is the gateway host written into the frame (see
@@ -2182,7 +2371,7 @@ class Connection:
         payload[40:48] = handle
         payload[48:56] = gwhost[:8].ljust(8).encode("ascii")
         struct.pack_into(">I", payload, 56, len(gwhost))
-        struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
+        struct.pack_into(">I", payload, 76, _client_tail(conn_idx, snc=snc))
         # Server IP padded with spaces to 112 bytes at payload[80]
         ip_b = gwhost.encode("ascii")
         padded = ip_b + b" " * (112 - len(ip_b))
@@ -2190,7 +2379,9 @@ class Connection:
         return bytes(payload)
 
     @staticmethod
-    def _build_gw_done_client(handle: bytes, *, snc: bool = False) -> bytes:
+    def _build_gw_done_client(
+        handle: bytes, *, snc: bool = False, conn_idx: int | None = None
+    ) -> bytes:
         """Build the 80-byte GW_DONE_CLIENT payload (golden fixture + confirmed).
 
         Confirmed from the GW_DONE frame builder.
@@ -2212,11 +2403,13 @@ class Connection:
         struct.pack_into(">I", payload, 4, _GW_FLAGS)
         payload[28:32] = b"\x00\x00\x01\x00"  # [30]=1 confirmed
         payload[40:48] = handle
-        struct.pack_into(">I", payload, 76, _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
+        struct.pack_into(">I", payload, 76, _client_tail(conn_idx, snc=snc))
         return bytes(payload)
 
     @staticmethod
-    def _build_logon_frame(handle: bytes, tlv_body: bytes, *, snc: bool = False) -> bytes:
+    def _build_logon_frame(
+        handle: bytes, tlv_body: bytes, *, snc: bool = False, conn_idx: int | None = None
+    ) -> bytes:
         """Wrap TLV body in the RFC logon frame: GW header (76B) + RFC marker + COM_HEAD + TLV.
 
         Byte layout confirmed from stfc_connection.pcapng PKT 14 hex dump:
@@ -2236,11 +2429,13 @@ class Connection:
         struct.pack_into(">I", gw, 24, _GW_HDR_APPC_VER)
         struct.pack_into(">I", gw, 28, _GW_HDR_MAX_LEN)
         gw[40:48] = handle
-        marker = struct.pack(">I", _GW_CLIENT_TAIL_SNC if snc else _GW_CLIENT_TAIL)
+        marker = struct.pack(">I", _client_tail(conn_idx, snc=snc))
         return bytes(gw) + marker + _COM_HEAD + tlv_body
 
     @staticmethod
-    def _build_invoke_frame(handle: bytes, tlv_body: bytes) -> bytes:
+    def _build_invoke_frame(
+        handle: bytes, tlv_body: bytes, *, conn_idx: int | None = None
+    ) -> bytes:
         """Wrap TLV body in an RFC invoke frame: GW header (76B) + RFC marker + TLV.
 
         Invoke frames omit COM_HEAD (present only in the logon frame). Confirmed by
@@ -2275,7 +2470,8 @@ class Connection:
         struct.pack_into(">I", gw, 28, _GW_HDR_MAX_LEN)
         gw[40:48] = handle
         footer = struct.pack(">I", len(tlv_body)) + _INVOKE_FOOTER_MAGIC
-        return bytes(gw) + _RFC_MARKER + tlv_body + footer
+        marker = struct.pack(">I", _client_tail(conn_idx))
+        return bytes(gw) + marker + tlv_body + footer
 
     def _send_invoke_frame(self, frame: bytes) -> None:
         """Send an RFC invoke frame to the transport.
@@ -2291,9 +2487,15 @@ class Connection:
         so no WsTransport branch is needed here.
         """
         if self._snc_mode:
-            self._transport.send_message(frame[80:])
+            if len(frame) - 88 > _GW_REQUEST_CHUNK and hasattr(self._transport, "send_chunked"):
+                # The SNC transport wraps each chunk of the TLV stream (no footer)
+                # separately; see SncTransport.send_chunked.
+                self._transport.send_chunked(frame[80:-8], _GW_REQUEST_CHUNK)
+            else:
+                self._transport.send_message(frame[80:])
         else:
-            self._transport.send_message(frame)
+            for part in _gw_request_frames(frame):
+                self._transport.send_message(part)
 
     @staticmethod
     def _build_logon_request(
@@ -2305,8 +2507,15 @@ class Connection:
         local_ip: str = "127.0.0.1",
         program_name: bytes = b"python3",
         lang: str = _DEFAULT_LANG,
+        snc_password_logon: bool = False,
     ) -> bytes:
         """Build the RFC logon TLV body in extended wire format (tag+len+val+tag).
+
+        ``snc_password_logon`` marks an SNC connection that logs on with user and
+        password rather than with its SNC identity: the reference client then adds
+        an empty tag 0x0675 after the language record (golden fixture
+        snc/snc_logon_tlvs.json). An SNC-identity logon (``snc_sso``) passes
+        ``passwd=None`` and leaves the flag off, which omits 0x0117 and 0x0675.
 
         Emits the scrambled password record (tag 0x0117) per the RE-confirmed
         derivation (Plan 04-01: ``seed(4B) + scramble(password, seed)``). The
@@ -2340,6 +2549,7 @@ class Connection:
             # 0x0115 and 0x0011 both carry the logon language in the capture
             # (golden logon_request.bin: b"E" on each).
             _tlv_ext(0x0115, _encode_logon_language(lang)),
+            *([_tlv_ext(_TAG_SNC_PASSWORD_LOGON, b"")] if snc_password_logon else []),
             _tlv_ext(0x0501, b"\x01"),
             _tlv_ext(0x0007, b"127.0.0.1"),
             _tlv_ext(0x0011, _encode_logon_language(lang)),
@@ -2653,7 +2863,7 @@ class Connection:
             # Raw TLV cannot be sent directly — server validates the GW header and
             # rejects the frame with "wrong apppc header version" if bare TLV is sent.
             handle = self._session.handle or b"        "
-            frame = self._build_invoke_frame(handle, request_tlv)
+            frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
             self._send_invoke_frame(frame)
             # A function interface can be large -- 44 parameters already fill 2342
             # bytes -- so this reply chunks like any other.
@@ -2781,7 +2991,7 @@ class Connection:
             "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
         )
         handle = self._session.handle or b"        "
-        frame = self._build_invoke_frame(handle, request_tlv)
+        frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
         self._send_invoke_frame(frame)
         response = _join_response_frames(self._transport.recv_message, "DDIF_FIELDINFO_GET")
         raise_for_rfc_error(_strip_gw_header(response))
@@ -2879,7 +3089,7 @@ class Connection:
                 {"TABNAME": tabname},
             )
             handle = self._session.handle or b"        "
-            frame = self._build_invoke_frame(handle, request_tlv)
+            frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
             self._send_invoke_frame(frame)
 
         # A DDIC structure definition is a table of field rows and can exceed one
@@ -2934,7 +3144,11 @@ class Connection:
                     self._transport.send_message(frame)
                 else:
                     handle = self._session.handle or b"        "
-                    self._send_invoke_frame(self._build_invoke_frame(handle, request_tlv))
+                    self._send_invoke_frame(
+                        self._build_invoke_frame(
+                            handle, request_tlv, conn_idx=self._session.conn_idx
+                        )
+                    )
                 with _fail_closed(self._session, "RFCPING"):
                     resp = _join_response_frames(self._transport.recv_message, "RFCPING")
                     return self._rfcping_ok(resp)
@@ -3227,7 +3441,9 @@ class Connection:
                     request_tlv = build_invoke_request(func_name, desc, call_params)
                     dm_names = dm_table_ids(desc, call_params)
                     handle = self._session.handle or b"        "
-                    request = self._build_invoke_frame(handle, request_tlv)
+                    request = self._build_invoke_frame(
+                        handle, request_tlv, conn_idx=self._session.conn_idx
+                    )
                     with _fail_closed(self._session, func_name):
                         self._send_invoke_frame(request)
                         tlv_response = _join_response_frames(
@@ -3353,7 +3569,9 @@ class Connection:
             try:
                 request_tlv = build_trfc_request(tid, func_name, queue=queue)
                 handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
+                request = self._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     self._send_invoke_frame(request)
                     response = _join_response_frames(self._transport.recv_message, func_name)
@@ -3405,7 +3623,9 @@ class Connection:
             try:
                 request_tlv = build_trfc_confirm_request(tid)
                 handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
+                request = self._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     self._send_invoke_frame(request)
                     response = _join_response_frames(
@@ -3499,7 +3719,9 @@ class Connection:
             try:
                 request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
                 handle = self._session.handle or b"        "
-                request = self._build_invoke_frame(handle, request_tlv)
+                request = self._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
                     self._send_invoke_frame(request)
                     response = _join_response_frames(
@@ -4114,6 +4336,10 @@ def connect(
     snc_myname: str | None = None,
     snc_qop: int | None = None,
     snc_sso: bool | None = None,
+    snc_pse: str | os.PathLike[str] | None = None,
+    snc_pse_pin: str | None = None,
+    snc_credential: SncCredential | None = None,
+    snc_kerberos: bool | KerberosLogin | None = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     tid_store: TidStore | None = None,
@@ -4130,12 +4356,18 @@ def connect(
         ``connect_ws`` (SEC-05, D-16/D-17). ``wsport`` defaults to 443 and
         ``ws_path`` to ``/sap/bc/rfc`` (D-19). Optional ``ws_proxy_*`` params
         tunnel the connection through an HTTP CONNECT forward proxy (D-20).
-      - SNC (Secure Network Communications): ``snc_lib`` set (and ``wshost``
-        absent) → wrap the direct-TCP transport in an :class:`~saprfclib.snc.SncTransport`
-        that drives the GSS-API handshake to COMPLETE before any data is sent
-        (SEC-02/03/04/06, D-13). ``snc_lib`` presence is the activation switch —
-        there is no separate mode flag. ``snc_sso`` defaults to False (D-12).
-        ``wshost`` takes precedence: SNC-over-wRFC is out of scope for Phase 7.
+      - SNC (Secure Network Communications): ``snc_pse``, ``snc_credential`` or
+        ``snc_lib`` set (and ``wshost`` absent) → wrap the direct-TCP transport in an
+        :class:`~saprfclib.snc.SncTransport` that drives the GSS-API handshake to
+        COMPLETE before any data is sent (SEC-02/03/04/06, D-13). ``snc_partnername``
+        is required. With ``snc_pse`` (a PSE file, unlocked with ``snc_pse_pin``) or
+        ``snc_credential`` the built-in X.509 mechanism (:mod:`saprfclib.secgss`) is
+        used and no SAP library is needed; with ``snc_lib`` the named GSS-API library
+        is loaded instead. ``snc_kerberos`` selects the built-in Kerberos key exchange
+        instead: ``True`` takes the ticket from the FILE ticket cache, a
+        :class:`saprfclib.krb5.KerberosLogin` from a password, keytab or named cache;
+        ``snc_partnername`` is then ``p:CN=<service>@<REALM>``. ``snc_sso`` defaults to
+        False (D-12). ``wshost`` takes precedence: SNC-over-wRFC is out of scope.
 
         ``snc_qop`` selects the protection level and defaults to 3. Accepted
         values are 1 (authentication only), 2 (integrity), 3 (privacy),
@@ -4227,18 +4459,38 @@ def connect(
     whether the entry count is carried in the header or only implied by the
     payload length. ``passwd``,
     ``ws_proxy_pass``, ``proxy_jwt``, ``proxy_client_secret``, ``snc_lib``,
+    ``snc_pse``, ``snc_pse_pin``, ``snc_credential``, ``snc_kerberos``,
     ``snc_partnername`` and ``snc_myname`` are never logged or echoed into any log
     message or exception string (threats T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
     # Imported lazily so the direct-TCP facade carries no hard dependency on the
     # alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
+        first_hop_address,
         open_route,
         open_route_async,
         parse_route_string,
     )
 
-    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
+    # A partner name alone switches SNC on, as it does in the NW RFC SDK: silently
+    # connecting without SNC to a system the caller named an SNC partner for would
+    # be the wrong way to fail.
+    snc_enabled = (
+        snc_lib is not None
+        or snc_pse is not None
+        or snc_credential is not None
+        or bool(snc_kerberos)
+        or snc_partnername is not None
+    )
+    if snc_sso and not snc_enabled:
+        raise ValueError("snc_sso logs on with the SNC identity; it needs SNC (snc_pse or snc_lib)")
+    if snc_sso and passwd is not None:
+        # Same as the reference client: with SNC logon the password is not sent.
+        _logger.warning("snc_sso is set: the password is ignored and not sent")
+        passwd = None
+    user, passwd = _resolve_credentials(
+        user, passwd, snc_lib=snc_lib, ashost=ashost, snc=snc_enabled
+    )
 
     # SOCKS5 proxy (issue #51, D-39/40/41). Build a socket_factory once; it reaches
     # the gateway through the proxy and everything above the socket is unchanged.
@@ -4287,7 +4539,16 @@ def connect(
     # gateway reachable at its own address; it does not survive NAT, a port-forward
     # or a jump host, and there the caller knows the port and the library cannot
     # derive it. When None nothing changes, so the SNC branch still defaults to 4800.
-    port = port if port is not None else (4800 if snc_lib is not None else 3300) + sysnr
+    port = port if port is not None else (4800 if snc_enabled else 3300) + sysnr
+
+    # SAProuter: the TCP connection goes to the FIRST router; the NI_ROUTE frame
+    # names the remaining routers and, last, the gateway (ashost:port). The route
+    # is opened before anything else is sent on the socket. Source: golden fixtures
+    # router/ni_route_two_hops*.bin (reference client through two routers).
+    route_hops = parse_route_string(saprouter) if saprouter is not None else None
+    if route_hops is not None and wshost is not None:
+        raise ValueError("saprouter cannot be combined with wshost (WebSocket RFC)")
+    tcp_host, tcp_port = first_hop_address(route_hops) if route_hops else (ashost, port)
 
     # ------------------------------------------------------------------ #
     # Transport routing (Phase 7): wRFC first, then SNC, then plain TCP.  #
@@ -4324,7 +4585,7 @@ def connect(
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
-    elif snc_lib is not None:
+    elif snc_enabled:
         # SNC (SEC-02/03/04/06, D-13): SAP protocol order requires the NI
         # version exchange to complete on the plain channel BEFORE the GSS
         # frames are sent. SncTransport then drives FR_INIT/FR_ACCEPT to
@@ -4334,15 +4595,45 @@ def connect(
         # straight through — never placed into a log or an exception string.
         from saprfclib.snc import SncTransport, validate_snc_qop
 
+        if snc_partnername is None:
+            raise ValueError("SNC needs snc_partnername, the server's SNC name (p:CN=...)")
+        _mech: SecGssInitiator | SecGssKerberosInitiator | None
+        if snc_kerberos:
+            if snc_lib is not None or snc_pse is not None or snc_credential is not None:
+                raise ValueError(
+                    "snc_kerberos selects the built-in Kerberos mechanism; it cannot be "
+                    "combined with snc_lib, snc_pse or snc_credential"
+                )
+            _mech = _builtin_kerberos_mechanism(
+                snc_partnername,
+                snc_myname=snc_myname,
+                login=None if snc_kerberos is True else snc_kerberos,
+                timeout=connect_timeout,
+            )
+        elif snc_lib is not None:
+            _mech = None
+        else:
+            _mech = _builtin_snc_mechanism(
+                snc_partnername,
+                snc_myname=snc_myname,
+                snc_pse=snc_pse,
+                snc_pse_pin=snc_pse_pin,
+                snc_credential=snc_credential,
+            )
+
         _inner = connect_tcp(
-            ashost,
-            port,
+            tcp_host,
+            tcp_port,
             timeout=timeout,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
             trace=trace,
             socket_factory=socket_factory,
         )
+        if route_hops is not None:
+            # The route comes first: routers forward everything after NI_PONG
+            # unchanged, so the SNC session runs end to end through them.
+            open_route(_inner, route_hops, ashost, str(port))
 
         # Step 1: NI version exchange on the plain inner transport.
         _snc_sess = Session(allow_restricted_logon=allow_restricted_logon)
@@ -4358,10 +4649,10 @@ def connect(
         transport = SncTransport(  # type: ignore[assignment]
             _inner,
             snc_lib=snc_lib,
-            snc_partnername=snc_partnername,  # type: ignore[arg-type]
+            snc_partnername=snc_partnername,
             snc_myname=snc_myname,
             snc_qop=validate_snc_qop(snc_qop or 3),  # D-12: privacy is the default QOP
-            snc_sso=snc_sso or False,  # D-12: SSO2 off by default (D-23 gap)
+            gss_binding=_mech,
         )
 
         # Step 3: Connection with the pre-versioned session so _handshake()
@@ -4373,8 +4664,10 @@ def connect(
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
+        _snc_sess.gw_header_stripped = True
         conn._session = _snc_sess
         conn._snc_mode = True
+        conn._snc_sso = bool(snc_sso)
     else:
         # ------------------------------------------------------------------ #
         # Classic async-core path (D-06/D-07): direct TCP / SAProuter /       #
@@ -4388,12 +4681,14 @@ def connect(
         # Capture locals for the async closure (avoid late-binding issues).
         _ashost = ashost
         _port = port
+        _tcp_host = tcp_host
+        _tcp_port = tcp_port
+        _route_hops = route_hops
         _timeout = timeout
         _connect_timeout = connect_timeout
         _read_timeout = read_timeout
         _metadata_cache = metadata_cache
         _metadata_cache_key = metadata_cache_key
-        _saprouter = saprouter
         _client = client
         _user = user
         _passwd = passwd
@@ -4413,8 +4708,8 @@ def connect(
             # connect_async() uses real asyncio open_connection for non-blocking I/O.
             # This keeps the existing test suite (which patches connect_tcp) green (D-07).
             sync_t = connect_tcp(
-                _ashost,
-                _port,
+                _tcp_host,
+                _tcp_port,
                 timeout=_timeout,
                 connect_timeout=_connect_timeout,
                 read_timeout=_read_timeout,
@@ -4422,9 +4717,8 @@ def connect(
                 socket_factory=_socket_factory,
             )
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
-            if _saprouter is not None:
-                hops = parse_route_string(_saprouter)
-                await open_route_async(at, hops, _ashost, str(_port))
+            if _route_hops is not None:
+                await open_route_async(at, _route_hops, _ashost, str(_port))
             ac = AsyncConnection(
                 at,  # type: ignore[arg-type]
                 max_retries=_max_retries,
@@ -4453,13 +4747,6 @@ def connect(
             loop_thread.close()
             raise
         return Connection._from_async(async_conn, loop_thread)
-
-    if saprouter is not None:
-        # Prepend the NI_ROUTE control frame before the handshake (TRANS-02).
-        # Wire format confirmed from live capture 2026-06-27.
-        # NOTE: only reached by SNC/wRFC branches (classic path returns above).
-        hops = parse_route_string(saprouter)
-        open_route(transport, hops, ashost, str(port))
 
     conn._handshake(
         client=client,
@@ -4719,7 +5006,8 @@ class AsyncConnection:
         Mirrors Connection._handshake for the DISCONNECTED → READY path.
         Facade-owned frames (GW_CONNECT, GW_INFO+GW_DONE_CLIENT, logon) are built
         via Connection's existing @staticmethod builders and sent with await.
-        SNC / wRFC are out of scope — raise NotImplementedError if needed.
+        SNC and WebSocket RFC connections never reach this method: connect_async()
+        serves them with the synchronous implementation on a worker thread.
 
         Credentials are never logged (T-09-03-CRED).
         """
@@ -4751,10 +5039,14 @@ class AsyncConnection:
                     case SessionState.NI_VERSIONED:
                         # GW_INFO has no server response; send both in the same iteration.
                         await self._transport.send_message(
-                            Connection._build_gw_info(handle, gwhost, snc=False)
+                            Connection._build_gw_info(
+                                handle, gwhost, snc=False, conn_idx=self._session.conn_idx
+                            )
                         )
                         await self._transport.send_message(
-                            Connection._build_gw_done_client(handle, snc=False)
+                            Connection._build_gw_done_client(
+                                handle, snc=False, conn_idx=self._session.conn_idx
+                            )
                         )
                     case SessionState.GW_CONNECTED:
                         tlv = Connection._build_logon_request(
@@ -4765,7 +5057,9 @@ class AsyncConnection:
                             lang=lang,
                         )
                         await self._transport.send_message(
-                            Connection._build_logon_frame(handle, tlv)
+                            Connection._build_logon_frame(
+                                handle, tlv, conn_idx=self._session.conn_idx
+                            )
                         )
 
     # ------------------------------------------------------------------ #
@@ -4817,8 +5111,8 @@ class AsyncConnection:
             {"FUNCNAME": func_name},
         )
         handle = self._session.handle or b"        "
-        frame = Connection._build_invoke_frame(handle, request_tlv)
-        await self._transport.send_message(frame)
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
+        await self._send_request(frame)
         response = await self._transport.recv_message()
 
         # A function module that is not remote-enabled answers GFI with a normal ABAP
@@ -4900,8 +5194,8 @@ class AsyncConnection:
             "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
         )
         handle = self._session.handle or b"        "
-        frame = Connection._build_invoke_frame(handle, request_tlv)
-        await self._transport.send_message(frame)
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
+        await self._send_request(frame)
         response = await self._transport.recv_message()
         raise_for_rfc_error(_strip_gw_header(response))
         rows = _parse_ddif_dfies_rows(response)
@@ -4969,8 +5263,8 @@ class AsyncConnection:
             {"TABNAME": tabname},
         )
         handle = self._session.handle or b"        "
-        frame = Connection._build_invoke_frame(handle, request_tlv)
-        await self._transport.send_message(frame)
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
+        await self._send_request(frame)
         response = await self._transport.recv_message()
         raise_for_rfc_error(_strip_gw_header(response))
         dfies_rows = _parse_dfies_rows(response)
@@ -5005,6 +5299,11 @@ class AsyncConnection:
             # NUL prefix: a real SID is 3 alphanumerics, so this cannot collide.
             self._anon_cache_key = f"\x00anon-{uuid.uuid4().hex}"
         return self._anon_cache_key
+
+    async def _send_request(self, frame: bytes) -> None:
+        """Send a GW-framed request, split into chunk frames when it is large."""
+        for part in _gw_request_frames(frame):
+            await self._transport.send_message(part)
 
     @property
     def sys_id(self) -> str | None:
@@ -5083,9 +5382,11 @@ class AsyncConnection:
                 request_tlv = build_invoke_request(func_name, desc, call_params)
                 dm_names = dm_table_ids(desc, call_params)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 with _fail_closed(self._session, func_name):
-                    await self._transport.send_message(request)
+                    await self._send_request(request)
                     tlv_response = await _join_response_frames_async(
                         self._transport.recv_message, func_name
                     )
@@ -5111,9 +5412,11 @@ class AsyncConnection:
             self._session.mark_in_call()
             try:
                 handle = self._session.handle or b"        "
-                frame = Connection._build_invoke_frame(handle, Connection._rfcping_request_tlv())
+                frame = Connection._build_invoke_frame(
+                    handle, Connection._rfcping_request_tlv(), conn_idx=self._session.conn_idx
+                )
                 with _fail_closed(self._session, "RFCPING"):
-                    await self._transport.send_message(frame)
+                    await self._send_request(frame)
                     resp = await self._transport.recv_message()
                 return Connection._rfcping_ok(resp)
             finally:
@@ -5264,11 +5567,13 @@ class AsyncConnection:
             try:
                 request_tlv = build_trfc_request(tid, func_name, queue=queue)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
 
                 async def _do_send() -> None:
                     try:
-                        await self._transport.send_message(request)
+                        await self._send_request(request)
                         response = await _join_response_frames_async(
                             self._transport.recv_message, func_name
                         )
@@ -5306,9 +5611,11 @@ class AsyncConnection:
             try:
                 request_tlv = build_trfc_confirm_request(tid)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
                 try:
-                    await self._transport.send_message(request)
+                    await self._send_request(request)
                     response = await _join_response_frames_async(
                         self._transport.recv_message, "ARFC_DEST_CONFIRM"
                     )
@@ -5366,11 +5673,13 @@ class AsyncConnection:
             try:
                 request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
                 handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(handle, request_tlv)
+                request = Connection._build_invoke_frame(
+                    handle, request_tlv, conn_idx=self._session.conn_idx
+                )
 
                 async def _do_send() -> None:
                     try:
-                        await self._transport.send_message(request)
+                        await self._send_request(request)
                         response = await _join_response_frames_async(
                             self._transport.recv_message, "BGRFC_DEST_SHIP"
                         )
@@ -5494,7 +5803,7 @@ class AsyncConnection:
         # Re-send the raw request bytes without re-marshaling (D-03b).
         async def _do_resend() -> None:
             try:
-                await self._transport.send_message(payload)
+                await self._send_request(payload)
                 response = await _join_response_frames_async(
                     self._transport.recv_message, f"retry {tid}"
                 )
@@ -5551,7 +5860,7 @@ class AsyncConnection:
 
         async def _do_resend() -> None:
             try:
-                await self._transport.send_message(payload)
+                await self._send_request(payload)
                 response = await _join_response_frames_async(
                     self._transport.recv_message, f"retry unit {unit_id}"
                 )
@@ -5597,6 +5906,114 @@ class AsyncConnection:
 # ---------------------------------------------------------------------------
 
 
+class _ThreadedAsyncConnection(AsyncConnection):
+    """AsyncConnection backed by a synchronous :class:`Connection` (issue #17).
+
+    SNC and WebSocket RFC are implemented once, in the synchronous connection.
+    Rather than duplicate that wire logic for asyncio — two implementations of a
+    security handshake that can drift apart — this class runs the synchronous
+    connection on a dedicated single worker thread and awaits it. The thread owns
+    the connection for its whole life, which is the ownership model the library
+    already requires (one thread per connection), and the event loop never blocks.
+
+    A cancelled await does not interrupt the operation already running on the
+    worker: it finishes there, and the next call queues behind it, so the
+    connection's byte stream stays consistent.
+    """
+
+    def __init__(self, sync_conn: Connection, executor: ThreadPoolExecutor) -> None:
+        # Deliberately not calling AsyncConnection.__init__: there is no async
+        # transport or session here; every operation is delegated.
+        self._sync = sync_conn
+        self._executor = executor
+        self._closed = False
+        self.metrics = sync_conn.metrics  # same counters as the sync connection
+
+    @classmethod
+    async def open(cls, **kwargs: Any) -> _ThreadedAsyncConnection:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saprfclib-conn")
+        loop = asyncio.get_running_loop()
+        try:
+            sync_conn = await loop.run_in_executor(executor, functools.partial(connect, **kwargs))
+        except BaseException:
+            executor.shutdown(wait=False)
+            raise
+        return cls(sync_conn, executor)
+
+    async def _run(self, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+        if self._closed:
+            raise ValueError("connection is closed")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, functools.partial(fn, *args, **kwargs))
+
+    @property
+    def sys_id(self) -> str | None:
+        return self._sync.sys_id
+
+    def get_connection_attributes(self) -> ConnectionAttributes:
+        return self._sync.get_connection_attributes()
+
+    async def call(self, func_name: str, **params: object) -> dict[str, Any]:
+        return await self._run(self._sync.call, func_name, **params)
+
+    async def ping(self) -> bool:
+        return await self._run(self._sync.ping)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            await self._run(self._sync.close)
+        finally:
+            self._closed = True
+            self._executor.shutdown(wait=False)
+
+    async def call_transactional(
+        self,
+        func_name: str,
+        *,
+        tid: str,
+        queue: str | None = None,
+        **params: object,
+    ) -> None:
+        await self._run(self._sync.call_transactional, func_name, tid=tid, queue=queue, **params)
+
+    async def confirm_tid(self, tid: str) -> None:
+        await self._run(self._sync.confirm_tid, tid)
+
+    def create_unit(
+        self,
+        uid: str | None = None,
+        queues: list[str] | None = None,
+    ) -> _AsyncUnitHandle:
+        handle = self._sync.create_unit(uid, queues)
+        return _AsyncUnitHandle(self, handle.unit_id, handle.unit_type, list(queues or []))
+
+    async def _submit_unit(
+        self,
+        uid: str,
+        unit_type: str,
+        queues: list[str],
+        buffered_calls: list[bytes],
+    ) -> None:
+        await self._run(self._sync._submit_unit, uid, unit_type, queues, buffered_calls)
+
+    async def confirm_unit(self, unit_id: str, unit_type: str = "T") -> None:
+        await self._run(self._sync.confirm_unit, unit_id, unit_type)
+
+    async def rollback_unit(self, unit_id: str, unit_type: str = "T") -> None:
+        await self._run(self._sync.rollback_unit, unit_id, unit_type)
+
+    async def get_unit_state(self, unit_id: str, unit_type: str = "T") -> UnitState:
+        return await self._run(self._sync.get_unit_state, unit_id, unit_type)
+
+    async def retry_parked(self, tid: str) -> None:
+        await self._run(self._sync.retry_parked, tid)
+
+    async def retry_parked_unit(self, unit_id: str, unit_type: str = "T") -> None:
+        await self._run(self._sync.retry_parked_unit, unit_id, unit_type)
+
+
 async def connect_async(
     ashost: str,
     sysnr: str | int,
@@ -5617,7 +6034,23 @@ async def connect_async(
     group: str | None = None,
     port: int | None = None,
     snc_lib: str | None = None,
+    snc_partnername: str | None = None,
+    snc_myname: str | None = None,
+    snc_qop: int | None = None,
+    snc_sso: bool | None = None,
+    snc_pse: str | os.PathLike[str] | None = None,
+    snc_pse_pin: str | None = None,
+    snc_credential: SncCredential | None = None,
+    snc_kerberos: bool | KerberosLogin | None = None,
     wshost: str | None = None,
+    wsport: int | None = None,
+    ws_path: str | None = None,
+    ws_proxy_host: str | None = None,
+    ws_proxy_port: int | None = None,
+    ws_proxy_user: str | None = None,
+    ws_proxy_pass: str | None = None,
+    ws_tls_verify: bool = True,
+    read_timeout: float | None = DEFAULT_READ_TIMEOUT,
     proxy_type: str | None = None,
     proxy_host: str | None = None,
     proxy_port: int | None = None,
@@ -5638,8 +6071,10 @@ async def connect_async(
     Supports direct TCP, SAProuter, and message-server (load-balanced) paths —
     the same three paths as the sync connect() classic branch.
 
-    Scope boundary (Phase 9): snc_lib and wshost paths raise NotImplementedError;
-    use the synchronous saprfclib.connect() for SNC/wRFC (SEC-02/03/05/06).
+    SNC (``snc_pse`` / ``snc_credential`` / ``snc_lib``) and WebSocket RFC
+    (``wshost``) connections are served by the synchronous implementation running on
+    a dedicated worker thread that owns the connection; every method is awaited
+    without blocking the event loop (issue #17). See :class:`_ThreadedAsyncConnection`.
 
     Credentials (passwd) are never logged or interpolated into exception messages
     (T-09-03-CRED). Returns a ready AsyncConnection usable as an async context
@@ -5656,13 +6091,67 @@ async def connect_async(
     saprfclib.connect(): False (default) drops undeclared keyword arguments with a
     warning, True raises.
     """
-    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
-
-    if snc_lib is not None or wshost is not None:
-        raise NotImplementedError(
-            "snc_lib/wshost async connections are not supported in Phase 9 — "
-            "use the synchronous saprfclib.connect() for SNC/wRFC"
+    snc_enabled = (
+        snc_lib is not None
+        or snc_pse is not None
+        or snc_credential is not None
+        or bool(snc_kerberos)
+        or snc_partnername is not None
+    )
+    if snc_enabled or wshost is not None:
+        return await _ThreadedAsyncConnection.open(
+            ashost=ashost,
+            sysnr=sysnr,
+            client=client,
+            user=user,
+            passwd=passwd,
+            lang=lang,
+            strict_params=strict_params,
+            allow_restricted_logon=allow_restricted_logon,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            metadata_cache=metadata_cache,
+            metadata_cache_key=metadata_cache_key,
+            saprouter=saprouter,
+            mshost=mshost,
+            sysid=sysid,
+            group=group,
+            port=port,
+            wshost=wshost,
+            wsport=wsport,
+            ws_path=ws_path,
+            ws_proxy_host=ws_proxy_host,
+            ws_proxy_port=ws_proxy_port,
+            ws_proxy_user=ws_proxy_user,
+            ws_proxy_pass=ws_proxy_pass,
+            ws_tls_verify=ws_tls_verify,
+            proxy_type=proxy_type,
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            proxy_jwt=proxy_jwt,
+            proxy_scc_location_id=proxy_scc_location_id,
+            proxy_client_id=proxy_client_id,
+            proxy_client_secret=proxy_client_secret,
+            proxy_token_url=proxy_token_url,
+            socket_factory=socket_factory,
+            gwhost=gwhost,
+            snc_lib=snc_lib,
+            snc_partnername=snc_partnername,
+            snc_myname=snc_myname,
+            snc_qop=snc_qop,
+            snc_sso=snc_sso,
+            snc_pse=snc_pse,
+            snc_pse_pin=snc_pse_pin,
+            snc_credential=snc_credential,
+            snc_kerberos=snc_kerberos,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            tid_store=tid_store,
+            unit_store=unit_store,
         )
+
+    user, passwd = _resolve_credentials(user, passwd, snc_lib=snc_lib, ashost=ashost)
 
     # SOCKS5 proxy (issue #51, D-39/40/41). The handshake and the token fetch are
     # blocking; connect_tcp_async runs the socket_factory in a thread executor, and
@@ -5690,6 +6179,7 @@ async def connect_async(
 
     from saprfclib.router import (
         MessageServerClient,
+        first_hop_address,
         open_route_async,
         parse_route_string,
     )
@@ -5712,17 +6202,19 @@ async def connect_async(
 
     # See connect(): an explicit port replaces the derivation.
     port = port if port is not None else 3300 + int(sysnr)
+    # SAProuter: connect to the first router; the route names the rest (see connect()).
+    route_hops = parse_route_string(saprouter) if saprouter is not None else None
+    tcp_host, tcp_port = first_hop_address(route_hops) if route_hops else (ashost, port)
     transport = await connect_tcp_async(
-        ashost,
-        port,
+        tcp_host,
+        tcp_port,
         timeout=timeout,
         connect_timeout=connect_timeout,
         socket_factory=socket_factory,
     )
 
-    if saprouter is not None:
-        hops = parse_route_string(saprouter)
-        await open_route_async(transport, hops, ashost, str(port))
+    if route_hops is not None:
+        await open_route_async(transport, route_hops, ashost, str(port))
 
     conn = AsyncConnection(
         transport,

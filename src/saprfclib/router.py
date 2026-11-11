@@ -183,71 +183,66 @@ def parse_route_string(route: str) -> list[RouteHop]:
 def build_ni_route(hops: list[RouteHop], dest_host: str, dest_service: str) -> bytes:
     """Build the NI_ROUTE control-message payload for a SAProuter hop chain.
 
-    Wire format CONFIRMED from live capture 2026-06-27 (TRANS-02):
+    Layout (golden fixtures ``router/ni_route_payload.bin`` — one router,
+    ``router/ni_route_two_hops.bin`` and ``router/ni_route_two_hops_passwords.bin``
+    — two routers, all byte-identical to what the NW RFC SDK sends)::
 
-        "NI_ROUTE\\0"       9 bytes (null-terminated magic)
-        talk_mode           1 byte  (0x02)
-        0x28                1 byte  (fixed)
-        route_version       1 byte  (0x02)
-        hop_count           4 bytes BE
-        total_data_length   4 bytes BE (sum of entry data + final dest data, NOT entry_length fields)
-        For each intermediate hop:
-            entry_length    4 bytes BE = len(host_null) + 6
-            host            null-terminated ASCII
-            service         6 bytes, null-padded
-        Final destination (no length prefix):
-            host            null-terminated ASCII
-            service         6 bytes, null-padded
+        "NI_ROUTE\\0"      9 bytes
+        0x02             1 byte
+        0x28             1 byte  (NI version 40)
+        n_entries        1 byte  routers + destination
+        BE32             n_entries - 1   (entries still to be connected)
+        BE32             total length of all entries
+        BE32             offset of entry 1 (= length of entry 0)
+        entries          host\\0 service\\0 password\\0, for every router, then the
+                         destination with an empty password; no per-entry length
 
-    Returns raw payload (no NI 4-byte length header) — caller uses
-    Transport.send_message() which adds NI framing.
-
-    ``hops`` are intermediate SAProuter nodes from parse_route_string().
-    ``dest_host`` / ``dest_service`` are the final app-server host and gateway
-    port string (e.g. "192.168.88.7", "3300").
+    A router rewrites the counters as it forwards the frame; the client only ever
+    sends the values above. Returns the payload without the NI length header.
     """
     if not hops:
         raise ValueError("build_ni_route: at least one hop is required")
+    if len(hops) + 1 > 0xFF:
+        raise ValueError("build_ni_route: too many hops")
 
-    def _null_term(s: str) -> bytes:
-        return s.encode("ascii") + b"\x00"
-
-    # Every field in a route entry is NUL-TERMINATED, and each entry carries three
-    # of them: host, service, password. An entry with no password still ends with
-    # the empty password's NUL.
-    #
-    # Confirmed by two captures: a password-protected route sent by niping
-    #     b"lab.example.com\0" b"3299\0" b"R0uteP4ss\0"      (entry_length 37)
-    # and the unprotected route in tests/golden/router/ni_route_payload.bin
-    #     b"saprouter.example.com\0" b"3299\0" b"\0"          (entry_length 28)
-    #
-    # This used to pad the service into a fixed 6-byte NUL-filled field, which
-    # produced the correct bytes only by coincidence: for a four-character port
-    # "3299" plus two pad NULs is byte-identical to "3299\0" followed by the
-    # empty password's "\0". The bug was invisible for every numeric port and
-    # would have appeared the moment anyone used a service NAME — "sapgw00" is
-    # seven characters, so it was truncated to "sapgw0" and the frame malformed.
     def _entry(host: str, service: str, password: str = "") -> bytes:
-        return _null_term(host) + _null_term(service) + _null_term(password)
+        return b"".join(x.encode("ascii") + b"\x00" for x in (host, service, password))
 
-    hop_entries: list[bytes] = [_entry(h.host, h.service, h.password) for h in hops]
-    dest_data = _entry(dest_host, dest_service)
+    entries = [_entry(h.host, h.service, h.password) for h in hops]
+    entries.append(_entry(dest_host, dest_service))
+    data = b"".join(entries)
 
-    # total_data_length excludes the 4-byte entry_length fields.
-    total_data = sum(len(e) for e in hop_entries) + len(dest_data)
-
-    out = bytearray()
-    out += _NI_ROUTE_MARKER + b"\x00"  # 9 bytes, null-terminated
-    out += bytes([0x02])  # talk_mode
-    out += bytes([0x28])  # fixed byte confirmed from live capture
-    out += bytes([0x02])  # route_version
-    out += struct.pack(">I", len(hops))  # hop_count
-    out += struct.pack(">I", total_data)  # total_data_length
-    for entry in hop_entries:
-        out += struct.pack(">I", len(entry))  # entry_length
-        out += entry
-    out += dest_data
+    out = bytearray(_NI_ROUTE_MARKER + b"\x00")
+    out += bytes([0x02, 0x28, len(entries)])
+    out += struct.pack(">III", len(entries) - 1, len(data), len(entries[0]))
+    out += data
     return bytes(out)
+
+
+def first_hop_address(hops: list[RouteHop]) -> tuple[str, int]:
+    """Host and TCP port of the first SAProuter, where the client must connect.
+
+    The route's ``/S/`` value is a port number or a service name, which is looked
+    up in the system's services database (``/etc/services``, ``sapdp99`` and the
+    like). No port is assumed when the route gives none.
+    """
+    if not hops:
+        raise ValueError("route string has no hops")
+    first = hops[0]
+    if not first.service:
+        raise ValueError(
+            "the first SAProuter in the route string has no /S/ service; give its port "
+            "(for example /H/router/S/3299)"
+        )
+    if first.service.isdigit():
+        return first.host, int(first.service)
+    try:
+        return first.host, socket.getservbyname(first.service, "tcp")
+    except OSError:
+        raise ValueError(
+            f"SAProuter service {first.service!r} is not a port number and is not in the "
+            f"system services database"
+        ) from None
 
 
 # ---------------------------------------------------------------------------

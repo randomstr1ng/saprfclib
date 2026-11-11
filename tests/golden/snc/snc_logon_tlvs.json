@@ -1,0 +1,105 @@
+{
+ "fixture": "snc_logon_tlvs",
+ "capture_source": "live 2026-11-08: NW RFC SDK client (pyrfc) with CommonCryptoLib over SNC against an S/4HANA lab system; the decrypted plaintext of the first wrapped message (the logon) in three modes. User DEVELOPER has an SNC name mapped to the client certificate.",
+ "evidence": "tier 1. Only the record tags and which of them are empty are kept; no values (user name, password, host names) are recorded.",
+ "notes": [
+  "snc_sso=0 with a password: 0x0111 (user) and 0x0117 (scrambled password) present, plus an empty 0x0675 between 0x0115 and 0x0501.",
+  "snc_sso=1: 0x0117 and 0x0675 absent; 0x0111 present only when a user is given. Both snc_sso=1 runs logged on (as the mapped user).",
+  "The SNC frames themselves were identical across the three modes: header lengths 0x96/0x18/0x18 and the same QOP fields. No extension header carries anything SSO-related.",
+  "With a user given and snc_sso=1, a wrong password still logged on: the password is not sent."
+ ],
+ "modes": {
+  "nosso": {
+   "mode": "snc_sso=0, user and password",
+   "tags": [
+    "COM_HEAD",
+    "0101",
+    "0103",
+    "0106",
+    "0514",
+    "0114",
+    "0111",
+    "0117",
+    "0115",
+    "0675",
+    "0501",
+    "0007",
+    "0011",
+    "0012",
+    "0013",
+    "0008",
+    "0006",
+    "0130",
+    "0502",
+    "000b",
+    "0102",
+    "ffff"
+   ],
+   "empty_tags": [
+    "0115",
+    "0675",
+    "0502",
+    "ffff"
+   ]
+  },
+  "sso_nouser": {
+   "mode": "snc_sso=1, no user",
+   "tags": [
+    "COM_HEAD",
+    "0101",
+    "0103",
+    "0106",
+    "0514",
+    "0114",
+    "0115",
+    "0501",
+    "0007",
+    "0011",
+    "0012",
+    "0013",
+    "0008",
+    "0006",
+    "0130",
+    "0502",
+    "000b",
+    "0102",
+    "ffff"
+   ],
+   "empty_tags": [
+    "0115",
+    "0502",
+    "ffff"
+   ]
+  },
+  "sso_user": {
+   "mode": "snc_sso=1, user given",
+   "tags": [
+    "COM_HEAD",
+    "0101",
+    "0103",
+    "0106",
+    "0514",
+    "0114",
+    "0111",
+    "0115",
+    "0501",
+    "0007",
+    "0011",
+    "0012",
+    "0013",
+    "0008",
+    "0006",
+    "0130",
+    "0502",
+    "000b",
+    "0102",
+    "ffff"
+   ],
+   "empty_tags": [
+    "0115",
+    "0502",
+    "ffff"
+   ]
+  }
+ }
+}

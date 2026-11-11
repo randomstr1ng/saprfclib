@@ -60,6 +60,7 @@ _NI_UNICODE_CAPABLE = 0xFFFF  # unicode_capable marker (handshake.md line 57)
 # coordinates (NI header stripped) that is 40 (fixture-confirmed: "75568442"@40).
 _GW_HANDLE_OFFSET = 40  # 8B ASCII connection handle (payload offset)
 _GW_HANDLE_LEN = 8
+_GW_CONN_IDX_OFFSET = 78  # BE16 gateway-assigned connection index (payload offset)
 _GW_DONE_CODEPAGE_OFFSET = 69  # server codepage echo in GW_DONE (payload offset; raw 73 − 4)
 
 _CODEPAGE_UTF16LE = "4103"  # Unicode-mode codepage (handshake.md line 64)
@@ -157,6 +158,10 @@ class Session:
         self._attributes: ConnectionAttributes | None = None
         self._codepage: str | None = None
         self._handle: bytes | None = None  # 8-byte ASCII GW connection handle
+        self._conn_idx: int | None = None  # gateway-assigned connection index
+        # Set by the connection when its transport strips the GW header from server
+        # frames (SNC): replies are live even though they do not start with one.
+        self.gw_header_stripped = False
         # When True, a logon that AUTHENTICATED (sys id present) but whose embedded
         # RFCPING was rejected -- typically S_RFC (RFC_NO_AUTHORITY) for a
         # low-privilege user -- returns a usable session instead of raising. See
@@ -174,6 +179,11 @@ class Session:
     def handle(self) -> bytes | None:
         """8-byte ASCII GW connection handle, set after GW_CONNECT_RESPONSE."""
         return self._handle
+
+    @property
+    def conn_idx(self) -> int | None:
+        """Connection index the gateway assigned in GW_CONNECT_RESPONSE [78:80]."""
+        return self._conn_idx
 
     @property
     def attributes(self) -> ConnectionAttributes | None:
@@ -263,6 +273,13 @@ class Session:
                 f"GW connect response too short: {len(data)} < {_GW_HANDLE_OFFSET + _GW_HANDLE_LEN}"
             )
         self._handle = data[_GW_HANDLE_OFFSET : _GW_HANDLE_OFFSET + _GW_HANDLE_LEN]
+        # [76:78] echoes the client's local index; [78:80] is the connection index
+        # the gateway assigned, which the client echoes in every later frame.
+        # Source: golden fixture snc/snc_frame_headers.json ("connection_index").
+        if len(data) >= _GW_CONN_IDX_OFFSET + 2:
+            self._conn_idx = int.from_bytes(
+                data[_GW_CONN_IDX_OFFSET : _GW_CONN_IDX_OFFSET + 2], "big"
+            )
         self._state = SessionState.GW_CONNECTED
         # GW_INFO + client GW_DONE + the RFC logon TLV frame embed the handle +
         # credentials and are emitted by the facade (out of the pure SM's concern).
@@ -324,6 +341,7 @@ class Session:
         # error/attribute tags.
         has_error = _TAG_EXCEPTION_NUMBER in tags or _TAG_ERROR_MSG in tags
         if has_error:
+            from saprfclib.exceptions import LogonError
             from saprfclib.invoke import _decode_error_text, raise_for_rfc_error
 
             logon_completed = _TAG_RETURN_CODE in tags  # 0x0420 set by the dispatcher
@@ -335,7 +353,7 @@ class Session:
                 # Only a bare 0x0402 text, no structured exception and no return code:
                 # a plain logon rejection (bad credentials). The byte stream is not in
                 # sync; fail hard.
-                raise ValueError(f"logon failed: {_decode_error_text(tags.get(_TAG_ERROR_MSG))}")
+                raise LogonError(f"logon failed: {_decode_error_text(tags.get(_TAG_ERROR_MSG))}")
             # allow_restricted_logon and logon_completed: authentication succeeded and
             # the embedded RFCPING was refused. The reply carries the full attributes
             # and the byte stream is in sync -> fall through and build a usable session.
@@ -363,7 +381,12 @@ class Session:
                 f"validated against one. Continuing would decode every character "
                 f"field incorrectly rather than fail."
             )
-        dec = _decode_utf16le if (is_live and unicode_mode) else _decode_ascii
+        # Over SNC the transport removes the GW header before the session sees the
+        # reply, so the header test above cannot tell a live reply from a test
+        # double; the connection says so explicitly. Without this, SNC sessions
+        # decoded the UTF-16 attribute strings as ASCII ('A\x004\x00H').
+        live_reply = is_live or self.gw_header_stripped
+        dec = _decode_utf16le if (live_reply and unicode_mode) else _decode_ascii
         self._attributes = ConnectionAttributes(
             sys_id=dec(tags.get(_TAG_SYS_ID)),
             sys_number=dec(tags.get(_TAG_SYS_NUMBER)),

@@ -27,8 +27,10 @@
 #     0x16    2B    BE uint16: QOP flags
 #     [0x18]        GSS token bytes, then application data bytes
 #
-# Only the fixed 0x18 header is implemented. A hdrlen field != 0x18 (extension
-# headers, e.g. SSO2) is not reverse-engineered (D-23) and is rejected.
+# hdrlen > 0x18 means extension headers follow the fixed header. The outbound
+# mechanism extension header (first FR_INIT only) is built by
+# _build_snc_ext_header; on inbound frames parse_snc_frame seeks to hdrlen, so
+# an extension header is skipped rather than rejected.
 #
 # DoS guard (T-07-FRAME-DOS, T-03-DOS parity): parse rejects a declared
 # token_len+data_len above _MAX_FRAME_BYTES (128 MiB) BEFORE slicing.
@@ -42,7 +44,7 @@ import ctypes
 import os
 import struct
 from enum import IntEnum
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from saprfclib.exceptions import CommunicationError, SncError
 from saprfclib.transport import Transport, connect_tcp
@@ -71,26 +73,56 @@ assert _SNC_HDR.size == _SNC_HEADER_SIZE  # header struct must be exactly 0x18 b
 
 # Context ID used in SNC frames (confirmed from live pyrfc capture 2026-07-XX: D-24).
 _SNC_CTX_ID = 3
-# QOP bitmask sent in FR_INIT / FR_ACCEPT header during the GSS handshake
-# (0x7E = bits 1-6 set = advertise all protection capabilities).
-# Data frames (PRIVACY/INTEGRITY/PLAIN) use the user-configured snc_qop instead.
-_SNC_HANDSHAKE_QOP = 0x7E
+# --- QOP field of handshake frames (header offset 0x16, BE16) ----------------
+# bits 1-2 = minimum, bits 3-4 = maximum, bits 5-6 = level in use. Only handshake
+# frames (FR_INIT / FR_ACCEPT) carry it; data frames carry 0. Source: golden fixture
+# snc/snc_frame_headers.json — a reference client sends 0x3a/0x7a for snc_qop=1,
+# 0x5c/0x7c for 2 and 0x7e/0x7e for 3, 8 and 9; the server answered 0x7e.
+_QOP_MAX_AVAILABLE = 3  # privacy: both mechanisms provide confidentiality
 
-# --- SNC extension header (D-24) — first FR_INIT only ----------------------
-# SAP SNC OID 1.3.36.3.1.37.1 in DER tag-length-value form.
+
+def _qop_field(qmin: int, qmax: int, quse: int) -> int:
+    return (qmin << 1) | (qmax << 3) | (quse << 5)
+
+
+def _qop_unpack(field: int) -> tuple[int, int, int]:
+    return (field >> 1) & 3, (field >> 3) & 3, (field >> 5) & 3
+
+
+# Kept for callers that imported it: the field for snc_qop 3/8/9.
+_SNC_HANDSHAKE_QOP = _qop_field(3, 3, 3)
+assert _SNC_HANDSHAKE_QOP == 0x7E
+
+# --- SNC extension header (first FR_INIT only) -----------------------------
+# Layout: BE32 slot bitmask, then for every set bit a BE16 length and the slot's
+# bytes. Only slot 0 is sent: BE16 mechanism id (3), then the target name as a GSS
+# exported-name token (RFC 2743 section 3.2): 04 01 | BE16 OID length | mechanism
+# OID | BE32 name length | DN DER. Source: golden fixture snc/snc_frame_headers.json
+# (first client frame of every capture).
 _SAP_SNC_OID = b"\x06\x06\x2b\x24\x03\x01\x25\x01"
-_SNC_EXT_MAGIC = b"\x00\x00\x00\x01"
-_SNC_EXT_FLAGS = b"\x04\x01"
+_SNC_EXT_SLOT0 = b"\x00\x00\x00\x01"
+_GSS_EXPORT_NAME_TOKEN_ID = b"\x04\x01"
+# Back-compat aliases for the previous names of the two constants above.
+_SNC_EXT_MAGIC = _SNC_EXT_SLOT0
+_SNC_EXT_FLAGS = _GSS_EXPORT_NAME_TOKEN_ID
 
-# Known RDN attribute OIDs in DER form (06 03 55 04 XX).
+# RDN attribute types → (DER-encoded OID, string tag override). The reference
+# library encodes values as PrintableString when possible and as T61String
+# otherwise; DC is an IA5String; SN means serialNumber. Observed in its exported
+# names for probe partner names (2026-11-08).
 _RDN_OID: dict[str, bytes] = {
     "CN": b"\x06\x03\x55\x04\x03",
-    "OU": b"\x06\x03\x55\x04\x0b",
-    "O": b"\x06\x03\x55\x04\x0a",
+    "SN": b"\x06\x03\x55\x04\x05",
+    "SERIALNUMBER": b"\x06\x03\x55\x04\x05",
     "C": b"\x06\x03\x55\x04\x06",
     "L": b"\x06\x03\x55\x04\x07",
     "ST": b"\x06\x03\x55\x04\x08",
+    "SP": b"\x06\x03\x55\x04\x08",
+    "O": b"\x06\x03\x55\x04\x0a",
+    "OU": b"\x06\x03\x55\x04\x0b",
+    "DC": b"\x06\x0a\x09\x92\x26\x89\x93\xf2\x2c\x64\x01\x19",
 }
+_PRINTABLE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 '()+,-./:=?")
 
 
 def _der_tlv(tag: int, content: bytes) -> bytes:
@@ -105,9 +137,22 @@ def _der_tlv(tag: int, content: bytes) -> bytes:
     return bytes([tag]) + length + content
 
 
+def _dn_value(attr: str, value: str) -> bytes:
+    if not value.isascii():
+        # The reference library writes non-ASCII as T.61 sequences; whether a server
+        # accepts such a target name is untested, so refuse rather than guess.
+        raise ValueError("non-ASCII characters in the SNC partner name are not supported")
+    if attr == "DC":
+        return _der_tlv(0x16, value.encode("ascii"))  # IA5String
+    if attr == "C":
+        value = value.upper()
+    tag = 0x13 if set(value) <= _PRINTABLE else 0x14  # PrintableString / T61String
+    return _der_tlv(tag, value.encode("ascii"))
+
+
 def _build_dn_der(dn_str: str) -> bytes:
     """Encode a SAP SNC DN string to X.509 ASN.1 DER (RFC 5280: C first, CN last)."""
-    rdns = [r.strip() for r in dn_str.split(",")]
+    rdns = [r.strip() for r in dn_str.replace(";", ",").split(",")]
     rdns.reverse()  # RFC 5280 order: outermost (C) first in DER
     parts = bytearray()
     for rdn in rdns:
@@ -117,36 +162,23 @@ def _build_dn_der(dn_str: str) -> bytes:
         oid_bytes = _RDN_OID.get(attr)
         if oid_bytes is None:
             raise ValueError(f"Unknown RDN attribute in SNC partner name: {attr!r}")
-        atv = oid_bytes + _der_tlv(0x13, value.encode("ascii"))  # PrintableString
+        atv = oid_bytes + _dn_value(attr, value)
         parts += _der_tlv(0x31, _der_tlv(0x30, atv))  # SET{SEQUENCE{ATV}}
     return _der_tlv(0x30, bytes(parts))  # outer SEQUENCE
 
 
 def _build_snc_ext_header(partner_dn_str: str) -> bytes:
-    """Build the SNC extension header for the first FR_INIT frame.
-
-    Format confirmed from live pyrfc SNC capture (D-24):
-      [0:4]   magic 00 00 00 01
-      [4:6]   remaining length (BE uint16) from byte 6 onward
-      [6:8]   ctx_id = 3 (BE uint16)
-      [8:10]  flags = 04 01
-      [10:12] OID length (BE uint16)
-      [12:20] SAP SNC OID (1.3.36.3.1.37.1 in DER tag-length-value)
-      [20:24] partner DN DER length (BE uint32)
-      [24:]   partner DN in X.509 ASN.1 DER format
-    """
+    """Build the extension header of the first FR_INIT frame (target-name slot 0)."""
     dn_der = _build_dn_der(partner_dn_str)
-    remaining = 2 + 2 + 2 + len(_SAP_SNC_OID) + 4 + len(dn_der)
-    return (
-        _SNC_EXT_MAGIC
-        + struct.pack(">H", remaining)
-        + struct.pack(">H", _SNC_CTX_ID)
-        + _SNC_EXT_FLAGS
+    export_token = (
+        _GSS_EXPORT_NAME_TOKEN_ID
         + struct.pack(">H", len(_SAP_SNC_OID))
         + _SAP_SNC_OID
         + struct.pack(">I", len(dn_der))
         + dn_der
     )
+    slot0 = struct.pack(">H", _SNC_CTX_ID) + export_token
+    return _SNC_EXT_SLOT0 + struct.pack(">H", len(slot0)) + slot0
 
 
 def _get_snc_adapter_info(lib: ctypes.CDLL) -> bytes:
@@ -165,6 +197,10 @@ class SncFrameType(IntEnum):
 
     FR_INIT = 2  # client → server handshake init token (proxy capture confirmed)
     FR_ACCEPT = 4  # server → client handshake accept token (proxy capture confirmed)
+    # server → client, no token and no data: the acceptor completed on the
+    # initiator's last token without producing one of its own. Source: live capture
+    # 2026-11-10, Kerberos SNC handshake (client's final FR_INIT answered by type 5).
+    FR_ACCEPT_ACK = 5
     PLAIN = 7  # data frame, QOP 1 (authentication only, no protection)
     INTEGRITY = 8  # data frame, QOP 2 (gss_get_mic / gss_verify_mic)
     PRIVACY = 9  # data frame, QOP 3 (gss_wrap / gss_unwrap)
@@ -177,18 +213,20 @@ class SncQop(IntEnum):
     SAP defines: 9 asks for the maximum the connection supports, 8 for whatever
     the system's own default protection is.
 
-    ``DEFAULT`` is [ASSUMED] to mean privacy here. The real answer lives in the
-    server's ``snc/data_protection/use`` profile parameter, which this library
-    never reads, so 8 is treated as 3. That errs toward more protection rather
-    than less, which is the only direction it is safe to guess in -- but it is a
-    guess. Reading that parameter over RFC (it is exposed through
-    ``RFC_READ_PROFILE_PARAMETER``) would settle it.
+    ``DEFAULT`` (8) selects the client's default levels. A client without an SAP
+    profile, which is what this library is, defaults to privacy: a reference
+    client sends exactly the same handshake QOP field for 8 as for 3 (golden
+    fixture snc/snc_frame_headers.json). 9 selects the maximum available, which
+    is privacy for both mechanisms.
+
+    The level is a starting point: a server whose minimum is higher raises it
+    during the handshake (see :class:`SncTransport`).
     """
 
     AUTH_ONLY = 1
     INTEGRITY = 2
     PRIVACY = 3
-    DEFAULT = 8  # [ASSUMED] treated as PRIVACY -- see the class docstring
+    DEFAULT = 8  # client default = privacy; see the class docstring
     MAXIMUM = 9
 
 
@@ -206,6 +244,15 @@ _QOP_PROTECTION: dict[int, SncFrameType] = {
     SncQop.DEFAULT: SncFrameType.PRIVACY,
     SncQop.MAXIMUM: SncFrameType.PRIVACY,
 }
+
+
+_PROTECTION_LEVEL: dict[SncFrameType, int] = {
+    SncFrameType.PLAIN: 1,
+    SncFrameType.INTEGRITY: 2,
+    SncFrameType.PRIVACY: 3,
+}
+_LEVEL_PROTECTION: dict[int, SncFrameType] = {v: k for k, v in _PROTECTION_LEVEL.items()}
+_FRAME_LEVEL: dict[int, int] = {int(k): v for k, v in _PROTECTION_LEVEL.items()}
 
 
 def validate_snc_qop(value: int) -> int:
@@ -281,9 +328,10 @@ def parse_snc_frame(buf: bytes) -> tuple[int, int, int, bytes, bytes]:
         raise ValueError(
             f"SNC frame payload {token_len + data_len} exceeds cap {_MAX_FRAME_BYTES} (DoS guard)"
         )
-    # hdrlen=0 means no extension headers; otherwise token starts at hdrlen bytes
-    # from the start of the frame (hdrlen includes the 8-byte eye — confirmed by
-    # protocol analysis of the SNC frame builder). Standard hdrlen=0x18; extended (SSO2) hdrlen>0x18.
+    # hdrlen counts from the start of the frame, the 8-byte eye-catcher included: 0x18
+    # for the plain header, larger when an extension header follows (the reference
+    # client's first INIT frame carries the partner-name extension; golden fixture
+    # snc/snc_frame_headers.json). The GSS token starts at hdrlen.
     token_start = hdrlen if hdrlen >= _SNC_HEADER_SIZE else _SNC_HEADER_SIZE
     data_start = token_start + token_len
     gss_token = buf[token_start:data_start]
@@ -791,6 +839,24 @@ def _strip_snc_prefix(value: str) -> str:
 # or placed in exceptions. SncError carries GSS major/minor only.
 
 
+class GssMechanism(Protocol):
+    """What :class:`SncTransport` needs from a GSS mechanism.
+
+    Implemented by :class:`GssBinding` (a native GSS library over ctypes) and by
+    :class:`saprfclib.secgss.SecGssInitiator` (the built-in X.509 mechanism).
+    """
+
+    _real: bool
+    _lib: Any
+
+    def init_sec_context(self, input_token: bytes) -> tuple[int, bytes]: ...
+    def wrap(self, payload: bytes) -> bytes: ...
+    def unwrap(self, token: bytes) -> bytes: ...
+    def get_mic(self, payload: bytes) -> bytes: ...
+    def verify_mic(self, payload: bytes, mic: bytes) -> None: ...
+    def close(self) -> None: ...
+
+
 class SncTransport:
     """SNC transport: drive the GSS handshake, then QOP-dispatch send/recv.
 
@@ -807,20 +873,18 @@ class SncTransport:
         self,
         inner: Transport,
         *,
-        snc_lib: str,
+        snc_lib: str | None = None,
         snc_partnername: str,
         snc_myname: str | None = None,
         snc_qop: int = 3,
         snc_sso: bool = False,
-        gss_binding: GssBinding | None = None,
+        gss_binding: GssMechanism | None = None,
         eye_catcher: bytes | None = None,
     ) -> None:
-        if snc_sso:
-            # D-23: SNC SSO2 rides in an extension header (hdrlen > 0x18) whose
-            # format is not reverse-engineered. Gate until a live capture.
-            raise NotImplementedError(
-                "SNC SSO2 extension headers are not reverse-engineered (D-23)"
-            )
+        # snc_sso (log on with the SNC identity) changes only the logon records,
+        # which Connection builds; the SNC frames are identical either way (golden
+        # fixture snc/snc_logon_tlvs.json). Accepted here for API compatibility.
+        del snc_sso
         self._inner = inner
         self._qop = validate_snc_qop(snc_qop)
         self._established = False  # SEC-06 gate; set by _handshake()
@@ -829,18 +893,32 @@ class SncTransport:
         # D-22 RESOLVED (protocol analysis 2026-07-21): snc_eyecatcher global at
         # points to "SNCFRAME\0" at. Injectable so tests can override.
         self._eye = eye_catcher or b"SNCFRAME"
-        self._gss = gss_binding or GssBinding(
-            snc_lib=snc_lib,
-            snc_partnername=snc_partnername,
-            snc_myname=snc_myname,
-            snc_qop=snc_qop,
-        )
+        if gss_binding is None:
+            if snc_lib is None:
+                raise SncError("no SNC mechanism: pass snc_lib or a gss_binding")
+            gss_binding = GssBinding(
+                snc_lib=snc_lib,
+                snc_partnername=snc_partnername,
+                snc_myname=snc_myname,
+                snc_qop=snc_qop,
+            )
+        self._gss: GssMechanism = gss_binding
+        # Handshake QOP triple (minimum, maximum, in use). snc_qop q in 1..3 asks for
+        # min = use = q and max = the maximum available; 8 and 9 both yield 3/3/3.
+        # Source: golden fixture snc/snc_frame_headers.json.
+        level = _PROTECTION_LEVEL[_QOP_PROTECTION[self._qop]]
+        if self._qop in (SncQop.AUTH_ONLY, SncQop.INTEGRITY, SncQop.PRIVACY):
+            self._qmin, self._qmax, self._quse = level, _QOP_MAX_AVAILABLE, level
+        else:
+            self._qmin = self._qmax = self._quse = _QOP_MAX_AVAILABLE
         # D-24: build the 126-byte SNC extension header for the first FR_INIT.
         # _build_snc_ext_header is pure Python — no lib needed.
         _partner_dn = _strip_snc_prefix(_strip_quotes(snc_partnername))
         self._ext_header: bytes = _build_snc_ext_header(_partner_dn)
-        # D-24: adapter info string goes as app_data in every FR_INIT frame.
-        # Empty for mock/test bindings (_real == False) to keep test assertions stable.
+        # D-24: adapter info string goes as app_data in every FR_INIT frame when a
+        # native library is loaded. Empty otherwise: a live server completed the
+        # handshake with empty app_data from the built-in mechanism (2026-11-08,
+        # tests/golden/snc/secgss_live_handshake.json).
         self._adapter_info: bytes = (
             _get_snc_adapter_info(self._gss._lib) if self._gss._real else b""
         )
@@ -848,6 +926,9 @@ class SncTransport:
         # Set by activate_snc(gw_handle=...) when the GW connection handle is known.
         self._gw_handle: bytes = b"        "
         self._use_gw: bool = False
+        # Gateway-assigned connection index echoed at GW header [78:80]. None =
+        # not known (connect_snc / tests); the previously hard-coded 9 is used then.
+        self._conn_idx: int | None = None
         # Handshake is NOT called here. For RFC connections the GW_CONNECT /
         # GW_INFO / GW_DONE_CLIENT exchange must complete on the plain channel
         # BEFORE the GSS frames go on the wire. Connection._handshake() calls
@@ -855,7 +936,7 @@ class SncTransport:
 
     # -- handshake (D-04, SEC-06) --------------------------------------------
 
-    def activate_snc(self, gw_handle: bytes | None = None) -> None:
+    def activate_snc(self, gw_handle: bytes | None = None, conn_idx: int | None = None) -> None:
         """Run the GSS handshake; called by Connection after GW_DONE.
 
         ``gw_handle`` is the 8-byte ASCII handle from GW_CONNECT_RESPONSE
@@ -868,42 +949,43 @@ class SncTransport:
         if gw_handle is not None:
             self._gw_handle = gw_handle
             self._use_gw = True
+        self._conn_idx = conn_idx
         self._handshake()
 
     # -- GW envelope builder/stripper (port-4800 flow) -----------------------
 
-    def _build_gw_snc_frame(self, snc_frame: bytes) -> bytes:
-        """Wrap an SNC frame in the GW type-0x06CB envelope.
+    def _build_gw_snc_frame(self, snc_frame: bytes, *, handshake: bool = False) -> bytes:
+        """Wrap an SNC frame in the 80-byte GW type-0x06CB envelope.
 
-        Layout, as observed in a proxy capture of an SNC session:
-          [0:2]   0x06CB   GW frame type
-          [2]     0x02     version; 0x02 in every GW frame observed
-          [4:6]   0xFFFF   flags high bytes
-          [10]    0x28     SNC + encrypted flag bits
-          [26:28] LE 0x0800 (0x0008 read big-endian)
-          [30:32] LE 0x0C05 (0x050C read big-endian)
-          [40:48] handle   8-byte ASCII GW connection handle
-          [48:52] LE 0x00850000 → wire bytes 00 00 85 00
-          [76:80] FF FF 00 09   RFC_MARKER, the SNC variant of the plain FF FF 00 04
-          [80:]   SNC frame content
-          [-8:]   trailer = BE(snc_size) + 00 00 85 00
+        Source: golden fixture snc/snc_frame_headers.json (reference client):
+          [0:2]   06 CB    GW frame type
+          [2]     02       version
+          [4:6]   FF FF
+          [10]    28 on handshake frames, 08 on data frames
+          [26:28] 00 08
+          [30:32] 05 0C
+          [40:48] handle   8-byte ASCII GW conversation id
+          [48:52] 00 00 85 00 on handshake frames, zero on data frames
+          [76:78] FF FF
+          [78:80] BE16 connection index assigned by the gateway's CONNECT reply
+          [80:]   SNC frame
+          [-8:]   trailer = BE32 len(SNC frame) || 00 00 85 00
         """
         snc_size = len(snc_frame)
         hdr = bytearray(80)
         hdr[0] = 0x06
         hdr[1] = 0xCB
         hdr[2] = 0x02  # version
-        struct.pack_into(">H", hdr, 4, 0xFFFF)  # flags[4:6]
-        hdr[10] = 0x28  # SNC+encrypted
-        struct.pack_into("<H", hdr, 26, 0x0800)  # LE 0x0800
-        struct.pack_into("<H", hdr, 30, 0x0C05)  # LE 0x0C05
-        hdr[40:48] = self._gw_handle  # GW handle
-        struct.pack_into("<I", hdr, 48, 0x00850000)  # 00 00 85 00
-        # RFC_MARKER [76:80] = FF FF 00 09
-        hdr[76] = 0xFF
-        hdr[77] = 0xFF
-        hdr[78] = 0x00
-        hdr[79] = 0x09
+        struct.pack_into(">H", hdr, 4, 0xFFFF)
+        hdr[10] = 0x28 if handshake else 0x08
+        struct.pack_into(">H", hdr, 26, 0x0008)
+        struct.pack_into(">H", hdr, 30, 0x050C)
+        hdr[40:48] = self._gw_handle
+        if handshake:
+            hdr[48:52] = b"\x00\x00\x85\x00"
+        struct.pack_into(">H", hdr, 76, 0xFFFF)
+        # Unknown index: keep the value earlier releases sent (accepted by gateways).
+        struct.pack_into(">H", hdr, 78, 9 if self._conn_idx is None else self._conn_idx)
         trailer = struct.pack(">I", snc_size) + b"\x00\x00\x85\x00"
         return bytes(hdr) + snc_frame + trailer
 
@@ -923,10 +1005,13 @@ class SncTransport:
     def _handshake(self) -> None:
         """Drive FR_INIT/FR_ACCEPT until GSS_S_COMPLETE (RESEARCH Pattern 2).
 
-        D-24: first FR_INIT carries the 126-byte extension header + adapter info.
+        D-24: first FR_INIT carries the extension header + adapter info.
         Subsequent FR_INIT rounds omit the extension header but keep adapter info.
-        All handshake frames use QOP = _SNC_HANDSHAKE_QOP (0x7E capabilities mask),
-        not the user-configured data-protection QOP.
+        Every FR_INIT carries the current (min, max, use) QOP triple. When the
+        server's FR_ACCEPT announces a minimum above the level in use, the level is
+        raised to it — a server configured for privacy only therefore gets privacy
+        even from a client that asked for less (golden fixture
+        snc/snc_frame_headers.json, snc_qop 1 and 2).
 
         A GSS output token is sent whenever its length > 0, even on the final
         COMPLETE step. Data frames stay locked until ``_established`` is set.
@@ -941,17 +1026,37 @@ class SncTransport:
                     gss_token=out_token,
                     app_data=self._adapter_info,
                     ext_header=self._ext_header if first_round else b"",
-                    qop=_SNC_HANDSHAKE_QOP,
+                    qop=_qop_field(self._qmin, self._qmax, self._quse),
+                    handshake=True,
                 )
                 first_round = False
             if major == GSS_S_COMPLETE:
+                if out_token:
+                    # The acceptor still has to consume our last token; it confirms
+                    # with an empty ACCEPT_ACK frame, and the gateway refuses data
+                    # sent before that frame was read ("SEND_DATA in state
+                    # RECEIVE_WAIT_FOR_DATA"). Source: live capture 2026-11-10.
+                    ft, _ctx, _qop, token, app = self._recv_snc_frame()
+                    if ft != int(SncFrameType.FR_ACCEPT_ACK) or token or app:
+                        raise SncError("SNC partner did not acknowledge the handshake")
                 self._established = True  # SEC-06: only now may data be wrapped
                 break
             if not (major & GSS_S_CONTINUE_NEEDED):
                 # Hard GSS error — carry status codes only (T-07-CRED).
                 raise SncError(major=major)
-            _ft, _ctx, _qop, token, _app = self._recv_snc_frame()  # FR_ACCEPT
+            ft, _ctx, qop, token, _app = self._recv_snc_frame()
+            if ft != int(SncFrameType.FR_ACCEPT):
+                raise SncError("SNC partner did not accept the handshake")
+            self._apply_partner_qop(qop)
             input_token = token
+
+    def _apply_partner_qop(self, field: int) -> None:
+        pmin, pmax, puse = _qop_unpack(field)
+        if not 1 <= pmin <= puse <= pmax:
+            raise SncError("SNC partner sent an invalid protection level")
+        if pmin > self._quse:
+            self._quse = pmin
+            self._qmax = max(self._qmax, pmin)
 
     # -- frame I/O over the inner transport ----------------------------------
 
@@ -962,19 +1067,20 @@ class SncTransport:
         gss_token: bytes = b"",
         app_data: bytes = b"",
         ext_header: bytes = b"",
-        qop: int | None = None,
+        qop: int = 0,
+        handshake: bool = False,
     ) -> None:
-        effective_qop = qop if qop is not None else self._qop
+        # Data frames carry 0 in the QOP field; only handshake frames carry levels.
         frame = build_snc_frame(
             self._eye,
             int(frame_type),
             self._ctx_id,
-            effective_qop,
+            qop,
             gss_token,
             app_data,
             ext_header=ext_header,
         )
-        wire = self._build_gw_snc_frame(frame) if self._use_gw else frame
+        wire = self._build_gw_snc_frame(frame, handshake=handshake) if self._use_gw else frame
         try:
             self._inner.send_message(wire)
         except (OSError, EOFError) as exc:
@@ -1001,10 +1107,9 @@ class SncTransport:
             self._inner.send_message(payload)
             return
         # Table lookup, not a comparison chain: an unrecognised value must not be
-        # able to reach the unprotected branch. validate_snc_qop() has already
-        # rejected anything outside the table, so a KeyError here means a caller
-        # reached past the constructor.
-        protection = _QOP_PROTECTION[self._qop]
+        # able to reach the unprotected branch. The level in use is 1, 2 or 3 —
+        # set in the constructor and only ever raised by the handshake.
+        protection = _LEVEL_PROTECTION[self._quse]
         if protection is SncFrameType.PRIVACY:
             # gss_wrap → PRIVACY (type 9). Encrypted token goes in the gss_token
             # field (token_len), not app_data — confirmed from proxy capture
@@ -1018,6 +1123,52 @@ class SncTransport:
         else:
             # QOP 1 only: PLAIN (type 7), no data protection.
             self._send_snc_frame(SncFrameType.PLAIN, app_data=payload)
+
+    def send_chunked(self, payload: bytes, chunk_size: int) -> None:
+        """Send a large request as several protected chunks (GW-envelope mode).
+
+        The reference client splits a request whose TLV stream exceeds the
+        gateway's frame limit into ``chunk_size`` pieces, protects each piece as its
+        own SNC data frame and sends it in a GW frame of type 0x0608 — [24:32] zero,
+        [48:52] the SNC frame's length, no trailer — then an 80-byte header-only
+        frame of type 0x0609 with byte 10 = 0, [28:32] = 0x00000100 and
+        [48:52] = 00 00 85 00. Source: golden fixture framing/multiframe_request_snc.
+        """
+        if not self._established or not self._use_gw:
+            raise SncError("chunked send requires an established GW-envelope SNC channel")
+        for i in range(0, len(payload), chunk_size):
+            frame = self._protect(payload[i : i + chunk_size])
+            hdr = bytearray(self._build_gw_snc_frame(frame)[:80])
+            struct.pack_into(">H", hdr, 0, 0x0608)
+            hdr[24:32] = bytes(8)
+            struct.pack_into(">I", hdr, 48, len(frame))
+            self._send_raw(bytes(hdr) + frame)
+        end = bytearray(self._build_gw_snc_frame(b"")[:80])
+        struct.pack_into(">H", end, 0, 0x0609)
+        end[10] = 0
+        end[24:28] = bytes(4)
+        struct.pack_into(">I", end, 28, 0x100)
+        end[48:52] = b"\x00\x00\x85\x00"
+        self._send_raw(bytes(end))
+
+    def _protect(self, payload: bytes) -> bytes:
+        """Protect ``payload`` at the level in use; return the SNC frame (no envelope)."""
+        protection = _LEVEL_PROTECTION[self._quse]
+        if protection is SncFrameType.PRIVACY:
+            return build_snc_frame(
+                self._eye, int(protection), self._ctx_id, 0, self._gss.wrap(payload)
+            )
+        if protection is SncFrameType.INTEGRITY:
+            return build_snc_frame(
+                self._eye, int(protection), self._ctx_id, 0, self._gss.get_mic(payload), payload
+            )
+        return build_snc_frame(self._eye, int(protection), self._ctx_id, 0, b"", payload)
+
+    def _send_raw(self, wire: bytes) -> None:
+        try:
+            self._inner.send_message(wire)
+        except (OSError, EOFError) as exc:
+            raise CommunicationError(str(exc), original_exception=exc) from exc
 
     def recv_message(self) -> bytes:
         """Receive one frame; passthrough non-SNC frames, else QOP-dispatch."""
@@ -1038,6 +1189,13 @@ class SncTransport:
             snc_raw = raw
         # parse_snc_frame enforces the 128 MiB DoS cap.
         frame_type, _ctx, _qop, gss_token, app_data = parse_snc_frame(snc_raw)
+        level = _FRAME_LEVEL.get(frame_type)
+        if level is None:
+            raise SncError(f"unexpected SNC frame type {frame_type} on an established channel")
+        if level < self._qmin:
+            # Never accept less protection than this side's own minimum: a frame
+            # type is chosen by the sender, so this is where a downgrade is refused.
+            raise SncError("SNC frame protected below the required minimum")
         if frame_type == int(SncFrameType.PRIVACY):
             # PRIVACY: encrypted data is in gss_token (token_len field),
             # data_len=0 — confirmed by proxy capture and the SNC output path protocol analysis.
@@ -1045,8 +1203,7 @@ class SncTransport:
         if frame_type == int(SncFrameType.INTEGRITY):
             self._gss.verify_mic(app_data, gss_token)
             return app_data
-        # PLAIN (type 7) or handshake frame leaking through: return app data.
-        return app_data
+        return app_data  # PLAIN (type 7)
 
     def close(self) -> None:
         """Best-effort release the GSS context, then close the inner transport."""

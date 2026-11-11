@@ -194,17 +194,24 @@ successful registration returns zeros at both positions.
 ## RFC Marker (4 bytes)
 
 ```
-Client request:  FF FF 00 04
-Server response: 00 00 00 04
+Client GW_CONNECT request:  <BE16 local index> FF FF
+Gateway CONNECT reply:      <same local index> <BE16 connection index>
+Every later client frame:   FF FF <connection index>
+Later server frames:        00 00 <connection index>
 ```
 
 Immediately follows the APPC header (at frame offset 80, i.e. NI[4] + GW[76]).
 The `FF FF` vs `00 00` high bytes discriminate client→server from server→client frames. The
-low 2 bytes carry a conversation-protocol value, byte-swapped into `00 04`.
+low 2 bytes are a **connection index the gateway assigns** in its CONNECT reply; the client
+echoes it in every later frame. Three parallel connections from one process were assigned
+3, 0 and 1 (plain) and 1, 0 and 3 (SNC) — golden fixture
+`tests/golden/snc/snc_frame_headers.json` ("connection_index"). That is why committed
+captures show different values here (`00 04`, `00 01`): each recorded whatever the gateway
+had assigned to that connection.
 
-**Version note:** The golden fixture `stfc_connection_request.bin` was captured from an older
-client version and shows `FF FF 00 01` here. Newer clients emit `FF FF 00 04` on all client
-frames. Both are accepted by the systems tested; `saprfclib` emits `FF FF 00 04`.
+`saprfclib` echoes the assigned index (`Session.conn_idx`). Frames built without a live
+session fall back to `00 04` (`00 09` on SNC), the values earlier releases sent; gateways
+accepted those as well, and what a gateway does with the index is not known.
 
 ---
 
@@ -332,7 +339,7 @@ Confirmed by live STFC_CONNECTION capture. Golden fixtures:
 ### Request (client → server)
 
 ```
-NI header (4B) + APPC header (76B) + RFC marker ffff0004 (4B)
+NI header (4B) + APPC header (76B) + RFC marker ffff<conn idx> (4B)
 └── TLV stream:
     0x0502  len=0          call-start marker
     0x000b  len=6          RFC version "754" (UTF-16LE)
@@ -921,12 +928,11 @@ See `tests/golden/framing/stfc_connection_request.json` for full field-by-field 
 Items where the wire behaviour is documented but incompletely confirmed, or confirmed but not
 yet implemented. Each states what is known, what is not, and the consequence of the gap.
 
-### SAProuter NI_ROUTE prefix — CONFIRMED (2026-06-27)
+### SAProuter NI_ROUTE prefix — CONFIRMED (corrected 2026-11-08)
 
-Wire format confirmed from live capture: `NI_ROUTE\0` (9B) + talk_mode (`0x02`) + `0x28` +
-version (`0x02`) + hop_count (4B BE) + total_data_length (4B BE) + per-hop entries
-(entry_len [4B] + host`\0` + svc [6B]) + final destination (host`\0` + svc [6B]).
-Golden fixture: `tests/golden/router/ni_route_payload.bin`. Implemented and replayed in CI.
+Layout, the multi-router correction and where the client connects: see
+[message_server.md → NI_ROUTE layout](message_server.md#ni_route-layout-confirmed-corrected-2026-11-08).
+Golden fixtures under `tests/golden/router/`, replayed in CI.
 
 ### Message-server SAPMS group logon — CONFIRMED (2026-06-27)
 
@@ -1140,6 +1146,35 @@ against a live logon. See [handshake.md](handshake.md) for the derivation.
 parsed out of the response TLV, and the tags carrying it on a system failure have not been
 identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
 client provides. Not a correctness problem for the returned data.
+
+### Multi-frame requests — CONFIRMED (2026-11-08)
+
+The client side has the same limit: a gateway resets the connection when one client
+frame carries a TLV stream of more than **28000 bytes**. Probed live by growing one
+request byte by byte: a 27998-byte stream (plus the 8-byte footer) is accepted in a single
+`0x06CB` frame, a 28002-byte one is reset. Before this was handled, any call whose
+request exceeded it — a long `OPTIONS` table, a large table parameter — failed with
+`Connection reset by peer`, while the NW RFC SDK sent the same call fine.
+
+A larger request is sent as the reference client sends it (fixture
+`multiframe_request_plain_frames.bin`, reproduced byte for byte by `_gw_request_frames`):
+
+| frame | type | payload | header differences to `0x06CB` |
+|---|---|---|---|
+| 1 … n−1 | `0x0608` | 28000 bytes of the TLV stream | `[24:32]` zero, `[48:52]` payload length |
+| n | `0x0608` | the rest (≤ 28000) | same |
+| end | `0x0609` | none (80-byte header only) | `[24:28]` zero, `[28:32]` `00 00 01 00`, `[48:52]` 28000 |
+
+The 8-byte footer of a single-frame request is not sent. The server answers as usual
+(its reply may itself be multi-frame).
+
+Over SNC each 28000-byte piece is protected as its own SNC data frame and sent in a
+`0x0608` envelope without the 8-byte SNC trailer, `[48:52]` holding the SNC frame's
+length; the closing `0x0609` frame has byte 10 = 0 and `[48:52]` = `00 00 85 00`
+(fixture `multiframe_request_snc.json`, headers only). The terminator's `[48:52]` thus
+differs between the two paths — 28000 plain, `00 00 85 00` with SNC — which suggests a
+value left over from an earlier header rather than a defined field; both are sent
+exactly as observed.
 
 ### Multi-frame responses
 

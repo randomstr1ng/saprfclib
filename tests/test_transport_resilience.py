@@ -21,13 +21,18 @@ from saprfclib.transport import (
     enable_keepalive,
 )
 
+# Socket options are checked for "on" (non-zero), not == 1: macOS returns the option's
+# flag bit (SO_KEEPALIVE 8, TCP_NODELAY 4) for an enabled boolean option.
+
 
 def _listener() -> tuple[socket.socket, int]:
     """A listening socket that accepts but never speaks — a wedged peer."""
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
+    # Backlog above 1: Windows refuses a second pending connection at backlog 1,
+    # and these tests open more than one connection without accepting.
+    srv.listen(8)
     return srv, srv.getsockname()[1]
 
 
@@ -98,7 +103,7 @@ def test_keepalive_is_enabled_on_a_connection() -> None:
     try:
         transport = connect_tcp("127.0.0.1", port)
         try:
-            assert transport._sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1
+            assert transport._sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
         finally:
             transport.close()
     finally:
@@ -111,7 +116,7 @@ def test_nodelay_is_still_set() -> None:
     try:
         transport = connect_tcp("127.0.0.1", port)
         try:
-            assert transport._sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+            assert transport._sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
         finally:
             transport.close()
     finally:
@@ -128,7 +133,7 @@ def test_enable_keepalive_survives_a_platform_without_the_timing_knobs() -> None
     sock = socket.socket()
     try:
         enable_keepalive(sock)
-        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1
+        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
     finally:
         sock.close()
 

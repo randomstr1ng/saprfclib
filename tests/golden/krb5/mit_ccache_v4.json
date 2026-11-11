@@ -1,0 +1,10 @@
+{
+  "description": "FILE credential cache written by MIT krb5 (kinit + kvno against Active Directory), format version 4. Sanitised with length-preserving substitution: realm -> EXAMPLE-REALM.TEST, client -> testuser, service -> service; every session key replaced by fixed bytes and every ticket blob by 0xA5 bytes, so no usable credential remains.",
+  "source": "MIT Kerberos 1.22 kinit/kvno, Active Directory KDC",
+  "default_principal": "testuser@EXAMPLE-REALM.TEST",
+  "credentials": [
+    {"server": "krbtgt/EXAMPLE-REALM.TEST@EXAMPLE-REALM.TEST", "enctype": 18, "ticket_len": 1253},
+    {"server": "service@EXAMPLE-REALM.TEST", "enctype": 18, "ticket_len": 1230}
+  ],
+  "skipped_config_entries": 1
+}

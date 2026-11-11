@@ -13,7 +13,7 @@
 #   - single-step and two-step handshakes reach _established == True (SEC-06)
 #   - no data frame is sent before COMPLETE; send_message before COMPLETE raises
 #   - a GSS hard error during handshake raises SncError(major/minor), no leak
-#   - snc_sso=True raises NotImplementedError (D-23)
+#   - snc_sso=True is accepted: it changes only the logon records (Connection)
 #   - QOP-3 privacy wrap/unwrap round-trip (type-9 frames)
 #   - QOP-1 plain round-trip (type-7 frames)
 #   - non-eye-catcher inner frame passes through unchanged (D-05)
@@ -132,6 +132,13 @@ def _make_transport(*, mock=None, inner=None, snc_qop=3, snc_sso=False, eye_catc
 
     mock = mock or MockGssLib()
     inner = inner if inner is not None else MockTransport(responses=[])
+    # A handshake whose last step still produces a token is acknowledged by the
+    # server with an empty ACCEPT_ACK frame (live capture 2026-11-10); script it
+    # right after the FR_ACCEPT replies the CONTINUE steps consume.
+    script = mock._init_script
+    if script and script[-1][0] == GSS_S_COMPLETE and script[-1][1]:
+        continues = sum(1 for major, _ in script if major & GSS_S_CONTINUE_NEEDED)
+        inner._responses.insert(continues, _ack_frame(eye_catcher or _EYE))
     binding = GssBinding(
         snc_lib="/nonexistent/lib.so",
         snc_partnername="p:CN=SAP Server",
@@ -151,9 +158,19 @@ def _make_transport(*, mock=None, inner=None, snc_qop=3, snc_sso=False, eye_catc
     return t, mock, inner
 
 
-def _accept_frame(token: bytes, eye: bytes = _EYE) -> bytes:
+# Server QOP triple min=1, max=3, use=1: a server that permits every level, so the
+# client's own snc_qop decides. (A server with min=3 sends 0x7e; see the raise test.)
+_PERMISSIVE_SERVER_QOP = 0x3A
+
+
+def _accept_frame(token: bytes, eye: bytes = _EYE, qop: int = _PERMISSIVE_SERVER_QOP) -> bytes:
     """Build an FR_ACCEPT frame carrying a server handshake token."""
-    return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT), 0, 3, gss_token=token)
+    return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT), 0, qop, gss_token=token)
+
+
+def _ack_frame(eye: bytes = _EYE) -> bytes:
+    """The empty ACCEPT_ACK that answers an initiator's final token."""
+    return build_snc_frame(eye, int(SncFrameType.FR_ACCEPT_ACK), 0, 0)
 
 
 def _assert_no_leak(err: SncError) -> None:
@@ -211,7 +228,7 @@ def test_handshake_gss_error_raises_snc_error_no_leak():
     _assert_no_leak(err)
 
 
-def test_snc_sso_raises_not_implemented():
+def test_snc_sso_is_accepted_by_the_transport():
     from tests._mocks import MockTransport
 
     binding = GssBinding(
@@ -219,14 +236,13 @@ def test_snc_sso_raises_not_implemented():
         snc_partnername="p:CN=X",
         loader=lambda _p: MockGssLib(),
     )
-    with pytest.raises(NotImplementedError):
-        SncTransport(
-            MockTransport(responses=[]),
-            snc_lib="/nonexistent/lib.so",
-            snc_partnername="p:CN=X",
-            snc_sso=True,
-            gss_binding=binding,
-        )
+    SncTransport(
+        MockTransport(responses=[]),
+        snc_lib="/nonexistent/lib.so",
+        snc_partnername="p:CN=X",
+        snc_sso=True,
+        gss_binding=binding,
+    )
 
 
 def test_injected_eye_catcher_is_used_in_frames():
@@ -360,7 +376,8 @@ def test_connect_snc_returns_snctransport(monkeypatch):
     import saprfclib.snc as snc_mod
     from tests._mocks import MockTransport
 
-    fake_inner = MockTransport(responses=[])
+    # The default mock completes with a final token: the server acknowledges it.
+    fake_inner = MockTransport(responses=[_ack_frame()])
     monkeypatch.setattr(snc_mod, "connect_tcp", lambda *a, **k: fake_inner)
 
     real_binding_init = GssBinding.__init__

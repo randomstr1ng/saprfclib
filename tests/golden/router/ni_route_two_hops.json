@@ -1,0 +1,6 @@
+{
+ "fixture": "ni_route_two_hops",
+ "capture_source": "live capture 2026-11-08, lab with two SAProuter 40.7 instances on one host and an S/4HANA gateway behind them. NI_ROUTE sent by the NW RFC SDK (pyrfc) for a route through two SAProuters (route string /H/127.0.0.1/S/3391/H/127.0.0.1/S/3392) to a gateway on port 3300. Both routers accepted it (NI_PONG) and the call completed.",
+ "sanitised": "destination address replaced by 198.51.100.7 (TEST-NET-2) and the router host name by host1, byte length preserved. No NI length prefix.",
+ "evidence": "tier 1"
+}

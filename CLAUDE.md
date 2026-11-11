@@ -144,11 +144,15 @@ a `.json` describing the field breakdown.
 
 ## Hard constraints
 
-- **Zero non-Python runtime dependencies.** Only `wsproto` and `h11`, both pure Python,
-  both core (not extras). Never add a C extension, a ctypes wrapper around a vendor
-  binary, `cryptography`, `numpy`, `aiohttp`, or anything requiring a build step.
+- **Zero non-Python runtime dependencies.** Core dependencies are exactly `wsproto`,
+  `h11` (WebSocket RFC), and `asn1crypto`, `ecdsa`, `tlslite-ng` (built-in SNC) — all
+  pure Python, all core (not extras). Never add a C extension, a ctypes wrapper around a
+  vendor binary, `cryptography`, `numpy`, `aiohttp`, or anything requiring a build step.
   `tests/test_packaging.py` enforces the dependency contract — if it goes red, the
   contract was broken, not the test.
+- **Never implement a cryptographic primitive.** Ciphers, signatures, key agreement and
+  ASN.1/X.509 parsing come from the maintained libraries above; `hashlib`/`hmac` from the
+  stdlib. Protocol constructions on top of them (a PRF, a record format) are ours.
 - **Never link or wrap `libsapnwrfc.so`.** That is `pyrfc`, and it is precisely what
   this project exists to avoid.
 - **Python 3.12+ only.** No backports, no compatibility shims. Use modern syntax freely.
@@ -168,8 +172,9 @@ a `.json` describing the field breakdown.
 |-----------|-------------|-----|
 | `websockets` (as a runtime dep) | `wsproto` + `h11` | `websockets` owns its I/O loop and fights the unified transport design. Fine as a test client. |
 | `aiohttp` | `wsproto` + `h11` over `asyncio` + `ssl` | Heavyweight, C-accelerated, owns its own loop. |
-| `cryptography` / `pyOpenSSL` as core dep | stdlib `ssl`, `asn1crypto`, `oscrypto` | Rust/C build step — violates the zero-native-dep constraint. Acceptable only as an optional extra. |
-| `python-gssapi` / `pykerberos` | `minikerberos` (pure Python) | Both require MIT/Heimdal C libraries at build and runtime. |
+| `cryptography` / `pyOpenSSL` / `pycryptodome` as core dep | `tlslite-ng` (AES, 3DES, RSA), `ecdsa` (EC), `asn1crypto` (DER/X.509), stdlib `ssl`/`hashlib`/`hmac` | Rust/C build step — violates the zero-native-dep constraint. |
+| `pyaes`, `pyDes`, hand-written ciphers | `tlslite-ng` | Unmaintained since 2016/2017, or self-built crypto. |
+| `python-gssapi` / `pykerberos` / `impacket` / `minikerberos` | the in-tree `saprfclib.krb5` | The first two require MIT/Heimdal C libraries at build and runtime; `impacket` and `minikerberos` pull `pycryptodomex` (C). `saprfclib.krb5` builds the RFC 3961/3962/4120 constructions on `tlslite-ng` AES and `hashlib`. |
 | `numpy` for binary parsing | `struct` + `memoryview` + `bytearray` | Massive C dependency for what stdlib handles natively. |
 | `float` for ABAP decimal/BCD types | `decimal.Decimal` | Binary float can't represent base-10 exactly — corrupts financial data. |
 | bare `utf-16` codec | `utf-16-le` / `utf-16-be` | Bare `utf-16` emits and consumes a BOM the wire format does not have. |
@@ -210,7 +215,12 @@ src/saprfclib/
   invoke.py          RFC call TLV builder + response parser     — sans-I/O
   session.py         client RFC session state machine           — sans-I/O
   server_session.py  server-side registration/listen machine    — sans-I/O
-  snc.py             SNC frame codec + GSS-API binding (ctypes to user-supplied lib)
+  snc.py             SNC frame codec + transport; GSS-API binding (ctypes to user-supplied lib)
+  secgss.py          built-in SNC mechanism (client, X.509 and Kerberos key exchange) — sans-I/O
+  pse.py             PSE file reader → SncCredential                              — sans-I/O
+  krb5/              pure-Python Kerberos 5 client: RFC 3961/3962 AES crypto, RFC 4120
+                     messages + AS/TGS exchanges, MIT ccache/keytab readers, Windows
+                     logon-session tickets (LSA via ctypes to secur32.dll), KerberosLogin
   transport.py       blocking NI/TCP socket transport (4-byte BE length prefix)
   ws.py              WebSocket RFC transport (wsproto + h11 over ssl)
   router.py          SAProuter route strings, message-server group logon
@@ -232,8 +242,10 @@ should not parse bytes itself. Keep new protocol logic in the sans-I/O layer.
 |------|---------|-------|
 | WebSocket framing | `wsproto` (sans-I/O) | Drives over our own `asyncio` + `ssl` transport. |
 | HTTP/1.1 upgrade | `h11` (sans-I/O) | Used for the WebSocket `Upgrade` handshake. |
-| Kerberos / SPNEGO | `minikerberos` (pure Python) | For SNC, when implemented. No C GSS binding. |
-| ASN.1 / X.509 | `asn1crypto` (pure Python) | SPNEGO tokens, cert parsing for SNC. |
+| Kerberos | in-tree `saprfclib.krb5` | RFC constructions on `tlslite-ng` AES + `hashlib`; AES enctypes only. Used only when `snc_kerberos` is given. On Windows, tickets come from LSA through `ctypes` to `secur32.dll` — an OS API, not a third-party or SAP library. |
+| ASN.1 / X.509 | `asn1crypto` (pure Python) | Certificates, keys, SPKI for SNC. |
+| AES / 3DES / RSA | `tlslite-ng` (pure Python) | Record cipher, PSE decryption, handshake signatures. Uses faster backends automatically if installed. |
+| ECDH | `ecdsa` (pure Python) | Ephemeral P-256 key agreement in the SNC handshake. |
 | ABAP decimals | stdlib `decimal.Decimal` | Exact base-10; never `float`. |
 | UTF-16 strings | stdlib `utf-16-le` / `utf-16-be` | Explicit codec — never bare `utf-16`. |
 
@@ -301,5 +313,6 @@ hatch run lint:type                   # mypy strict over src/
 - Prefer a narrow, well-evidenced change over a broad plausible one.
 - When a capture contradicts this document, the capture wins — and update this document.
 - Propose changes as PRs; don't push directly to `main`.
-- For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, SNC SSO2, async wRFC/SNC),
+- For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, Kerberos suite `0x0008`,
+  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`),
   check the GitHub issues before starting — a capture requirement may be blocking.

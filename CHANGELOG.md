@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
+SNC without any SAP library: the X.509 and Kerberos mechanisms are built in, Kerberos
+single sign-on works with Active Directory on Windows (logon session) and elsewhere
+(ticket cache, password or keytab), and SNC connections are available from
+`connect_async()`. Closes the v0.2.0 milestone (#16, #17, #20, #35, #61).
+
+### Added
+
+- **Built-in SNC — no SAP library needed** (issue #35). `connect(snc_partnername=...,
+  snc_pse=..., snc_pse_pin=...)` opens an SNC connection with saprfclib's own
+  implementation of SAP's X.509 SNC mechanism; `snc_credential=` accepts a key and
+  certificates loaded by the caller instead of a PSE file. `snc_lib` keeps working for a
+  native GSS-API library. Implemented: protocol 1.1, cipher suite `0x0009` (ECDHE P-256,
+  AES-256-CBC, HMAC-SHA256), RSA certificates. Confirmed live against an S/4HANA system
+  (handshake, logon, multi-chunk requests and responses) and byte for byte against SAP
+  CommonCryptoLib; see `docs/protocol/snc-mechanism.md`.
+- **`snc_sso=True`: SNC logon without a password** (issues #16, #61). The server maps the
+  client certificate to a user. Only the logon records change (no password, no user unless
+  given); the SNC frames are the same as for a password logon, so the "extension header"
+  premise of #61 does not apply. Works with the built-in mechanism and with `snc_lib`.
+  Confirmed live; record layout in `tests/golden/snc/snc_logon_tlvs.json`.
+- **`connect_async()` supports SNC and WebSocket RFC** (issue #17). These paths run the
+  synchronous implementation on a dedicated worker thread that owns the connection, so
+  every method is awaited without blocking the event loop and there is one implementation
+  of each security handshake rather than two. Confirmed live for SNC (built-in mechanism
+  and `snc_lib`); WebSocket RFC is covered offline.
+- `saprfclib.pse.load_pse()` reads `sapgenpse` PSE files (versions 2 and 4, default and
+  PBES2 encryption, LPS-wrapped, RSA keys), and PINs stored by `sapgenpse seclogin` in
+  `cred_v2` are read in every form written outside Windows. An existing CommonCryptoLib
+  `SECUDIR` works unchanged: with only `snc_partnername` given, the PSE is chosen as
+  CommonCryptoLib chooses it.
+- **Kerberos SNC — single sign-on with Active Directory, no SAP library** (issue #35).
+  `connect(snc_partnername="p:CN=<name>@<REALM>", snc_kerberos=True, snc_sso=True)`
+  logs on with the user's Kerberos ticket; `snc_kerberos=
+  KerberosLogin(...)` takes a password, a keytab or a specific cache instead. A pure-Python
+  Kerberos 5 client (`saprfclib.krb5`: AES encryption types per RFC 3961/3962, AS and TGS
+  exchanges per RFC 4120, MIT ccache and keytab files) gets the service ticket; the SNC
+  mechanism's Kerberos key exchange (suite `0x0007`) carries it. No new dependency.
+  Confirmed live against an S/4HANA system with Active Directory tickets (password,
+  keytab, MIT and sssd ticket caches, user principal and SPN partner names, sync and
+  async, multi-chunk requests and responses) and byte for byte against SAP
+  CommonCryptoLib as the acceptor; see `docs/protocol/snc-mechanism.md` and
+  `docs/protocol/kerberos.md`.
+- **Windows single sign-on for Kerberos SNC.** On Windows, `snc_kerberos=True` takes the
+  service ticket from the user's logon session through the Win32 LSA API
+  (`KerbRetrieveEncodedTicketMessage`), so a domain user logs on without a password,
+  KDC address or ticket cache. Confirmed live on Windows 11.
+- **Kerberos partner names as in SAP Logon.** For `p:CN=<name>@<REALM>` the ticket is
+  requested for `SAP/<name>@<REALM>` first, as SAP's own client does, then for
+  `<name>@<REALM>` when the domain does not know the SPN. Partner names that work in SAP
+  Logon now work unchanged.
+
+### Changed
+
+- **`snc_partnername` alone now switches SNC on**, as in the NW RFC SDK. It used to be
+  ignored unless `snc_lib` was also given, which connected without SNC to a system the
+  caller had named an SNC partner for.
+- New core dependencies `asn1crypto`, `ecdsa` and `tlslite-ng`, all pure Python. They
+  provide the DER/X.509 parsing, ECDH and AES/3DES/RSA the SNC mechanism needs; the
+  library implements no cryptographic primitive itself.
+- CI runs the offline test suite on Windows and macOS as well as Linux.
+
+### Fixed
+
+- **SNC handshakes that end on a client token** now wait for the server's ACCEPT_ACK
+  frame (type 5) before data is sent. Data sent earlier was refused by the gateway
+  ("SEND_DATA in state RECEIVE_WAIT_FOR_DATA"). The X.509 exchange ends on a server
+  token and is unaffected; GSS libraries passed with `snc_lib` that finish with an
+  output token were affected.
+- **A rejected logon raises `LogonError`**, a new `SapRfcError` subclass, instead of a
+  bare `ValueError` that no `except SapRfcError` caught. It is still a `ValueError`, so
+  existing handlers keep working, and deliberately not a `CommunicationError`, so
+  transactional retries never repeat rejected credentials. `saprfclib.compat.LogonError`
+  now points at it; it pointed at `CommunicationError`, which a rejected logon never
+  raised.
+- **Text files are read as UTF-8 on every platform.** The SOCKS5 service-binding files
+  were read with the locale's codec, which is cp1252 on Windows. The offline test suite
+  now passes on Windows as well.
+- **Requests larger than 28000 bytes** reset the connection (`Connection reset by peer`),
+  on plain RFC and over SNC — a long `OPTIONS` table was enough. They are now split into
+  gateway frames the way the NW RFC SDK splits them (`0x0608` chunks and a `0x0609`
+  terminator; over SNC each chunk protected separately). The single-frame limit was probed
+  live; the chunk layout is byte-identical to the reference
+  (`tests/golden/framing/multiframe_request_*`).
+- **SAProuter routes** (issue #20). `connect(saprouter=...)` opened the TCP connection to
+  `ashost` instead of the first router and sent the route there; on SNC connections it also
+  sent the NI version exchange before the route. Routes with more than one router were
+  malformed (a real router answered -93 `invalid route`). The connection now goes to the
+  first router, the route is the first frame on it, and `NI_ROUTE` is byte-identical to the
+  NW RFC SDK's for one and two routers, with and without hop passwords. Confirmed live
+  through two SAProuters, including SNC between the routers and end-to-end SNC through them.
+  `saprouter` together with `wshost` is now rejected.
+- **SNC protection-level negotiation.** The QOP field of the SNC handshake frames is three
+  2-bit levels (minimum, maximum, in use), not a fixed `0x7E`. The client now sends the
+  levels `snc_qop` asks for, raises its level when the server's minimum is higher, uses the
+  frame type of the resulting level for data, and refuses inbound data frames protected
+  below its own minimum. Data frames carry 0 in the field. Matches a reference client at
+  `snc_qop` 1, 2, 3, 8 and 9 (`tests/golden/snc/snc_frame_headers.json`).
+- The SNC GW envelope now distinguishes handshake from data frames (bytes 10 and 48:52) and
+  echoes the gateway-assigned connection index at bytes 78:80 instead of a fixed `0x0009`.
+- The SNC extension header encodes the partner DN like the reference client (T61String for
+  characters outside PrintableString, upper-case `C`, `DC` and `SN`); non-ASCII partner
+  names are refused instead of being mis-encoded.
+- **GW frames echo the gateway-assigned connection index** (plain RFC and SNC). Bytes
+  78:80 of every client frame after GW_CONNECT carried a fixed `00 04` (`00 09` on SNC);
+  the gateway assigns a per-connection index in its CONNECT reply and the reference client
+  echoes it. Gateways tolerated the fixed value; saprfclib now sends the assigned one.
+- Connection attributes of an SNC connection (`get_connection_attributes()`) were decoded
+  as ASCII, giving `'A\x004\x00H'` instead of `'A4H'`: the SNC transport strips the GW
+  header the decoder used to recognise a live reply. They are now decoded as UTF-16.
+- A password logon inside SNC now carries the empty record 0x0675 the reference client
+  sends.
+- `docs/protocol/snc.md` listed the SNC handshake frame types as 1/2; they are 2/4.
+
+### Documentation
+
+- New protocol pages `docs/protocol/snc-mechanism.md` (built-in X.509 and Kerberos
+  mechanism, including the reference client's behaviour) and `docs/protocol/kerberos.md`
+  (Kerberos client, Windows logon session), each with a "Limitations and why" section
+  that gives the reason for every unsupported variant.
+- SNC cookbook: built-in X.509, Kerberos single sign-on, partner-name forms.
+- New example `examples/10_snc_kerberos_sso.py`; `examples/06_snc_connection.py` can log
+  on with the certificate alone (`SAPRFC_SNC_SSO=1`).
+- API reference page for SNC credentials (`KerberosLogin`, `SncCredential`, `load_pse`,
+  `load_secudir_credential`); `LogonError` in the exceptions page.
+- The pyrfc migration guide lists the built-in SNC equivalents and maps `LogonError`
+  exactly; the SOCKS5 protocol page is reachable from the navigation.
+
 ## [0.1.9] - 2026-10-27
 
 One fix, issue #58: the RFC server (`RfcServer`) now registers at the gateway with any
@@ -1640,7 +1769,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.6...v0.1.7

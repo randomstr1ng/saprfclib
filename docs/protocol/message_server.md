@@ -282,35 +282,51 @@ Observed while probing which targets the test router permits: `3300` and `3200`
 were accepted for the configured host and `22` was refused, so the permission
 table is per host **and** port.
 
-### Hop passwords — CONFIRMED
+### NI_ROUTE layout — CONFIRMED (corrected 2026-11-08)
 
-A route entry is **three NUL-terminated fields**: host, service, password. An
-entry with no password still ends with the empty password's NUL.
+A route entry is **three NUL-terminated fields**: host, service, password. The frame
+lists every router and, last, the destination gateway, with **no per-entry length**:
 
 ```
 NI_ROUTE\0            9
-talk_mode  0x02       1
-0x28                  1
-route_version 0x02    1
-hop_count             4 BE
-total_data_length     4 BE   (sum of entry data + destination data)
-per hop:
-    entry_length      4 BE
-    host\0 service\0 password\0
-destination (no length prefix):
-    host\0 service\0 \0
+0x02                  1
+0x28                  1    NI version 40
+n_entries             1    routers + destination
+BE32                  n_entries - 1
+BE32                  total length of all entries
+BE32                  offset of entry 1 (= length of entry 0)
+entries               host\0 service\0 password\0  …  destination host\0 service\0 \0
 ```
 
-Captured from `niping` sending a password-protected route, sanitised into
-`tests/golden/router/ni_route_password_payload.bin`:
+Golden fixtures, each byte-identical to what the NW RFC SDK sends and accepted by real
+routers: `ni_route_payload.bin` (one router), `ni_route_password_payload.bin` (one router
+with a password), `ni_route_two_hops.bin` (two routers), `ni_route_two_hops_passwords.bin`
+(two routers, password on the second entry).
 
-```
-entry_length 37   b"router.example.com\0" b"3299\0" b"s3cr3tp4s\0"
-destination       b"192.168.88.7\0" b"3300\0" b"\0"
-```
+The earlier reading of this header — a hop count, then a 4-byte length before each router
+entry — produced exactly the right bytes for **one** router: byte 11 is 2 either way
+(entry count vs "route version"), the first BE32 is 1 either way, and the third BE32 is the
+first entry's length either way. With two routers it is wrong, and a live router rejects
+it with -93 `invalid route`.
 
-`build_ni_route` reproduces both that frame and the unprotected
-`ni_route_payload.bin` byte for byte.
+**Where the client connects.** The TCP connection goes to the **first router**; `ashost`
+and the gateway port become the destination entry. Before 2026-11-08 `connect()` opened
+the socket to `ashost` and sent the route there — a gateway that does not route answers
+something else entirely — and on SNC connections it also sent the NI version exchange
+before the route. Both are fixed; the route is now the first thing on the socket.
+
+**Passwords.** A `/P/` value belongs to the `/H/` entry before it and is checked by the
+router that connects **to** that entry: with `/H/r1/S/3391/H/r2/S/3392/P/pw` it is router 1
+that checks `pw`. The destination entry carries an empty password.
+
+**SNC and routers.** Routers can protect the router-to-router leg with SNC (routing-table
+`KT` / `KP` entries). That is configured on the routers only: the client↔first-router leg
+is never SNC-protected by the router layer, the route frame on it is plaintext, and
+everything after `NI_PONG` is forwarded unchanged. A client therefore needs nothing
+router-specific for SNC; end-to-end SNC to the gateway runs through the routers as is,
+including inside a router-SNC leg (all confirmed live). A router-to-router SNC failure
+reaches the client as `NI_RTERR` with return code -104 and the text
+`SNC processing failed` (`ni_rterr_snc_failure.bin`).
 
 #### The old implementation was right by coincidence
 

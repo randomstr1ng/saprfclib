@@ -8,6 +8,8 @@
 
 ::: saprfclib.exceptions.CommunicationError
 
+::: saprfclib.exceptions.LogonError
+
 ::: saprfclib.exceptions.TransactionalError
 
 ::: saprfclib.exceptions.SncError

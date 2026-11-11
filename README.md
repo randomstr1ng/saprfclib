@@ -8,7 +8,7 @@
 
 `saprfclib` is a pure-Python reimplementation of the SAP RFC wire protocol - zero
 native/C dependencies. Call any SAP function module from Python with just a `pip install`.
-Supports direct TCP, SAProuter, message server (load-balanced), SNC (X.509/Kerberos),
+Supports direct TCP, SAProuter, message server (load-balanced), SNC (X.509 and Kerberos/Active Directory SSO, built in — no SAP library needed),
 and WebSocket RFC (SAP BTP/cloud) connections. Requires Python 3.12 or later.
 
 No SAP NetWeaver RFC SDK. No C compiler. No `LD_LIBRARY_PATH`. No container image built
@@ -52,7 +52,8 @@ it in-process - no configuration needed.
 | Direct TCP | `ashost`, `sysnr` |
 | SAProuter | `ashost`, `sysnr`, `saprouter="/H/router/S/3299/H/target"` |
 | Message server | `mshost`, `sysid`, `group` |
-| SNC (X.509 / Kerberos) | `snc_lib`, `snc_partnername`, `snc_qop` |
+| SNC (X.509, built in) | `snc_partnername`, `snc_pse`, `snc_pse_pin` (or `snc_lib` for a native GSS library) |
+| SNC (Kerberos SSO, built in) | `snc_partnername="p:CN=<name>@<REALM>"`, `snc_kerberos=True` (Windows logon session or ticket cache) or `KerberosLogin(...)`, `snc_sso=True` |
 | WebSocket RFC | `wshost`, `wsport`, `ws_path` |
 | SOCKS5 proxy (SAP BTP) | `proxy_type="socks5"`, `proxy_host`, `proxy_port` (+ `proxy_jwt` / OAuth triple) |
 
@@ -113,6 +114,9 @@ The `examples/` directory contains runnable scripts for common patterns:
 | `examples/05_rfc_server.py` | RFC server with handler |
 | `examples/06_snc_connection.py` | SNC X.509 connection |
 | `examples/07_websocket_rfc.py` | WebSocket RFC to SAP BTP |
+| `examples/08_read_table.py` | RFC_READ_TABLE with every TABLE parameter |
+| `examples/09_bapi_user_create.py` | BAPI structures and return tables |
+| `examples/10_snc_kerberos_sso.py` | Kerberos SNC single sign-on (Active Directory) |
 
 All examples read connection parameters from `SAPRFC_*` environment variables.
 
