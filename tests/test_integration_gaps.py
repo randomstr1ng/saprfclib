@@ -179,7 +179,7 @@ def test_compat_aliases_point_at_the_real_exception_classes() -> None:
     assert compat.ABAPRuntimeError is saprfclib.AbapSystemFailure
     assert compat.CommunicationError is saprfclib.CommunicationError
     assert compat.ExternalRuntimeError is saprfclib.SapRfcError
-    assert compat.LogonError is saprfclib.CommunicationError
+    assert compat.LogonError is saprfclib.LogonError
 
 
 def test_compat_names_are_not_reachable_from_the_package_root() -> None:

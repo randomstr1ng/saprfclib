@@ -56,6 +56,7 @@ from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
     CommunicationError,
+    LogonError,
     RetryExhausted,
     TransactionalError,
     WebSocketError,
@@ -611,7 +612,7 @@ def _ws_parse_logon_response(data: bytes) -> ConnectionAttributes:
             msg = err.decode("utf-8", errors="replace")
         except Exception:
             msg = err.hex()
-        raise ValueError(f"wRFC logon failed: {msg}")
+        raise LogonError(f"wRFC logon failed: {msg}")
 
     raise ValueError("wRFC logon response missing system ID (0x0450)")
 
@@ -5005,7 +5006,8 @@ class AsyncConnection:
         Mirrors Connection._handshake for the DISCONNECTED → READY path.
         Facade-owned frames (GW_CONNECT, GW_INFO+GW_DONE_CLIENT, logon) are built
         via Connection's existing @staticmethod builders and sent with await.
-        SNC / wRFC are out of scope — raise NotImplementedError if needed.
+        SNC and WebSocket RFC connections never reach this method: connect_async()
+        serves them with the synchronous implementation on a worker thread.
 
         Credentials are never logged (T-09-03-CRED).
         """

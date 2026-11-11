@@ -164,6 +164,22 @@ class CommunicationError(SapRfcError):
         super().__init__(message if message is not None else "")
 
 
+class LogonError(SapRfcError, ValueError):
+    """The server rejected the logon (wrong user, password or SNC identity mapping).
+
+    Raised when the logon reply carries only an error text and no structured ABAP
+    exception — the server's answer to bad credentials. A logon refused with a
+    structured exception (for example a missing authorization) is raised as the
+    classified :class:`AbapApplicationError` / :class:`AbapSystemFailure` instead.
+
+    Deliberately not a :class:`CommunicationError`: retrying the same credentials
+    cannot succeed and can lock the account, and transactional submits retry on
+    ``CommunicationError``. Also a ``ValueError``, which is what this condition raised
+    before it had a type of its own, so existing ``except ValueError`` handlers keep
+    working.
+    """
+
+
 class TransactionalError(SapRfcError):
     """A transactional RFC (tRFC/qRFC/bgRFC) error (D-18 / TRFC-08).
 

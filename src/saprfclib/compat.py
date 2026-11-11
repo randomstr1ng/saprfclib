@@ -26,28 +26,20 @@ pyrfc                        saprfclib                       exact?
 ``ABAPRuntimeError``         :class:`AbapSystemFailure`       yes
 ``CommunicationError``       :class:`CommunicationError`      yes, same name
 ``ExternalRuntimeError``     :class:`SapRfcError`             widened
-``LogonError``               :class:`CommunicationError`      widened
+``LogonError``               :class:`LogonError`              yes, same name
 ===========================  ==============================  ====================
 
-The two widened rows are the ones to read before relying on them.
+The widened row is the one to read before relying on it.
 
 ``ExternalRuntimeError`` is pyrfc's wrapper for failures raised inside the SDK
 itself — a category that cannot exist here, because there is no SDK. It maps to
 the base class so an existing handler still catches something rather than
 silently matching nothing; it will also catch more than it used to.
 
-``LogonError`` is the one worth checking by hand. pyrfc raises it for a rejected
-logon. This library does not have a dedicated exception for that: depending on
-how far the handshake got, a rejection surfaces as
-:class:`CommunicationError` or :class:`AbapSystemFailure`. The alias points at
-the first, which is the common case, so a handler that catches only
-``LogonError`` can still miss a rejection that failed later in the handshake.
-Catch :class:`SapRfcError` if the intent is "the logon did not work".
-
-A dedicated ``LogonFailure`` raised at the logon boundary would be worth having
-on its own merits, independent of pyrfc parity. It is not defined here because
-an exception nothing raises is worse than no exception at all: every ``except``
-clause written against it would be dead code that reads as live.
+``LogonError`` is raised for a logon the server rejects without a structured ABAP
+exception — the reply to wrong credentials. A logon refused with a structured
+exception (a missing authorization, for example) surfaces as the classified
+:class:`AbapApplicationError` or :class:`AbapSystemFailure`, as in pyrfc.
 """
 
 from __future__ import annotations
@@ -56,6 +48,7 @@ from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
     CommunicationError,
+    LogonError,
     SapRfcError,
 )
 
@@ -79,5 +72,5 @@ CommunicationError = CommunicationError
 #: pyrfc's wrapper for failures inside the SDK. Widened — see the module docstring.
 ExternalRuntimeError = SapRfcError
 
-#: pyrfc's rejected-logon exception. Widened — see the module docstring.
-LogonError = CommunicationError
+#: Same name in both libraries; re-exported so one import line covers the set.
+LogonError = LogonError
