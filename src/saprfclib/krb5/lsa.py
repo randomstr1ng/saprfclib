@@ -47,6 +47,10 @@ _KERB_RETRIEVE_TICKET_CACHE_TICKET = 0x20
 _FILETIME_EPOCH = _dt.datetime(1601, 1, 1, tzinfo=_dt.UTC)
 
 
+# ctypes.WinDLL and ctypes.FormatError exist only on Windows. Reaching them through an
+# Any-typed alias keeps type checking identical on every host (no per-platform ignores).
+_win: Any = ctypes
+
 # Windows' USHORT/ULONG/LONG are 16/32/32 bits on every Windows target; fixed-width
 # ctypes keep that layout (and its offline test) the same on any host.
 
@@ -151,9 +155,9 @@ def _filetime(v: int) -> _dt.datetime | None:
 
 
 def _ntstatus_text(status: int) -> str:
-    advapi: Any = ctypes.WinDLL("advapi32")  # type: ignore[attr-defined]  # Windows only
+    advapi = _win.WinDLL("advapi32")
     err = advapi.LsaNtStatusToWinError(ctypes.c_uint32(status & 0xFFFFFFFF))
-    return f"0x{status & 0xFFFFFFFF:08X} ({ctypes.FormatError(err).strip()})"  # type: ignore[attr-defined]  # Windows only
+    return f"0x{status & 0xFFFFFFFF:08X} ({_win.FormatError(err).strip()})"
 
 
 def retrieve_service_ticket(service: Principal) -> Credential:
@@ -164,7 +168,7 @@ def retrieve_service_ticket(service: Principal) -> Credential:
     """
     if not lsa_available():
         raise KerberosError("the Windows logon session is only available on Windows")
-    secur32: Any = ctypes.WinDLL("secur32")  # type: ignore[attr-defined]  # Windows only
+    secur32 = _win.WinDLL("secur32")
 
     handle = wintypes.HANDLE()
     status = secur32.LsaConnectUntrusted(ctypes.byref(handle))
