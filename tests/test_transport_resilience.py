@@ -21,7 +21,6 @@ from saprfclib.transport import (
     enable_keepalive,
 )
 
-
 # Socket options are checked for "on" (non-zero), not == 1: macOS returns the option's
 # flag bit (SO_KEEPALIVE 8, TCP_NODELAY 4) for an enabled boolean option.
 
