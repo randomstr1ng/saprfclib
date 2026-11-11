@@ -341,6 +341,7 @@ class Session:
         # error/attribute tags.
         has_error = _TAG_EXCEPTION_NUMBER in tags or _TAG_ERROR_MSG in tags
         if has_error:
+            from saprfclib.exceptions import LogonError
             from saprfclib.invoke import _decode_error_text, raise_for_rfc_error
 
             logon_completed = _TAG_RETURN_CODE in tags  # 0x0420 set by the dispatcher
@@ -352,7 +353,7 @@ class Session:
                 # Only a bare 0x0402 text, no structured exception and no return code:
                 # a plain logon rejection (bad credentials). The byte stream is not in
                 # sync; fail hard.
-                raise ValueError(f"logon failed: {_decode_error_text(tags.get(_TAG_ERROR_MSG))}")
+                raise LogonError(f"logon failed: {_decode_error_text(tags.get(_TAG_ERROR_MSG))}")
             # allow_restricted_logon and logon_completed: authentication succeeded and
             # the embedded RFCPING was refused. The reply carries the full attributes
             # and the byte stream is in sync -> fall through and build a usable session.

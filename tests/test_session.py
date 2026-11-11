@@ -19,6 +19,7 @@ import struct
 
 import pytest
 
+from saprfclib.exceptions import CommunicationError, LogonError, SapRfcError
 from saprfclib.session import ConnectionAttributes, Session, SessionState
 from tests.conftest import GOLDEN_ROOT, compare_bytes, load_fixture
 
@@ -187,9 +188,15 @@ def test_authentication_failure_raises_logon_failed() -> None:
     """
     sess = Session()
     _drive_to_logon(sess)
-    with pytest.raises(ValueError, match="logon failed"):
+    with pytest.raises(LogonError, match="logon failed") as ei:
         sess.feed(_logon_response(rc=2, with_sys_id=False))
     assert sess.state is not SessionState.READY
+    # Typed, still a ValueError (what it raised before), and never a
+    # CommunicationError: transactional submits retry those, and retrying rejected
+    # credentials can lock the account.
+    assert isinstance(ei.value, ValueError)
+    assert isinstance(ei.value, SapRfcError)
+    assert not isinstance(ei.value, CommunicationError)
 
 
 def test_authz_denied_rfcping_raises_rfc_no_authority_not_logon_failed() -> None:

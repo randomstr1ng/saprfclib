@@ -31,10 +31,12 @@ The common connection parameters keep their names: `ashost`, `sysnr`, `client`, 
 | `conn.ping()` | `conn.ping()` | a method in both — **call it**, see below |
 | `conn.close()` | `conn.close()` | or use a `with` block |
 | `conn.get_function_description(f)` | `saprfclib.get_function_desc(conn, f)` | different shape, see below |
-| `snc_mode="1"` | *(removed)* | passing `snc_lib` is the switch |
+| `snc_mode="1"` | *(removed)* | `snc_partnername` (or `snc_lib`) is the switch |
 | `snc_qop="3"` | `snc_qop=3` | `int`, not `str` |
 | `snc_sso="1"` | `snc_sso=True` | `bool`, not `str` |
-| `snc_lib=...` | `snc_lib=...` | unchanged |
+| `snc_lib=...` | `snc_lib=...` | optional: without it the built-in mechanism is used |
+| `SNC_LIB` = CommonCryptoLib, X.509 | `snc_pse=` / `SECUDIR` | no SAP library; see [SNC](../cookbook/snc-connection.md) |
+| `SNC_LIB` = CommonCryptoLib, Kerberos | `snc_kerberos=True` | Windows logon session or ticket cache |
 
 `saprfclib.connect()` also takes `port`, which pyrfc had no equivalent for: when the
 gateway is not reachable at `3300 + sysnr` — behind NAT, a port-forward or a jump host —
@@ -70,13 +72,14 @@ root, so nothing acquires these spellings by accident.
 | `ABAPRuntimeError` | `AbapSystemFailure` | yes |
 | `CommunicationError` | `CommunicationError` | same name |
 | `ExternalRuntimeError` | `SapRfcError` | **widened** |
-| `LogonError` | `CommunicationError` | **widened** |
+| `LogonError` | `LogonError` | same name |
 
-The two widened rows matter. `ExternalRuntimeError` was pyrfc's wrapper for failures
-inside the SDK — a category that cannot exist here, because there is no SDK. And
-`LogonError` has no direct equivalent: depending on how far the handshake got, a
-rejected logon surfaces as `CommunicationError` or `AbapSystemFailure`. If your handler
-means "the logon did not work", catch `SapRfcError`.
+The widened row matters. `ExternalRuntimeError` was pyrfc's wrapper for failures inside
+the SDK — a category that cannot exist here, because there is no SDK. `LogonError` is
+raised for rejected credentials; a logon refused with a structured ABAP exception (a
+missing authorization, for example) surfaces as `AbapApplicationError` or
+`AbapSystemFailure`, as in pyrfc. If your handler means "the logon did not work" in any
+form, catch `SapRfcError`.
 
 ## Return values
 
@@ -160,5 +163,3 @@ If you would rather find out immediately, pass `strict_params=True` on `connect(
 
 - **Server-side callbacks registered through pyrfc's `Server`** — `saprfclib` has its
   own `RfcServer`, with a different registration API rather than a drop-in one.
-- **SNC without a GSS library.** Both libraries need one; `saprfclib` loads it through
-  `snc_lib` exactly as pyrfc does.

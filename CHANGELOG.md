@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("SEND_DATA in state RECEIVE_WAIT_FOR_DATA"). The X.509 exchange ends on a server
   token and is unaffected; GSS libraries passed with `snc_lib` that finish with an
   output token were affected.
+- **A rejected logon raises `LogonError`**, a new `SapRfcError` subclass, instead of a
+  bare `ValueError` that no `except SapRfcError` caught. It is still a `ValueError`, so
+  existing handlers keep working, and deliberately not a `CommunicationError`, so
+  transactional retries never repeat rejected credentials. `saprfclib.compat.LogonError`
+  now points at it; it pointed at `CommunicationError`, which a rejected logon never
+  raised.
 - **Text files are read as UTF-8 on every platform.** The SOCKS5 service-binding files
   were read with the locale's codec, which is cp1252 on Windows. The offline test suite
   now passes on Windows as well.
