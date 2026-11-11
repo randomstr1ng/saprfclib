@@ -40,6 +40,24 @@ def test_service_principal_from_partner_name(name, principal):
 
 
 @pytest.mark.parametrize(
+    "name,candidates",
+    [
+        # SAP's client asks for SAP/<name>; the account's own name follows.
+        ("p:CN=sap-snc@EXAMPLE.TEST", ["SAP/sap-snc@EXAMPLE.TEST", "sap-snc@EXAMPLE.TEST"]),
+        ("p:CN=A4H@EXAMPLE.TEST", ["SAP/A4H@EXAMPLE.TEST", "A4H@EXAMPLE.TEST"]),
+        # An instance already written is used as is.
+        ("p:CN=SAP/A4H@EXAMPLE.TEST", ["SAP/A4H@EXAMPLE.TEST"]),
+    ],
+)
+def test_service_principal_candidates(name, candidates):
+    got = connmod.kerberos_service_principals(name)
+    assert [str(p) for p in got] == candidates
+    if len(got) == 2:
+        assert got[0].name_type == 2  # NT-SRV-INST, as SAP's client sends it
+        assert got[1].name_type == 1
+
+
+@pytest.mark.parametrize(
     "name", ["p:CN=A4H, O=SAP, C=DE", "p:CN=nouserrealm", "p:O=x@EXAMPLE.TEST"]
 )
 def test_non_kerberos_partner_name_is_rejected(name):
@@ -98,7 +116,7 @@ def test_snc_kerberos_builds_the_kerberos_mechanism(stop_after_mechanism, value,
             snc_kerberos=value,
             snc_sso=True,
         )
-    assert str(seen["service"]) == "svc@EXAMPLE.TEST"
+    assert [str(x) for x in seen["service"]] == ["SAP/svc@EXAMPLE.TEST", "svc@EXAMPLE.TEST"]
     assert isinstance(seen["login"], KerberosLogin)
     assert "SECRET-PW" not in caplog.text
 

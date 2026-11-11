@@ -265,7 +265,10 @@ NOW = 1_800_000_000.0
 class _Kdc:
     """Just enough KDC to exercise the client: preauth, AS-REP, TGS-REP."""
 
-    def __init__(self, password="secret", *, bad_nonce=False):
+    def __init__(self, password="secret", *, bad_nonce=False, unknown=(), refuse=()):
+        self.unknown = {tuple(x.split("/")) for x in unknown}  # -> KDC_ERR_S_PRINCIPAL_UNKNOWN
+        self.refuse = {tuple(x.split("/")) for x in refuse}  # -> KDC_ERR_POLICY (12)
+        self.asked: list[str] = []
         self.user_key = string_to_key(18, password, SALT)
         self.tgs_key = Key(18, b"\x11" * 32)
         self.svc_key = Key(18, b"\x22" * 32)
@@ -355,6 +358,12 @@ class _Kdc:
         bare = parser.parse(body.dump())[4]
         crypto.verify_checksum(self.session, 6, bare, ck["cksumtype"].native, ck["checksum"].native)
         sname = body["sname"].native
+        names = tuple(sname["name_string"])
+        self.asked.append("/".join(names))
+        if names in self.unknown:
+            return self._err(m.KDC_ERR_S_PRINCIPAL_UNKNOWN)
+        if names in self.refuse:
+            return self._err(12)
         part = self._part(m.EncTGSRepPart, self.svc_session, body["nonce"].native, sname)
         return m.TGSRep(
             {
@@ -411,6 +420,61 @@ def test_tgs_exchange():
     st = tgs.process(kdc.tgs_req(tgs.request()))
     assert st.session_key == kdc.svc_session
     assert str(st.server) == f"svc@{REALM}"
+
+
+# --- service principal candidates ---------------------------------------------
+
+
+def _password_login(monkeypatch, kdc):
+    from saprfclib.krb5 import login as loginmod
+
+    def _ask(kdcs, request, timeout):
+        # [APPLICATION 10] AS-REQ starts 0x6A, [APPLICATION 12] TGS-REQ 0x6C.
+        return kdc.as_req(request) if request[0] == 0x6A else kdc.tgs_req(request)
+
+    monkeypatch.setattr(loginmod, "_ask", _ask)
+    return loginmod.KerberosLogin(principal="alice@" + REALM, password="secret", kdc="kdc")
+
+
+def _candidates():
+    return [Principal.parse(f"SAP/svc@{REALM}"), Principal.parse(f"svc@{REALM}")]
+
+
+def test_first_candidate_known_is_used(monkeypatch):
+    from saprfclib.krb5.login import obtain_service_ticket
+
+    kdc = _Kdc()
+    st = obtain_service_ticket(_password_login(monkeypatch, kdc), _candidates(), clock=lambda: NOW)
+    assert str(st.server) == f"SAP/svc@{REALM}"
+    assert kdc.asked == ["SAP/svc"]
+
+
+def test_unknown_candidate_falls_through_to_the_next(monkeypatch):
+    from saprfclib.krb5.login import obtain_service_ticket
+
+    kdc = _Kdc(unknown=["SAP/svc"])
+    st = obtain_service_ticket(_password_login(monkeypatch, kdc), _candidates(), clock=lambda: NOW)
+    assert str(st.server) == f"svc@{REALM}"
+    assert kdc.asked == ["SAP/svc", "svc"]
+
+
+def test_other_refusal_does_not_fall_through(monkeypatch):
+    from saprfclib.krb5.login import obtain_service_ticket
+
+    kdc = _Kdc(refuse=["SAP/svc"])
+    with pytest.raises(KerberosError) as ei:
+        obtain_service_ticket(_password_login(monkeypatch, kdc), _candidates(), clock=lambda: NOW)
+    assert ei.value.code == 12
+    assert kdc.asked == ["SAP/svc"]
+
+
+def test_all_candidates_unknown_reports_the_kdc_error(monkeypatch):
+    from saprfclib.krb5.login import obtain_service_ticket
+
+    kdc = _Kdc(unknown=["SAP/svc", "svc"])
+    with pytest.raises(KerberosError) as ei:
+        obtain_service_ticket(_password_login(monkeypatch, kdc), _candidates(), clock=lambda: NOW)
+    assert ei.value.code == m.KDC_ERR_S_PRINCIPAL_UNKNOWN
 
 
 def test_credential_repr_hides_secrets():

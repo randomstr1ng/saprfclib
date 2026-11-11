@@ -68,10 +68,12 @@ When the SAP system accepts Kerberos SNC (an SNC keytab for its service account 
 ```python
 import saprfclib
 
-# The ticket cache left by kinit or a domain login (KRB5CCNAME, else /tmp/krb5cc_<uid>).
+# Windows: the tickets of the Windows logon session (true single sign-on).
+# Elsewhere: the ticket cache left by kinit or a domain login
+# (KRB5CCNAME, else /tmp/krb5cc_<uid>).
 conn = saprfclib.connect(
     ashost="sap-host", sysnr="00", client="100",
-    snc_partnername="p:CN=sap-snc@EXAMPLE.COM",   # the SAP service account's principal
+    snc_partnername="p:CN=A4H@EXAMPLE.COM",   # same partner name as in SAP Logon
     snc_kerberos=True,
     snc_sso=True,
 )
@@ -95,16 +97,20 @@ conn = saprfclib.connect(ashost="sap-host", sysnr="00", client="100",
                          snc_kerberos=login, snc_sso=True)
 ```
 
-- `snc_partnername` is `p:CN=` followed by the principal the SAP system's keytab holds
-  (the name used with `sapgenpse keytab -a`). An SPN form such as
-  `p:CN=SAP/A4H@EXAMPLE.COM` works as well when that SPN belongs to the same account.
+- `snc_partnername` is `p:CN=<name>@<REALM>`. As SAP's own client does, a ticket is
+  requested for the SPN `SAP/<name>@<REALM>` (the SPN registered for SAP on the service
+  account); if the domain does not know it, for `<name>@<REALM>` itself. So both the
+  name used in SAP Logon (`p:CN=A4H@EXAMPLE.COM` for SPN `SAP/A4H`) and the service
+  account's own name (`p:CN=sap-snc@EXAMPLE.COM`, as given to `sapgenpse keytab -a`)
+  work, and so does the SPN written out (`p:CN=SAP/A4H@EXAMPLE.COM`).
 - `kdc=` is needed whenever a ticket has to be requested: always for a password or
   keytab, and for a cache that does not already hold a ticket for the SAP service. Without
   it, the `kdc` entries of the realm in `krb5.conf` are used; if there are none, the call
   fails and says so.
-- Only `FILE:` ticket caches can be read. Caches kept in the kernel keyring, by KCM
-  (`sssd-kcm`) or by Windows (LSA) are not reachable from Python; use a password or
-  keytab login, or point `KRB5CCNAME` at a file cache (`default_ccache_name =
+- On Windows the logon session's tickets are used directly (set `KRB5CCNAME` to use an
+  MIT file cache instead). Elsewhere only `FILE:` ticket caches can be read; caches kept in
+  the kernel keyring or by KCM (`sssd-kcm`) are not reachable from Python; use a
+  password or keytab login, or point `KRB5CCNAME` at a file cache (`default_ccache_name =
   FILE:/tmp/krb5cc_%{uid}` in `krb5.conf`).
 - `snc_myname` is optional; when given it must be `p:CN=<your principal>`.
 - Encryption: AES only (`aes256-cts-hmac-sha1-96`, `aes128-cts-hmac-sha1-96`), the Active

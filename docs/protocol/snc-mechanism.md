@@ -199,10 +199,21 @@ built-in mechanism raises `ValueError` rather than produce one.
 
 ## Kerberos key exchange
 
-Selected with `snc_kerberos` (see the cookbook). The server's SNC name has the form
-`p:CN=<service>@<REALM>`; the `CN` value is the Kerberos principal whose key the server
-holds, and the client gets a service ticket for exactly that principal
-([kerberos.md](kerberos.md)).
+Selected with `snc_kerberos` (see the cookbook). The partner name has the form
+`p:CN=<name>@<REALM>`. The client asks for a service ticket for, in order:
+
+1. `SAP/<name>@<REALM>` (name type NT-SRV-INST) — what SAP's own Kerberos SNC client
+   requests: with partner `CN=A4H@<REALM>` its TGS-REQ named `SAP/A4H`, and with
+   partner `CN=sap-snc@<REALM>` it asked for `SAP/sap-snc` (observed on the wire
+   2026-11-11, CommonCryptoLib 8.5.5 on Windows).
+2. `<name>@<REALM>` itself, when the KDC answers the first with
+   `KDC_ERR_S_PRINCIPAL_UNKNOWN` (or Windows cannot get it). Active Directory issues
+   tickets for a service account's own name, so `p:CN=<account>@<REALM>` works too
+   (observed live).
+
+A `<name>` that already has an instance (`p:CN=SAP/A4H@<REALM>`) is used as written.
+Any other KDC refusal is final. See [kerberos.md](kerberos.md) for where the ticket
+comes from.
 
 ### Message flow
 
@@ -259,6 +270,28 @@ CommonCryptoLib as acceptor reported the peer name `CN=ALICE@EXAMPLE.COM` for a 
 issued to `alice@EXAMPLE.COM`: the user part is upper-cased (fixture
 `secgss_kerberos_loopback.json`). The SAP user is then found through its SNC name
 (`p:CN=<USER>@<REALM>` in SU01).
+
+### Reference client: protocol version 1.0
+
+SAP's own client (CommonCryptoLib 8.5.5 on Windows, NW RFC SDK 7.50) completed a Kerberos
+SNC logon against the same system only with protocol version 1.0 offered; offering 1.1
+it listed only ECDHE/RSA suites in extension 3 and the server chose ECDHE, which that
+client then rejected. It also offered the Kerberos key exchange only when the partner
+name carried the prefix `[kerberos]` (`p:[kerberos]CN=A4H@<REALM>`); without it, it
+reported "No credentials were supplied". The 1.0 flow it used:
+
+```
+Client                                          Server
+ token 1  ClientHello (version 1.0)          ──►
+ token 2                                    ◄──  ServerHello (1.0, key exchange Kerberos)
+ token 3  KeyExchangeKey, KeyTransport,
+          Finished                           ──►
+ token 4                                    ◄──  Finished
+```
+
+The KeyExchangeKey (`A3 { A0 { 04 Ticket } }`) and KeyTransport (`A6 { 81 <76 bytes> }`)
+elements had the encoding used above. `saprfclib` implements the 1.1 flow only; the
+server accepts both.
 
 ### Not verified
 
@@ -333,9 +366,10 @@ carrying a host or user restriction, EC and EdDSA own keys.
 
 ## Open questions
 
-- Kerberos: whether a server checks the requested partner name against the ticket's
-  service principal — a ticket for a different principal with a key in the same keytab
-  was not tried.
+- Kerberos: the server accepted tickets for `SAP/A4H` and for `sap-snc` (two names of
+  one service account, so one key) while its own SNC name was `p:CN=sap-snc@<REALM>`. It
+  does not require the ticket's service name to match its SNC name; whether it checks
+  anything beyond being able to decrypt the ticket was not tested.
 
 - Which suites besides `0x0009` a server will accept from a client that offers them
   (P-384/P-521 variants, RSA key transport) — not exercised.

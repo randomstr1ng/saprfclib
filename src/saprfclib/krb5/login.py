@@ -6,8 +6,10 @@
 
 :class:`KerberosLogin` says where the client's Kerberos identity comes from:
 
-* nothing (the default) — the FILE credential cache named by ``KRB5CCNAME`` (or
-  MIT's default path), as left by ``kinit`` or a desktop login;
+* nothing (the default) — on Windows with no ``KRB5CCNAME`` set, the tickets of
+  the Windows logon session (single sign-on, see :mod:`saprfclib.krb5.lsa`);
+  elsewhere the FILE credential cache named by ``KRB5CCNAME`` (or MIT's default
+  path), as left by ``kinit`` or a desktop login;
 * ``ccache`` — an explicit credential cache file;
 * ``principal`` + ``password`` — an AS exchange with the KDC;
 * ``principal`` + ``keytab`` — an AS exchange with a key from a keytab file.
@@ -29,9 +31,10 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from saprfclib.krb5 import messages as m
 from saprfclib.krb5.client import (
     AsExchange,
     Credential,
@@ -41,6 +44,7 @@ from saprfclib.krb5.client import (
     kdc_roundtrip,
 )
 from saprfclib.krb5.files import default_ccache_path, read_ccache, read_keytab
+from saprfclib.krb5.lsa import lsa_available, retrieve_service_ticket
 
 __all__ = ["KerberosLogin", "kdcs_from_krb5_conf", "obtain_service_ticket"]
 
@@ -147,14 +151,59 @@ def _same(a: Principal, b: Principal) -> bool:
     ]
 
 
+def _tgs_first_known(
+    tgt: Credential,
+    services: tuple[Principal, ...],
+    kdcs: list[tuple[str, int]],
+    timeout: float,
+    clock: Callable[[], float],
+) -> Credential:
+    # Candidates are tried in order; only "server principal unknown" moves on to the
+    # next one, any other refusal is final.
+    last: KerberosError | None = None
+    for service in services:
+        if service.realm.upper() != tgt.client.realm.upper():
+            raise KerberosError("cross-realm service tickets are not supported")
+        tgs = TgsExchange(tgt, service, clock=clock)
+        try:
+            return tgs.process(_ask(kdcs, tgs.request(), timeout))
+        except KerberosError as e:
+            if e.code != m.KDC_ERR_S_PRINCIPAL_UNKNOWN:
+                raise
+            last = e
+    assert last is not None
+    raise last
+
+
+def _from_logon_session(login: KerberosLogin, services: tuple[Principal, ...]) -> Credential:
+    errors: list[str] = []
+    for service in services:
+        try:
+            cred = retrieve_service_ticket(service)
+        except KerberosError as e:
+            errors.append(str(e))
+            continue
+        if login.principal and not _same(cred.client, Principal.parse(login.principal)):
+            raise KerberosError("the Windows logon session belongs to a different principal")
+        return cred
+    raise KerberosError("; ".join(errors))
+
+
 def obtain_service_ticket(
     login: KerberosLogin,
-    service: Principal,
+    service: Principal | Sequence[Principal],
     *,
     timeout: float = 10.0,
     clock: Callable[[], float] = time.time,
 ) -> Credential:
-    """Return a ticket for ``service`` following the rules in the module docstring."""
+    """Return a ticket for ``service`` following the rules in the module docstring.
+
+    ``service`` may be a list of candidate principals, tried in order; a candidate
+    is skipped only when the KDC (or Windows) does not know it.
+    """
+    services = (service,) if isinstance(service, Principal) else tuple(service)
+    if not services:
+        raise ValueError("no service principal given")
     now = _dt.datetime.fromtimestamp(clock(), _dt.UTC)
     if login.password is not None or login.keytab is not None:
         assert login.principal is not None
@@ -176,34 +225,31 @@ def obtain_service_ticket(
             out = ex.process(_ask(kdcs, out, timeout))
         if not isinstance(out, Credential):
             raise KerberosError("AS exchange did not complete")
-        tgt = out
-    else:
-        path = os.fspath(login.ccache) if login.ccache is not None else default_ccache_path()
-        try:
-            with open(path, "rb") as fh:
-                default, creds = read_ccache(fh.read())
-        except FileNotFoundError as e:
-            raise KerberosError("no Kerberos credential cache found; run kinit first") from e
-        client = Principal.parse(login.principal) if login.principal else default
+        return _tgs_first_known(out, services, kdcs, timeout, clock)
+    if login.ccache is None and not os.environ.get("KRB5CCNAME") and lsa_available():
+        return _from_logon_session(login, services)
+    path = os.fspath(login.ccache) if login.ccache is not None else default_ccache_path()
+    try:
+        with open(path, "rb") as fh:
+            default, creds = read_ccache(fh.read())
+    except FileNotFoundError as e:
+        raise KerberosError("no Kerberos credential cache found; run kinit first") from e
+    client = Principal.parse(login.principal) if login.principal else default
+    for svc in services:
         for c in creds:
-            if _same(c.client, client) and _same(c.server, service) and _valid(c, now):
+            if _same(c.client, client) and _same(c.server, svc) and _valid(c, now):
                 return c
-        tgs_name = Principal(("krbtgt", service.realm), client.realm)
-        tgt_or_none = next(
-            (
-                c
-                for c in creds
-                if _same(c.client, client) and _same(c.server, tgs_name) and _valid(c, now)
-            ),
-            None,
+    tgs_name = Principal(("krbtgt", services[0].realm), client.realm)
+    tgt = next(
+        (
+            c
+            for c in creds
+            if _same(c.client, client) and _same(c.server, tgs_name) and _valid(c, now)
+        ),
+        None,
+    )
+    if tgt is None:
+        raise KerberosError(
+            "the credential cache holds no valid ticket-granting ticket for the realm"
         )
-        if tgt_or_none is None:
-            raise KerberosError(
-                "the credential cache holds no valid ticket-granting ticket for the realm"
-            )
-        tgt = tgt_or_none
-        kdcs = _kdcs(login, client.realm)
-    if service.realm.upper() != tgt.client.realm.upper():
-        raise KerberosError("cross-realm service tickets are not supported")
-    tgs = TgsExchange(tgt, service, clock=clock)
-    return tgs.process(_ask(kdcs, tgs.request(), timeout))
+    return _tgs_first_known(tgt, services, _kdcs(login, client.realm), timeout, clock)

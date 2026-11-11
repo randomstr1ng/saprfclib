@@ -857,11 +857,11 @@ _OID_CN = "2.5.4.3"  # X.520 commonName, as parse_snc_name reports it
 
 
 def kerberos_service_principal(partner_name: str) -> Principal:
-    """The Kerberos principal named by a Kerberos SNC name ``p:CN=<name>@<REALM>``.
+    """The Kerberos principal written in a Kerberos SNC name ``p:CN=<name>@<REALM>``.
 
-    The SNC name of a Kerberos service is a single ``CN`` holding the principal in
-    ``name@REALM`` form; the server takes exactly that ``CN`` value as the
-    principal whose key decrypts the ticket.
+    The SNC name of a Kerberos service is a single ``CN`` holding a principal in
+    ``name@REALM`` form. See :func:`kerberos_service_principals` for the principals
+    a ticket is requested for.
     """
     from saprfclib.krb5.client import Principal
     from saprfclib.secgss import parse_snc_name
@@ -870,6 +870,29 @@ def kerberos_service_principal(partner_name: str) -> Principal:
     if len(rdns) != 1 or rdns[0][0] != _OID_CN or "@" not in rdns[0][1]:
         raise ValueError("a Kerberos SNC partner name has the form p:CN=<service>@<REALM>")
     return Principal.parse(rdns[0][1])
+
+
+def kerberos_service_principals(partner_name: str) -> tuple[Principal, ...]:
+    """The principals to request a ticket for, in order, for a Kerberos SNC partner.
+
+    For ``p:CN=<name>@<REALM>`` with a single-component ``<name>``, SAP's own
+    Kerberos SNC client requests a ticket for the service principal
+    ``SAP/<name>@<REALM>`` (observed: its TGS-REQ for partner ``CN=A4H@<REALM>``
+    names ``SAP/A4H``, NT-SRV-INST), which is the SPN SAP has administrators
+    register on the service account. That is tried first. ``<name>@<REALM>``
+    itself follows, since Active Directory also issues a ticket for the service
+    account's own name (observed live), so partner names that name the account
+    keep working. A ``<name>`` that already has an instance (``SAP/A4H``) is used
+    as written.
+    """
+    from saprfclib.krb5.client import Principal
+    from saprfclib.krb5.messages import NT_SRV_INST
+
+    written = kerberos_service_principal(partner_name)
+    if len(written.components) > 1:
+        return (written,)
+    spn = Principal(("SAP", *written.components), written.realm, NT_SRV_INST)
+    return (spn, written)
 
 
 def _builtin_kerberos_mechanism(
@@ -889,9 +912,9 @@ def _builtin_kerberos_mechanism(
     from saprfclib.krb5.login import KerberosLogin, obtain_service_ticket
     from saprfclib.secgss import SecGssKerberosInitiator, parse_snc_name
 
-    service = kerberos_service_principal(partner_name)
+    services = kerberos_service_principals(partner_name)
     ticket = obtain_service_ticket(
-        login or KerberosLogin(), service, timeout=timeout if timeout is not None else 10.0
+        login or KerberosLogin(), services, timeout=timeout if timeout is not None else 10.0
     )
     if snc_myname is not None:
         mine = parse_snc_name(snc_myname)
