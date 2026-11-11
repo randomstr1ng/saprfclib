@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
+SNC without any SAP library: the X.509 and Kerberos mechanisms are built in, Kerberos
+single sign-on works with Active Directory on Windows (logon session) and elsewhere
+(ticket cache, password or keytab), and SNC connections are available from
+`connect_async()`. Closes the v0.2.0 milestone (#16, #17, #20, #35, #61).
+
 ### Added
 
 - **Built-in SNC — no SAP library needed** (issue #35). `connect(snc_partnername=...,
@@ -32,9 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cred_v2` are read in every form written outside Windows. An existing CommonCryptoLib
   `SECUDIR` works unchanged: with only `snc_partnername` given, the PSE is chosen as
   CommonCryptoLib chooses it.
-- **Kerberos SNC — single sign-on with Active Directory, no SAP library.**
-  `connect(snc_partnername="p:CN=<service>@<REALM>", snc_kerberos=True, snc_sso=True)`
-  logs on with the user's Kerberos ticket from the ticket cache; `snc_kerberos=
+- **Kerberos SNC — single sign-on with Active Directory, no SAP library** (issue #35).
+  `connect(snc_partnername="p:CN=<name>@<REALM>", snc_kerberos=True, snc_sso=True)`
+  logs on with the user's Kerberos ticket; `snc_kerberos=
   KerberosLogin(...)` takes a password, a keytab or a specific cache instead. A pure-Python
   Kerberos 5 client (`saprfclib.krb5`: AES encryption types per RFC 3961/3962, AS and TGS
   exchanges per RFC 4120, MIT ccache and keytab files) gets the service ticket; the SNC
@@ -61,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New core dependencies `asn1crypto`, `ecdsa` and `tlslite-ng`, all pure Python. They
   provide the DER/X.509 parsing, ECDH and AES/3DES/RSA the SNC mechanism needs; the
   library implements no cryptographic primitive itself.
+- CI runs the offline test suite on Windows and macOS as well as Linux.
 
 ### Fixed
 
@@ -78,7 +86,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Text files are read as UTF-8 on every platform.** The SOCKS5 service-binding files
   were read with the locale's codec, which is cp1252 on Windows. The offline test suite
   now passes on Windows as well.
-
 - **Requests larger than 28000 bytes** reset the connection (`Connection reset by peer`),
   on plain RFC and over SNC — a long `OPTIONS` table was enough. They are now split into
   gateway frames the way the NW RFC SDK splits them (`0x0608` chunks and a `0x0609`
@@ -93,7 +100,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NW RFC SDK's for one and two routers, with and without hop passwords. Confirmed live
   through two SAProuters, including SNC between the routers and end-to-end SNC through them.
   `saprouter` together with `wshost` is now rejected.
-
 - **SNC protection-level negotiation.** The QOP field of the SNC handshake frames is three
   2-bit levels (minimum, maximum, in use), not a fixed `0x7E`. The client now sends the
   levels `snc_qop` asks for, raises its level when the server's minimum is higher, uses the
@@ -115,6 +121,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A password logon inside SNC now carries the empty record 0x0675 the reference client
   sends.
 - `docs/protocol/snc.md` listed the SNC handshake frame types as 1/2; they are 2/4.
+
+### Documentation
+
+- New protocol pages `docs/protocol/snc-mechanism.md` (built-in X.509 and Kerberos
+  mechanism, including the reference client's behaviour) and `docs/protocol/kerberos.md`
+  (Kerberos client, Windows logon session), each with a "Limitations and why" section
+  that gives the reason for every unsupported variant.
+- SNC cookbook: built-in X.509, Kerberos single sign-on, partner-name forms.
+- New example `examples/10_snc_kerberos_sso.py`; `examples/06_snc_connection.py` can log
+  on with the certificate alone (`SAPRFC_SNC_SSO=1`).
+- API reference page for SNC credentials (`KerberosLogin`, `SncCredential`, `load_pse`,
+  `load_secudir_credential`); `LogonError` in the exceptions page.
+- The pyrfc migration guide lists the built-in SNC equivalents and maps `LogonError`
+  exactly; the SOCKS5 protocol page is reachable from the navigation.
 
 ## [0.1.9] - 2026-10-27
 
@@ -1749,7 +1769,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.6...v0.1.7
