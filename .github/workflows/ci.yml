@@ -15,6 +15,9 @@ concurrency:
 
 jobs:
   test:
+    # Linux jobs keep the names "test (3.12)" etc. that the branch ruleset requires;
+    # the other platforms get the OS appended.
+    name: test (${{ matrix.python-version }}${{ matrix.os != 'ubuntu-latest' && format(', {0}', matrix.os) || '' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
