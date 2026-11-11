@@ -294,7 +294,10 @@ and omits the user (0x0111) when no user is given. A password passed together wi
 `tests/golden/snc/snc_logon_tlvs.json`; confirmed live with both mechanisms (logged on as
 the mapped user; an unmapped user is refused with "Name or password is incorrect").
 
-This is unrelated to SAP logon tickets (`MYSAPSSO2`), which saprfclib does not support.
+This is unrelated to SAP logon tickets (`MYSAPSSO2`), which saprfclib does not support:
+they are a separate logon method, in which a ticket issued and signed by an SAP system is
+presented instead of a password, and they do not involve SNC. No capture of an RFC logon
+with one exists, so its encoding is unknown; it would be a feature of its own.
 
 ### CommonCryptoLib GSS mechanism OID — RESOLVED
 

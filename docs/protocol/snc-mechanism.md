@@ -293,13 +293,22 @@ The KeyExchangeKey (`A3 { A0 { 04 Ticket } }`) and KeyTransport (`A6 { 81 <76 by
 elements had the encoding used above. `saprfclib` implements the 1.1 flow only; the
 server accepts both.
 
-### Not verified
+### Limitations and why
 
-- Suite `0x0008` (AES-128): not offered, not implemented.
-- Session keys other than AES (RC4, DES): refused by the client. The ticket's own
-  encryption type does not matter to the client; the live tickets were RC4-encrypted
-  for the service and worked.
-- Cross-realm tickets: refused.
+- **Suite `0x0008` (Kerberos with AES-128): not offered, not implemented.** The client
+  chooses what to offer, and `0x0007` (AES-256) was accepted by the server every time.
+  `0x0008` would add nothing but a weaker cipher, and has never been seen on the wire, so
+  its parameters could not be confirmed.
+- **Protocol version 1.0: not implemented.** The server accepts 1.1, which is what the
+  client offers. 1.0 was only seen from an old SAP client (see above); supporting it would
+  add a second message flow without a server that needs it.
+- **Session keys other than AES (RC4, DES): refused by the client.** RC4 keys from a
+  password need MD4, which is not available (see [kerberos.md](kerberos.md#limitations-and-why));
+  Active Directory hands out AES session keys by default. The ticket's own encryption
+  type does not matter to the client: the live tickets were RC4-encrypted for the
+  service and worked.
+- **Cross-realm tickets: refused**, as in the Kerberos client
+  ([kerberos.md](kerberos.md#limitations-and-why)).
 
 ---
 

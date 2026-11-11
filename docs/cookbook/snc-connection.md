@@ -119,7 +119,8 @@ conn = saprfclib.connect(ashost="sap-host", sysnr="00", client="100",
 - `connect_async()` accepts the same parameters.
 
 See [Kerberos](../protocol/kerberos.md) and
-[SNC mechanism](../protocol/snc-mechanism.md#kerberos-key-exchange) for the details.
+[SNC mechanism](../protocol/snc-mechanism.md#kerberos-key-exchange) for the details, and
+[what is not supported and why](../protocol/kerberos.md#limitations-and-why).
 
 !!! warning "Security"
     The built-in cryptography is pure Python and not constant-time. Run it on hosts you

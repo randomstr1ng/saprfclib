@@ -58,6 +58,25 @@ Observed on Windows 11 against Active Directory:
   this workstation trust relationship"), not as an unknown principal; every candidate
   name is therefore tried and all the errors are reported together.
 
+## Limitations and why
+
+Each gap is either impossible under the project's constraints, unverifiable in the
+test environment (and so not shipped — see the evidence rules in `CLAUDE.md`), or not
+needed for an SNC logon. Every one fails with a clear error rather than a guess.
+
+| Not supported | Why |
+|---|---|
+| RC4-HMAC (etype 23) keys | A password-derived RC4 key is the MD4 hash of the password. `hashlib` does not provide MD4 on OpenSSL 3 (checked on Linux and Windows: "unsupported hash type md4"), and the project does not implement cryptographic primitives itself. Active Directory issues AES session keys by default — every live ticket had an AES-256 session key, including those whose ticket was RC4-encrypted for the service — so only an account restricted to RC4 is affected. |
+| DES, 3DES | Disabled in Active Directory by default and cryptographically broken; no environment to verify them against. |
+| RFC 8009 (`aes*-cts-hmac-sha256/384`) | Not implemented by Active Directory, the KDC this targets; nothing to verify against. |
+| Cross-realm tickets, referrals | Need a TGS exchange with each realm on the path. The lab has one realm, so this could not be verified; a ticket for another realm is refused with an error. |
+| FAST, PKINIT, S4U, user-to-user | Not needed for a user or service logon to SAP. PKINIT (smart-card login) would also need RSA/DH key agreement inside Kerberos, which has not been exercised. |
+| KDC over UDP | RFC 4120 7.2.3 requires KDCs to accept TCP, and Active Directory replies carrying a PAC are usually too large for UDP anyway. TCP alone is simpler and always works. |
+| DNS SRV lookup of the KDC | The standard library has no SRV resolver, and the dependency contract allows no further packages. `kdc=` or `krb5.conf` name the KDC; on Windows no KDC address is needed at all. |
+| `KEYRING:` caches (Linux kernel keyring) | Reading them needs the `keyctl` system calls, which the standard library does not wrap. |
+| `KCM:` caches (`sssd-kcm`, macOS) | The cache lives in a daemon that speaks its own protocol over a local socket; that protocol is not implemented and could not be verified. Point `KRB5CCNAME` at a `FILE:` cache, or use a password or keytab. |
+| ccache v1/v2, keytab v1 | Written in the writer's native byte order, which the file does not record. No current MIT or Heimdal release writes them; reading them would mean guessing the byte order. |
+
 ## KDC discovery
 
 `KerberosLogin(kdc=...)` if given, else the realm's `kdc` lines in `krb5.conf`
