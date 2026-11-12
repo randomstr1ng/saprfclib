@@ -972,13 +972,14 @@ def lz4_block_decompress(src: bytes, max_output: int = 0) -> bytes:
 # SAP LZ4 frame decompressor (wRFC / NgRFC WebSocket path)
 # ---------------------------------------------------------------------------
 
-_SAP_LZ4_MARKER = 0x34  # ASCII '4' — confirmed by the LZ4 decompressor
+_SAP_LZ4_MARKER = 0x34  # ASCII '4' [ASSUMED] — see sap_lz4_frame_decompress
 
 
 def sap_lz4_frame_decompress(data: bytes) -> bytes:
     """Decompress a SAP wRFC LZ4 frame.
 
-    Frame layout (confirmed from NgRfcLZ4Compressor / the LZ4 decompressor):
+    Frame layout [ASSUMED] — no captured LZ4-compressed wRFC response exists in this
+    repository; a capture of one would settle the marker and both length fields:
       [0]    0x34 '4' marker byte
       [1-4]  LE uint32 uncompressed length
       [5-8]  LE uint32 compressed length

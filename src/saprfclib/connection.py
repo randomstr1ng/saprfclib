@@ -2276,7 +2276,8 @@ class Connection:
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
                     # Outer GW-SNC header (80B) is added by SncTransport._build_gw_snc_frame.
-                    # protocol analysis STIntSend/the SNC output path: arg4 (plain data) = COM_HEAD + TLV — no GW header.
+                    # The protected data is COM_HEAD + TLV, no GW header (behavioural: A4H
+                    # accepts exactly this in every live SNC logon).
                     return [_COM_HEAD + tlv]
                 return [self._build_logon_frame(handle, tlv, conn_idx=self._session.conn_idx)]
             case _:
@@ -2296,12 +2297,12 @@ class Connection:
         the virtual host used for the TCP tunnel (issue #51 live capture: a virtual
         ``ashost`` here makes the gateway answer ``hostname '…' unknown``).
 
-        Confirmed from the GW_CONNECT frame builder.
-        Fields confirmed by analysis:
+        Fields (live capture, golden fixture framing/server_registration_request.bin):
           [0:2]   type = 0x0601
           [2:4]   version = 0x0200
           [4:8]   flags = 0xFFFF0000  [4:6]=0xffff, [6:8]=0 (memset)
-          [10]    0x01 plain / 0x21 SNC (bit 0x20 marks SNC)
+          [10]    0x01 plain / 0x21 SNC (bit 0x20 marks SNC; behavioural: every live
+                  SNC connection is opened with it)
           [16]    0xC0
           [21]    0x04  (a standard client; the registration ACK comes back 0x06)
           [22]    0x00
@@ -2366,18 +2367,14 @@ class Connection:
         #51 live capture shows a virtual ``ashost`` here is rejected with
         ``hostname '…' unknown`` and the conversation is then torn down.
 
-        Confirmed from the GW_INFO frame builder.
-        Fields confirmed by analysis:
+        Fields (live capture, golden fixture handshake/gw_info_proxy.bin, 224 bytes):
           [0:2]   type = 0x060F
           [4:8]   flags = 0xFFFF0000  ([4:6] = 0xffff, [6:8] = 0x0000)
           [27]    0x90
           [30]    0x04
           [40:48] handle  the 8-byte ASCII handle the gateway assigned
-          [76:80] 0xFFFF0004 plain / 0xFFFF0009 with SNC
-
-        No committed capture holds a GW_INFO frame; what stands behind these bytes
-        is that a live gateway completes the handshake when they are sent.
-          Total size 0xe0=224 bytes: confirmed from the gateway send path(..., 0xe0) in the GW_INFO builder.
+          [76:78] 0xFFFF
+          [78:80] the connection index from the gateway's CONNECT reply
         payload[8:12], [24:28], [28:32]: wire-captured from PKT 10 golden fixture.
         ``snc=True`` selects _GW_CLIENT_TAIL_SNC (live pyrfc SNC capture D-24).
         """
@@ -2404,17 +2401,14 @@ class Connection:
     ) -> bytes:
         """Build the 80-byte GW_DONE_CLIENT payload (golden fixture + confirmed).
 
-        Confirmed from the GW_DONE frame builder.
-        Fields confirmed by analysis:
+        Fields (live capture, golden fixture handshake/gw_done_client.bin, 80 bytes;
+        gw_done_server.bin for the gateway's reply):
           [0:2]   type = 0x0605
           [4:8]   flags = 0xFFFF0000  ([4:6] = 0xffff, [6:8] = 0x0000)
           [30]    0x01
           [40:48] handle  the 8-byte ASCII handle the gateway assigned
-          [76:80] 0xFFFF0004 plain / 0xFFFF0009 with SNC
-
-        Source: tests/golden/handshake/gw_done_client.bin (and gw_done_server.bin
-        for the gateway's reply).
-          Total size 0x50=80 bytes: confirmed from the gateway send path(..., 0x50) in the GW_DONE builder.
+          [76:78] 0xFFFF
+          [78:80] the connection index from the gateway's CONNECT reply
         ``snc=True`` selects _GW_CLIENT_TAIL_SNC (live pyrfc SNC capture D-24).
         """
         payload = bytearray(80)
@@ -2498,7 +2492,8 @@ class Connection:
 
         For SNC, strip the outer 80B GW header (76B header + 4B RFC_MARKER) —
         SncTransport._build_gw_snc_frame builds its own GW envelope, so the
-        encrypted payload must be only TLV+footer (same protocol analysis logic as logon).
+        encrypted payload must be only TLV+footer, as for the logon (behavioural: A4H
+        accepts exactly this in every live SNC call).
         For non-SNC, send the full GW-framed bytes unchanged.
 
         This method is the classic/SNC GW path ONLY. The wRFC transport bypasses it
@@ -3505,22 +3500,16 @@ class Connection:
     def create_tid(self) -> str:
         """Generate a 24-character Transaction ID (TID) for tRFC / qRFC calls.
 
-        Uses local UUID generation (NULL-handle semantics per SDK type definitions):
-        this method does NOT require an open connection and may be called before
+        Uses local UUID generation: this method does NOT require an open connection and may be called before
         ``connect()`` or after the connection is closed.
 
-        The returned TID is derived from ``uuid4().hex[:24].upper()``.  UUID-hex
-        characters (``0-9A-F``) are a strict subset of the confirmed RFC TID
-        alphabet (``ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-``;),
-        so the TID is always valid on the wire.  The authentic SDK format uses
-        IP+PID+time+counter encoding, but SAP accepts any string in the alphabet
-        (range check only notes, Plan 06-01 SUMMARY Assumption A1).
+        The returned TID is ``uuid4().hex[:24].upper()``: 24 uppercase hex characters,
+        the same length and character set as every TID seen live (the TIDs SAP itself
+        issues are uppercase hex fields, docs/protocol/trfc.md). Whether a server also
+        accepts the other characters of the accepted TID set is [ASSUMED].
 
         Returns:
             A 24-character uppercase string suitable for use as a TID.
-
-        Source: SDK type definitions-2224 (RfcGetTransactionID NULL-handle branch),
-                protocol analysis.
         """
         return uuid.uuid4().hex[:24].upper()
 
@@ -3537,7 +3526,9 @@ class Connection:
         Sends a synchronous RFC invoke of ``ARFC_DEST_SHIP`` with the TID encoded
         as a CHAR parameter (UTF-16LE, 24 chars = 48 bytes — Pitfall 4).  The
         function-name TLV (0x0102) carries ``ARFC_DEST_SHIP``, which IS the
-        call-type discriminator on the server side (protocol analysis — no separate discriminator byte).
+        call-type discriminator on the server side: no separate discriminator byte.
+        A4H runs such a call as ``ARFC_DEST_SHIP`` (live 2026-11-12: the error it returned
+        came from that function module; the submit itself is issue #36).
 
         For qRFC (``queue`` is not None): the queue name is included as an
         additional parameter in the ARFCSSTATE table param, causing the server to
@@ -3630,8 +3621,8 @@ class Connection:
             CommunicationError:  Wraps ``OSError`` / ``EOFError`` from the
                                  transport.
 
-        Source: SDK type definitions (RfcConfirmTransactionID),
-                protocol analysis (ARFC_DEST_CONFIRM branch).
+        ``ARFC_DEST_CONFIRM`` is a remote-enabled function module on A4H; its
+        parameters are those the server's metadata declares (docs/protocol/trfc.md).
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3682,8 +3673,8 @@ class Connection:
         can pass the correct ``RFC_UNIT_IDENTIFIER`` to the backend.
 
         UnitID generation: when ``uid`` is None, generates a 32-char uppercase
-        hex UnitID via ``uuid4().hex.upper()`` (NULL-handle semantics,
-        SDK type definitions-2224 the UUID formatter path).
+        hex UnitID via ``uuid4().hex.upper()``: the display form of the 16-byte unit ID
+        that travels on the wire (live bgRFC submit, docs/protocol/trfc.md).
 
         Args:
             uid:    32-char uppercase hex UnitID; generated if None.
@@ -3779,8 +3770,8 @@ class Connection:
             ValueError:          If ``unit_id`` is not a valid 32-char hex UnitID.
             CommunicationError:  Wraps OSError/EOFError from the transport.
 
-        Source: SDK type definitions (RfcConfirmUnit),
-                protocol analysis (BGRFC_DEST_CONFIRM).
+        ``BGRFC_DEST_CONFIRM`` is a remote-enabled function module on A4H; its
+        parameters are those the server's metadata declares (docs/protocol/trfc.md).
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3849,8 +3840,8 @@ class Connection:
             ValueError:          If ``unit_id`` is not a valid 32-char hex UnitID.
             CommunicationError:  Wraps OSError/EOFError from the transport.
 
-        Source: SDK type definitions (RfcGetUnitState),
-                protocol analysis (BGRFC_CHECK_UNIT_STATE_SERVER).
+        ``BGRFC_CHECK_UNIT_STATE_SERVER`` is a remote-enabled function module on A4H;
+        its parameters are those the server's metadata declares (docs/protocol/trfc.md).
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-12
+
+EC keys for the built-in SNC, stricter yes/no parameters, and every source cited in the
+code and docs now points at an observation — or says plainly that it is an assumption.
+
 ### Added
 
 - **EC keys in the built-in X.509 SNC mechanism** (issue #64). PSEs with ECDSA keys on
@@ -18,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logon was rechecked against an S/4HANA system. Replayed byte for byte from
   `tests/golden/snc/secgss_ec_loopback.json` and `secgss_ec_client_rsa_server.json`.
   DSA and EdDSA keys are refused with a clear error.
+- `tests/test_repo_hygiene.py` keeps internal names of SAP binaries and "protocol
+  analysis" out of the cited sources.
 
 ### Fixed
 
@@ -26,6 +33,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity. `snc_sso`, `snc_kerberos`, `ws_tls_verify`, `ms_use_http`, `strict_params`
   and `allow_restricted_logon` accept `True`/`False`, `1`/`0` and the NW RFC SDK strings
   `"1"`/`"0"`; anything else raises `TypeError` before a connection is opened.
+
+### Changed
+
+- **Sources cited in code and docs are observations, or labelled `[ASSUMED]`.** Comments
+  that named internal functions of SAP libraries, or cited "protocol analysis", now cite
+  the capture, golden fixture or live probe behind the fact. Where none exists, the fact is
+  labelled `[ASSUMED]` together with what would settle it:
+  - **RFC types 31–40** (`INT8`, `UTCLONG` … `CDAY`): their codes beyond 31, widths and
+    byte order. INT8 = 31 with 8 bytes was seen in live metadata; no standard
+    remote-enabled function module on A4H uses the others.
+  - **SAP LZ4 wRFC frames**: no compressed wRFC response has been captured.
+  - **The inbound `0x5001` parameter block** a registered server decodes: not captured.
+  - **The TID character set** beyond uppercase hex: every live TID is hex, and a probe is
+    blocked by issue #36.
+  - **The PROGRAM_ID limits** (64 characters, no `*`): a live probe could not read the
+    registration result back.
+
+  Behaviour is unchanged; these values were already in use. The docs no longer call them
+  confirmed (`docs/protocol/serialization.md`, `trfc.md`, `framing.md`).
+
+### Documentation
+
+- `docs/protocol/trfc.md`: the TID section describes what live TIDs look like (24
+  uppercase hex characters in four fields) instead of an unverified encoding.
+- `docs/protocol/framing.md`: GW frame fields read off the committed captures, including
+  bytes 78:80, which carry the gateway-assigned connection index.
 
 ## [0.2.0] - 2026-11-11
 
@@ -1789,7 +1822,8 @@ fixtures captured from live SAP systems, but the public API may still change bef
   project and is not this library.
 - Not affiliated with or endorsed by SAP SE. See [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/randomstr1ng/saprfclib/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/randomstr1ng/saprfclib/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/randomstr1ng/saprfclib/compare/v0.1.7...v0.1.8

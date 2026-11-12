@@ -49,14 +49,14 @@ __all__ = ["ServerSession", "ServerSessionState"]
 
 
 # --------------------------------------------------------------------------- #
-# Registration-frame wire constants — all sourced from docs/protocol/framing.md
-# §"Server registration & inbound dispatch" (analysis + capture). The frame is the
-# 0x0601 GW_CONNECT built by the gateway connect call/the GW_CONNECT builder; offsets below are payload
-# offsets (NI 4-byte length header NOT included — added by _ni_frame()).
+# Registration-frame wire constants — docs/protocol/framing.md §"Server registration &
+# inbound dispatch", read off the live capture tests/golden/framing/
+# server_registration_request.bin. The frame is the 0x0601 GW_CONNECT; offsets below are
+# payload offsets (NI 4-byte length header NOT included — added by _ni_frame()).
 # --------------------------------------------------------------------------- #
-_NI_HEADER = struct.Struct(">I")  # 4-byte big-endian NI length prefix (NiIWrite)
+_NI_HEADER = struct.Struct(">I")  # 4-byte big-endian NI length prefix (every golden .bin capture)
 
-# Captured registration request payload length (the registration builder/the gateway connect call GW_CONNECT).
+# Captured registration request payload length (the GW_CONNECT in the capture above).
 # Wire-captured server_registration_request.bin = 457B file = 4B NI + 453B payload.
 _REG_PAYLOAD_LEN = 453
 
@@ -146,8 +146,9 @@ class ServerSession:
         OS user, ``time()`` blob) are left zero — they are emitted by the live
         Transport facade and are annotated ``variable`` in the golden sidecar.
 
-        the registration builder validation is enforced defensively: PROGRAM_ID must
-        be non-empty, ≤64 chars, and contain no ``*``; gwserv must be non-empty.
+        Input checks: PROGRAM_ID must be non-empty, at most 64 characters and free of
+        ``*``; gwserv must be non-empty. The 64-character and ``*`` limits are
+        [ASSUMED] (see docs/protocol/framing.md for the probe that did not settle them).
         """
         if not program_id:
             raise ValueError("program_id (tpname) must be non-empty")
@@ -166,14 +167,14 @@ class ServerSession:
         struct.pack_into(">H", payload, 0, _GW_TYPE_CONNECT)  # [0:2] 0x0601
         struct.pack_into(">H", payload, 2, _GW_VERSION)  # [2:4] 0x0200
         struct.pack_into(">I", payload, 4, _GW_FLAGS)  # [4:8] 0xFFFF0000
-        payload[_OFF_B10] = 0x01  # [10]  the GW_CONNECT builder init
+        payload[_OFF_B10] = 0x01  # [10]  as captured
         payload[_OFF_B16] = 0xC0  # [16]  |=0x80 + 0x40
         payload[_OFF_B21] = 0x04  # [21]  standard client
-        # [40:48] connection handle: 8 spaces on the outbound connect (the GW_CONNECT builder
-        # strncpy "        "). Left zero here — annotated `variable` (the live
+        # [40:48] connection handle: 8 spaces on the outbound connect (as captured).
+        # Left zero here — annotated `variable` (the live
         # facade writes the spaces); compare_bytes skips it.
         payload[_OFF_LU_NAME : _OFF_LU_NAME + len(_LU_PARTNER_NAME)] = _LU_PARTNER_NAME
-        payload[_OFF_B73] = 0x01  # [73]  the GW_CONNECT builder
+        payload[_OFF_B73] = 0x01  # [73]  as captured
         payload[_OFF_MARKER : _OFF_MARKER + 4] = _REG_MARKER_REQUEST  # [76:80]
 
         self._state = ServerSessionState.GW_CONNECTED
@@ -181,7 +182,7 @@ class ServerSession:
 
     @staticmethod
     def _ni_frame(payload: bytes) -> bytes:
-        """Prepend the 4-byte big-endian NI length header (NiIWrite bswap)."""
+        """Prepend the 4-byte big-endian NI length header."""
         return _NI_HEADER.pack(len(payload)) + payload
 
     # ----------------------------------------------------------------- #

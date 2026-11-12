@@ -53,7 +53,7 @@ def load_fixture(fixture_dir: Path, name: str) -> Fixture:
     if missing:
         raise ValueError(f"Fixture JSON {json_path} missing required keys: {missing}")
 
-    # NI header = 4 bytes (confirmed by protocol analysis of NiIWrite/NiIRead)
+    # NI header = 4-byte big-endian length (every captured .bin begins with it)
     NI_HEADER_LEN = meta.get("ni_header_length", 4)
     payload = raw[NI_HEADER_LEN:]
 

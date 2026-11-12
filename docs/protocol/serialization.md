@@ -29,8 +29,8 @@ Every system tested negotiates `4103`, which is UTF-16LE. IEEE 754r decimal floa
 ## RFCTYPE Enum Values
 
 The 25 concrete type codes `saprfclib` handles. Values 31–40 (`RFCTYPE_INT8` through
-`RFCTYPE_CDAY`) continue the sequence from `RFCTYPE_XSTRING = 30`; the dispatch values and their
-little-endian byte order were confirmed 2026-07-05.
+`RFCTYPE_CDAY`) continue the sequence from `RFCTYPE_XSTRING = 30`; see **[A1]** for what is
+confirmed about them.
 
 | Value | Name | Wire Size | ABAP Type | Description |
 |-------|------|-----------|-----------|-------------|
@@ -66,8 +66,13 @@ little-endian byte order were confirmed 2026-07-05.
 | — | `RFCTYPE_BOX` | — | — | Out of scope (SDK: not supported) |
 | — | `RFCTYPE_GENERIC_BOX` | — | — | Out of scope (SDK: not supported) |
 
-**[A1]** Values 31–40 continue the sequence from `RFCTYPE_XSTRING = 30`. Dispatch values and
-byte widths confirmed 2026-07-05.
+**[A1]** Values 31–40 continue the sequence from `RFCTYPE_XSTRING = 30`. Confirmed live: type
+31 is INT8 with 8 bytes — A4H's function metadata for `GET_TASK_INFO.E_DISPATCHED_TASKS`
+(2026-11-12). Everything else about 31–40 is **[ASSUMED]**: the codes 32–40, the widths of
+32–40, and the little-endian byte order of all of them (by analogy with the confirmed INT
+and INT2). INT8's only live value was 0, which does not show the byte order, and no standard
+remote-enabled function module on A4H uses the types 32–40. A capture of a function module
+with parameters of these types, carrying non-zero values, would settle them.
 
 ---
 
@@ -487,9 +492,9 @@ xstring_value = tlv_payload  # bytes as-is
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `int8_value` | `2A 00 00 00 00 00 00 00` | Signed, little-endian |
+| 0x00 | 8 | int64-LE | `int8_value` | `2A 00 00 00 00 00 00 00` | Signed; little-endian **[ASSUMED]** |
 
-**Wire size:** always 8 bytes, little-endian — the same write path as FLOAT (confirmed 2026-07-05).
+**Wire size:** 8 bytes (live metadata, see [A1]); little-endian **[ASSUMED]**.
 
 ---
 
@@ -499,7 +504,7 @@ xstring_value = tlv_payload  # bytes as-is
 |--------|--------|------|------|-----------------|-------|
 | 0x00 | 8 | int64-LE | `utclong_value` | — | Signed 8-byte integer |
 
-Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
+8 bytes, little-endian, like INT8 **[ASSUMED]** — see [A1].
 
 ---
 
@@ -507,7 +512,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `utcsecond_value` | — | Signed 8-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 8 | int64-LE | `utcsecond_value` | — | Signed 8-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -515,7 +520,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `utcminute_value` | — | Signed 8-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 8 | int64-LE | `utcminute_value` | — | Signed 8-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -523,7 +528,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `dtday_value` | — | 4-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 4 | int32-LE | `dtday_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -531,7 +536,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `dtweek_value` | — | 4-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 4 | int32-LE | `dtweek_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -539,7 +544,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `dtmonth_value` | — | 4-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 4 | int32-LE | `dtmonth_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -547,7 +552,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `tsecond_value` | — | 4-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 4 | int32-LE | `tsecond_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -555,7 +560,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 2 | int16-LE | `tminute_value` | — | 2-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 2 | int16-LE | `tminute_value` | — | 2-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -563,7 +568,7 @@ Same write path as INT8 — little-endian, 8 bytes (confirmed 2026-07-05).
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 2 | int16-LE | `cday_value` | — | 2-byte integer **(confirmed 2026-07-05)** |
+| 0x00 | 2 | int16-LE | `cday_value` | — | 2-byte integer **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -636,7 +641,7 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 | CHAR, DATE, TIME | **CONFIRMED** | Live capture 2026-06-26 — UTF-16LE, fixed width |
 | NUM, BYTE | **CONFIRMED** | Live capture — UTF-16LE zero-padded / raw fixed-length bytes |
 | STRING, XSTRING | **CONFIRMED** | Confirmed 2026-07-05 — no internal length prefix; TLV header carries the byte count |
-| INT8, UTCLONG…CDAY (31–40) | **CONFIRMED** | Dispatch values and little-endian widths confirmed 2026-07-05 |
+| INT8, UTCLONG…CDAY (31–40) | **[ASSUMED]** | Only INT8 = 31 with 8 bytes seen live (2026-11-12); codes 32–40, widths and byte order assumed — see [A1] |
 | BCD | **PARTIAL** | Positive sign nibble live-captured; negative nibble unconfirmed |
 | STRUCTURE | **PARTIAL** | Unicode offset layout exercised; non-Unicode layout undocumented |
 | DECF16, DECF34 | **UNCONFIRMED** | Big-endian DPD is documented behaviour; nothing seen on the wire. Not implemented. |
@@ -687,7 +692,7 @@ layout is exercised or documented. **Consequence:** none for any currently reach
 | OQ-03 | STRING/XSTRING length prefix — LE or BE uint32? | **RESOLVED 2026-07-05** — there is no internal prefix. STRING is UTF-8 in the TLV, XSTRING is raw bytes, and the TLV header carries the byte count. The earlier assumption (LE uint32 + UTF-16LE) was wrong and the codec was corrected. |
 | OQ-04 | BCD odd digit count — digit+sign in the last byte, or padding? | **RESOLVED** — live P15.2 capture confirms final digit in the high nibble, sign in the low nibble, no padding |
 | OQ-05 | STRUCTURE field layout — which offset set, and how is it selected? | **OPEN** — decided by the negotiated codepage; only the Unicode path is exercised |
-| OQ-06 | Are temporal types (UTCLONG…CDAY) serialized like INT8? | **RESOLVED 2026-07-05** — UTCLONG/UTCSECOND/UTCMINUTE are 8-byte LE; DTDAY/DTWEEK/DTMONTH/TSECOND are 4-byte LE; TMINUTE/CDAY are 2-byte LE. All use the same write path as INT8/INT4/INT2. |
+| OQ-06 | Are INT8 and the temporal types (UTCLONG…CDAY) serialized as little-endian integers of 8/4/2 bytes? | **OPEN** — implemented that way **[ASSUMED]**, by analogy with INT4/INT2. Needs a capture of a function module with parameters of these types and non-zero values; no standard remote-enabled module on A4H has one (checked 2026-11-12). |
 
 ---
 

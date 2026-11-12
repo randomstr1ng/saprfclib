@@ -85,19 +85,14 @@ The call carries two tables: `ARFCSSTATE` (the control record, one row) and `ARF
 
 ### The 24-character TID
 
-The TID is a 24-character string over a **non-hexadecimal** alphabet:
+The TID is a 24-character string. Every TID seen live is **uppercase hexadecimal**, made of
+four fields (see the live confirmation below): the IP address, process ID, time and a
+counter, each written in hex.
 
-```
-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-      (41 characters, uppercase)
-```
-
-It is built from four 4-byte words, each encoded as 6 characters by repeated modulo-41 into
-that alphabet — 4 × 6 = 24 characters:
-
-1. `own_ip` — 4 bytes of the local IP address (resolved once per process)
-2. `pid` — the process ID (4 bytes, resolved once per process)
-3. `time` — Unix seconds (4 bytes)
-4. `tidCount` — an atomically incremented counter
+saprfclib accepts TIDs over the wider set
+`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-` **[ASSUMED]**. Whether a server accepts the
+characters beyond hex could not be probed: a tRFC submit currently fails before the TID is
+checked (issue #36). Hex TIDs, which `create_tid()` returns, are inside both sets.
 
 **Wire encoding:** as ABAP CHAR values inside the `ARFCIPID` / `ARFCPID` / `ARFCTIME` /
 `ARFCTIDCNT` fields of the `ARFCSSTATE` row. The 24-character TID a client API hands you is the
@@ -108,12 +103,10 @@ concatenation of those four fields — it is **not** sent as a standalone TLV ta
 `ARFCIPID` (8) + `ARFCPID` (4) + `ARFCTIME` (8) + `ARFCTIDCNT` (4), all uppercase hex —
 IP `192.168.88.7` = `C0A85807`, PID `4600`, time `6A4AA9F4`, counter `0003`.
 
-!!! note "A UUID-derived TID is valid, but is not the native format"
-    `uuid4().hex[:24].upper()` yields characters from `0-9A-F`, a strict subset of the TID
-    alphabet. The server range-checks the alphabet only, so such a TID is accepted. The native
-    format is the IP + PID + time + counter encoding above, and using it makes TIDs traceable
-    back to their originating host and process — which is worth having when debugging a stuck
-    LUW.
+!!! note "A UUID-derived TID has the native form"
+    `create_tid()` returns `uuid4().hex[:24].upper()`: 24 uppercase hex characters, the same
+    length and character set as the TIDs SAP issues. The native TID additionally encodes the
+    host, process and time, which makes a stuck LUW traceable to its origin.
 
 ---
 
@@ -321,8 +314,8 @@ attacker-influenced input and become store keys, so validate before use:
 It is a synchronous call to `ARFC_DEST_SHIP`. Use `build_invoke_request()` unchanged.
 
 ### 2. Wrong TID character set
-The TID alphabet is `ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-` (41 characters), not hex
-digits. A `uuid4().hex[:24].upper()` value is a valid subset but not the native format.
+TIDs seen live are 24 uppercase hex characters. saprfclib also accepts
+`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-` **[ASSUMED]**; stay with hex to be safe.
 
 ### 3. Confirming before success
 `confirm_tid()` removes the backend's duplicate protection. Calling it before you have verified
