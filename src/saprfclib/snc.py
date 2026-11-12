@@ -527,9 +527,9 @@ class GssBinding:
             raise SncError("no SNC library path configured")
 
         # D-14: strip enclosing double-quotes SAP env may add, then strip the
-        # SAP SNC type prefix ("p:", "u:", "s:") — CommonCryptoLib's DName_decode
-        # expects a raw X.500 DN; the prefix is a SAP-level convention only
-        # (confirmed protocol analysis of sec1_gss_import_name at).
+        # SAP SNC type prefix ("p:", "u:", "s:"): the GSS library is given the bare
+        # X.500 DN; the prefix is a SAP-level convention only (behavioural:
+        # CommonCryptoLib accepted the bare DN in every live snc_lib logon).
         self._partnername = _strip_snc_prefix(_strip_quotes(snc_partnername))
         self._myname = (
             _strip_snc_prefix(_strip_quotes(snc_myname)) if snc_myname is not None else None
@@ -890,8 +890,8 @@ class SncTransport:
         self._established = False  # SEC-06 gate; set by _handshake()
         # D-24 (live pyrfc capture): ctx_id=3 in all SNC frames.
         self._ctx_id = _SNC_CTX_ID
-        # D-22 RESOLVED (protocol analysis 2026-07-21): snc_eyecatcher global at
-        # points to "SNCFRAME\0" at. Injectable so tests can override.
+        # D-22 RESOLVED: every SNC frame starts with the eye-catcher "SNCFRAME"
+        # (golden fixture snc/snc_frame_headers.json). Injectable so tests can override.
         self._eye = eye_catcher or b"SNCFRAME"
         if gss_binding is None:
             if snc_lib is None:
