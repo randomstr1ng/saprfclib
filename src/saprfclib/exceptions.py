@@ -10,9 +10,9 @@
 # single SapRfcError
 # base lets callers `except saprfclib.SapRfcError` to catch every RFC error (D-18).
 #
-# The AbapApplicationError field set mirrors RFC_ERROR_INFO from SDK type definitions
-# (key, message, abapMsgClass, abapMsgType, abapMsgNumber, abapMsgV1..V4) for full
-# pyrfc field parity (D-15). Any field may be absent in the error TLV, so every
+# The AbapApplicationError field set is the one pyrfc exposes (key, message, message
+# class, type, number, variables V1..V4), for parity (D-15); each is read from its own
+# error TLV tag (invoke.py). Any field may be absent in the error TLV, so every
 # field defaults to None.
 #
 # Security (threat T-04-CRED): these classes carry only server-supplied error text

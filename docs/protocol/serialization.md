@@ -21,8 +21,8 @@ Every system tested negotiates `4103`, which is UTF-16LE. IEEE 754r decimal floa
     INT4, INT2, INT1, FLOAT, CHAR, DATE, and TIME byte encodings are now **CONFIRMED** from
     live capture of `STFC_STRUCTURE` (SAP NetWeaver 7.58, sysnr=00, 2026-06-26). Fixtures under
     `tests/golden/serialization/` are real wire bytes. BCD is confirmed from a live capture of a
-    positive P15.2 value; the negative sign nibble and DecFloat16/34 remain unconfirmed on the
-    wire. See [Known Gaps](#known-gaps).
+    positive P15.2 value and, for both signs, a purpose-built function module (2026-11-12).
+    See [Known Gaps](#known-gaps).
 
 ---
 
@@ -63,8 +63,8 @@ confirmed about them.
 | 38 [A1] | `RFCTYPE_TSECOND` | 4 bytes | TSECOND | Time/second (4-byte integer) |
 | 39 [A1] | `RFCTYPE_TMINUTE` | 2 bytes | TMINUTE | Time/minute (2-byte integer) |
 | 40 [A1] | `RFCTYPE_CDAY` | 2 bytes | CDAY | Calendar day (2-byte integer) |
-| — | `RFCTYPE_BOX` | — | — | Out of scope (SDK: not supported) |
-| — | `RFCTYPE_GENERIC_BOX` | — | — | Out of scope (SDK: not supported) |
+| — | `RFCTYPE_BOX` | — | — | Out of scope: never seen on the wire |
+| — | `RFCTYPE_GENERIC_BOX` | — | — | Out of scope: never seen on the wire |
 
 **[A1]** On the wire a parameter's type is the EXID character of its metadata row; the
 numbers in this table are saprfclib's own constants. Live (A4H kernel 793, 2026-11-12, a
@@ -130,13 +130,13 @@ value = wire_bytes.decode('utf-16-le')  # → "20260626"
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
 | 0x00 | `ceil((decimals+1)/2)` | packed-BCD | `bcd_digits` | `01 23` | Digit pairs in each byte, high nibble = MSD |
-| last | 1 (last nibble) | nibble | `sign_nibble` | `0x4C` (low nibble of last byte) | 0x0C or 0x0F = positive; 0x0D = negative; 0x0B = positive (alt) |
+| last | 1 (last nibble) | nibble | `sign_nibble` | `0x4C` (low nibble of last byte) | 0x0C = zero or positive; 0x0D = negative |
 
 **Wire size:** `ceil((precision + 1) / 2)` bytes, where `precision` is the total digit count.
 
 **Packing rules** (BCD is an array of raw bytes; the digits are packed two per byte):
 - Each byte holds two decimal digits: high nibble = more significant digit, low nibble = less significant digit.
-- The final *nibble* of the last byte is the sign: `0x0C` or `0x0F` = positive, `0x0D` = negative, `0x0B` = positive alternative.
+- The final *nibble* of the last byte is the sign: `0x0C` = zero or positive, `0x0D` = negative.
 - **Odd digit count:** last byte has one digit in the high nibble + sign in the low nibble.
 - **Even digit count:** last byte has two digits; the sign nibble is appended as the low nibble of one extra byte.
 - **Zero / initial form:** all bytes `0x00` with sign nibble `0x0C` in the trailing nibble.
@@ -144,15 +144,13 @@ value = wire_bytes.decode('utf-16-le')  # → "20260626"
 **Sign nibble summary:**
 | Nibble | Meaning |
 |--------|---------|
-| `0x0C` | Positive (canonical) |
-| `0x0F` | Positive (alternate, e.g. from BCD hardware) |
+| `0x0C` | Zero or positive |
 | `0x0D` | Negative |
-| `0x0B` | Positive (alternate, rarely used) |
 
-**Evidence:** the positive sign nibble `0x0C` is confirmed from a live capture (see below). The
-alternate positive nibbles (`0x0F`, `0x0B`) and the negative nibble (`0x0D`) come from documented
-SDK type behaviour and are **[ASSUMED]** on the wire — no live negative value has been captured,
-because the reachable test data (SFLIGHT prices) is all positive.
+**Evidence:** both are live captures (2026-11-12, fixture `bcd_sign.json`): a purpose-built
+function module returned −123.45, 123.45 and 0 as `…12 34 5d`, `…12 34 5c` and `…00 0c`, and the
+reference client sent −0.01 and −98765.43 with `0x0D`. On decode saprfclib also reads `0x0F` and
+`0x0B` as positive **[ASSUMED]** — tolerated, never seen.
 
 **Python encode (example for 123.45 as BCD(5,2)):**
 ```python
@@ -200,9 +198,9 @@ def encode_bcd(value: str, precision: int) -> bytes:
                           -- Source: BAPI_FLIGHT_GETLIST FLIGHT_LIST.PRICE; port 3300 offset 0x44D
 ```
 This live capture confirms the packed-BCD scheme (2 digits/byte, sign in
-the low nibble of the last byte, 0x0C=positive) on real SAP wire bytes. The negative sign nibble
-(0x0D) remains unconfirmed on the wire — SFLIGHT prices are positive, so no live negative value
-was reachable. Fixture: `tests/golden/serialization/type_bcd_p15_2.{bin,json}`.
+the low nibble of the last byte, 0x0C=positive) on real SAP wire bytes. Fixture:
+`tests/golden/serialization/type_bcd_p15_2.{bin,json}`; the negative nibble `0x0D` is in
+`bcd_sign.json`.
 
 **Codec status — IMPLEMENTED:** `_decode_bcd` / `_encode_bcd` in `src/saprfclib/codec.py`
 implement the scheme above using `decimal.Decimal` exclusively — never `float`, which cannot
@@ -338,7 +336,7 @@ wire_bytes = struct.pack('<i', value)
 
 ### RFCTYPE_NULL (type=14) — Unsupported
 
-Not serialized. The SAP NW RFC SDK header documents this as "not supported data type." Skip in any type-switch implementation.
+Not serialized: never seen on the wire, and no function module seen has a parameter of this type. Skip in any type-switch implementation.
 
 ---
 
@@ -381,8 +379,8 @@ every expectation from that fixture rather than from the standard.
 
 #### The byte order is little-endian, and this document previously said otherwise
 
-Earlier revisions recorded big-endian as "the neutral network byte order", sourced from
-SDK header commentary rather than from the wire. The capture disproves it. 42.0 as IEEE
+Earlier revisions recorded big-endian as "the neutral network byte order", from a
+source other than the wire. The capture disproves it. 42.0 as IEEE
 lays the fields out is `22 34 00 00 00 00 02 20`; it arrives reversed.
 
 This matters more than a normal byte-order mistake. Read big-endian, that value decodes
@@ -661,7 +659,7 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 | STRING, XSTRING | **CONFIRMED** | Confirmed 2026-07-05 — no internal length prefix; TLV header carries the byte count |
 | INT8, UTCLONG | **CONFIRMED** | Live capture, purpose-built function module (2026-11-12) |
 | UTCSECOND…CDAY (33–40) | **[ASSUMED]** | No dictionary type on kernel 793 — see [A1] |
-| BCD | **PARTIAL** | Positive sign nibble live-captured; negative nibble unconfirmed |
+| BCD | **CONFIRMED** | Both sign nibbles live-captured (`bcd_sign.json`) |
 | STRUCTURE | **PARTIAL** | Unicode offset layout exercised; non-Unicode layout undocumented |
 | DECF16, DECF34 | **UNCONFIRMED** | Big-endian DPD is documented behaviour; nothing seen on the wire. Not implemented. |
 
@@ -683,16 +681,11 @@ than a clear failure.
 
 **To close:** capture a live DECFLOAT16 and DECFLOAT34 value and commit both as fixtures.
 
-### BCD negative sign nibble — OPEN
+### BCD negative sign nibble — CLOSED (2026-11-12)
 
-The positive nibble `0x0C` is live-captured (`BAPI_FLIGHT_GETLIST` → `FLIGHT_LIST.PRICE`,
-P15.2, wire bytes `00 00 00 08 00 00 05 0C` = 800000.50). The negative nibble `0x0D` and the
-alternate positive nibbles `0x0F` / `0x0B` are documented but unconfirmed on the wire, because
-the reachable test data (SFLIGHT prices) contains no negative value.
-
-`saprfclib` encodes and decodes all four nibbles per the documented convention. **Consequence:**
-if the convention is wrong for negatives, a negative packed decimal would decode with the wrong
-sign. **To close:** capture a function module returning a negative packed decimal.
+`0x0D` is the negative nibble and `0x0C` the zero/positive one, both ways: fixture
+`tests/golden/serialization/bcd_sign.json`, a purpose-built function module and the reference
+client.
 
 ### STRUCTURE non-Unicode offsets — OPEN
 

@@ -483,8 +483,11 @@ kt (64-byte key table):
     55d7027784 13acddf9b8311 6610e6dfa   (whitespace cosmetic)
 ```
 
-Implemented as `_scramble_password` in `src/saprfclib/connection.py`, verified against a live
-logon reaching READY (`0x0420 == 0`).
+Implemented as `_scramble_password` in `src/saprfclib/connection.py`, verified two ways: a live
+logon reaching READY (`0x0420 == 0`), and the `0x0117` record of seven reference-client logons
+(2026-11-12, each with its own seed) descrambling to the known password. Two of them, made
+with dummy passwords, are committed: `tests/golden/handshake/password_scramble.json`. Logons
+from one process carry the same seed.
 
 **Seed:** the seed is stored **little-endian** (x86 native), unlike the big-endian NI and TLV
 headers. It is freshly generated per scramble on the client — there is **no server-supplied

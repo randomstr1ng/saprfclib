@@ -283,7 +283,8 @@ def encode_decfloat(value: Decimal | int | str, width: int) -> bytes:
     return packed.to_bytes(width, "big")[::-1]
 
 
-# Types the SAP SDK documents as not serialized on the wire.
+# Types this library does not serialize: no capture carries one, and no function module
+# seen exposes one as a parameter.
 _OUT_OF_SCOPE = frozenset({RFCTYPE_NULL, RFCTYPE_ABAPOBJECT, RFCTYPE_XMLDATA})
 
 # Byte-like types whose "unset" value is empty bytes rather than an empty string.
@@ -498,9 +499,10 @@ def _encode_uc_fixed(value: str, field: FieldDesc, *, pad: str) -> bytes:
 # bytes, so the digit count is (width * 2 - 1) — derived directly from the
 # field's declared byte span, no separate precision field needed.
 #
-# Sign nibbles (SDK type definitions SAP_BCD; Pitfall 4): 0x0C / 0x0F / 0x0B → positive,
-# 0x0D → negative on DECODE; ENCODE emits only the canonical 0x0C (non-negative)
-# or 0x0D (negative). The value is modelled with decimal.Decimal exclusively —
+# Sign nibbles (Pitfall 4): 0x0C for zero and positive values and 0x0D for negative ones,
+# both ways -- live capture of a purpose-built function module, the reference client
+# sending and the server returning both signs (tests/golden/serialization/bcd_sign.json).
+# DECODE also reads 0x0F and 0x0B as positive [ASSUMED]: tolerated, never seen. The value is modelled with decimal.Decimal exclusively —
 # NEVER float — for exact base-10 financial correctness (D-13).
 #
 # Security (threat T-02-09 / T-02-11): the buffer length is validated against the

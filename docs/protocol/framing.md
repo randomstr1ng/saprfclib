@@ -282,8 +282,8 @@ which catches a desynchronised parse immediately rather than 200 bytes later.
 ### Known TLV Tags
 
 Evidence column: **capture** = the tag was observed on the wire in a committed fixture;
-**analysis** = the tag is known to exist from reference-client behaviour but has not yet been
-seen in a capture, so its role is provisional.
+**[ASSUMED]** = not seen in any capture, so neither its existence on the wire nor its role is
+established.
 
 Captures drawn on: STFC_CONNECTION, STFC_EXCEPTION, STFC_DEEP_TABLE, RFC_READ_TABLE,
 STFC_CHANGING, STFC_STRUCTURE.
@@ -296,8 +296,8 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0103    | capture     | 4 bytes: `00000e0b` in a logon, `00000e09` in a tRFC call header     |
 | 0x0106    | capture     | 11 bytes, codepage descriptor (logon_request.bin)                    |
 | 0x0130    | capture     | Program name (UTF-16LE, e.g. "SAPLSTFC", padded to 80 bytes)        |
-| 0x0131    | analysis          | EPP (Extended Performance Profile)                                    |
-| 0x0160    | analysis          | Int16 field                                                           |
+| 0x0131    | [ASSUMED]   | EPP (Extended Performance Profile)                                    |
+| 0x0160    | [ASSUMED]   | Int16 field                                                           |
 | 0x0201    | capture     | Parameter name (UTF-16LE, scalar IMPORTING/EXPORTING pair)           |
 | 0x0203    | capture     | Parameter value CHAR (UTF-16LE, fixed-width space-padded)            |
 | 0x0205    | capture     | Output table/param declaration (name UTF-16LE, one per return param) |
@@ -306,7 +306,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0303    | capture     | TABLE type descriptor (402 bytes; from RFC_GET_FUNCTION_INTERFACE)   |
 | 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length)     |
 | 0x0330    | capture     | TABLE header (4 bytes; part of binary TABLE encoding)                |
-| 0x0337    | analysis          | Marker / empty record                                                 |
+| 0x0337    | [ASSUMED]   | Marker / empty record                                                 |
 | 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
 | 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
 | 0x0403    | capture     | ABAP exception key/name (kernel 752; alternative to 0x0401)          |
@@ -316,14 +316,14 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0417    | capture     | ABAP exception/message number (3 chars, e.g. "000", "341")           |
 | 0x0418    | capture     | ABAP call-stack breadcrumb (`;W=…,E=…;S=…;D=…` — not parsed)         |
 | 0x0420    | capture     | RFC return code (4B BE uint32; 0=success)                            |
-| 0x0421    | analysis          | Auth / call context                                                   |
+| 0x0421    | [ASSUMED]   | Auth / call context                                                   |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
 | 0x0504    | capture     | Empty; first record of an ARFC_DEST_SHIP (tRFC submit) request       |
 | 0x0513    | capture     | Empty; first record of an API_CLEAR_TID (tRFC confirm) request       |
-| 0x0502    | capture+analysis  | Call-start marker (empty on call frames)                             |
+| 0x0502    | capture     | Call-start marker (empty on call frames)                             |
 | 0x0503    | capture     | Success marker (empty record) — present iff 0x0417 is absent         |
-| 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
-| 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
+| 0x0512    | capture     | Parameter section start / end of RFC exchange                        |
+| 0x0514    | capture     | Session token / connection ID (16B binary, random per session)       |
 | 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
@@ -1035,9 +1035,8 @@ reaches the encoder with `type_desc=None` and no rows can be laid out.
 
 The reference library (NW RFC SDK 750 PL18 / pyrfc) resolves a DDIC structure or table's
 field layout with **`DDIF_FIELDINFO_GET`**, keyed on `TABNAME`. `RFC_GET_STRUCTURE_DEFINITION`
-is a *different* RFC; both exist in the SDK (`DDIF_FIELDINFO_GET_v462_6` and
-`RFC_GET_STRUCTURE_DEFINITION_v3` appear as C++ metadata-query classes in `libsapnwrfc.so`),
-but the reference client calls DDIF. This matters for interoperability: at least one server
+is a *different* RFC, and the reference client calls DDIF (captures of its metadata lookups).
+This matters for interoperability: at least one server
 (the HoneySAP emulator this was found against) answers `RFC_GET_STRUCTURE_DEFINITION` with
 return code 0 and an **empty** `FIELDS` table, while answering `DDIF_FIELDINFO_GET` with the
 real fields. A client relying on `RFC_GET_STRUCTURE_DEFINITION` there gets no layout and

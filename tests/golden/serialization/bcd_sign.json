@@ -1,0 +1,14 @@
+{
+ "fixture": "bcd_sign",
+ "capture_source": "live capture 2026-11-12: the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) calling Z_SAPRFCLIB_BCD, a purpose-built remote-enabled function module (local object on an S/4HANA ABAP system, kernel 793). Parameters typed DMBTR, packed decimal 23 digits with 2 decimals, 12 bytes. It returns -123.45, 123.45 and 0, and echoes its importing value.",
+ "evidence": "tier 1 live capture. IV values are what the reference client sent, EV values what the server returned.",
+ "decimals": 2,
+ "bytes": 12,
+ "values": [
+  {"parameter": "IV_DEC", "value": "-0.01", "hex": "00000000000000000000001d"},
+  {"parameter": "EV_NEG", "value": "-123.45", "hex": "00000000000000000012345d"},
+  {"parameter": "EV_POS", "value": "123.45", "hex": "00000000000000000012345c"},
+  {"parameter": "EV_ZERO", "value": "0.00", "hex": "00000000000000000000000c"},
+  {"parameter": "IV_DEC", "value": "-98765.43", "hex": "00000000000000009876543d"}
+ ]
+}

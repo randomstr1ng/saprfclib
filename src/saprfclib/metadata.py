@@ -71,8 +71,8 @@ RFCTYPE_UTCLONG = 32
 # live system INT4, INT2, INT1 and RAW all report INTTYPE 'X', so an integer is
 # indistinguishable from raw bytes by INTTYPE alone. DATATYPE disambiguates them.
 # Derived from 29,454 structures exported from a live system (Z_HONEYSAP_EXPORT):
-# every DATATYPE below was observed with the INTTYPE and width shown in the
-# analysis, and cross-checked against DD03L on the same system (e.g. INT4 =>
+# every DATATYPE below was observed in that export with its INTTYPE and width, and
+# cross-checked against DD03L on the same system (e.g. INT4 =>
 # INTTYPE 'X', LENG 10, INTLEN 4).
 _DATATYPE_TO_RFCTYPE: dict[str, int] = {
     # character / text
@@ -266,7 +266,8 @@ def is_exception_row(row: dict[str, Any]) -> bool:
     return str(row.get(_COL_PARAMCLASS, "")).strip().upper() == _PARAMCLASS_EXCEPTION
 
 
-# EXID single-char code → RFCTYPE integer (SDK type definitions / confirmed by live capture).
+# EXID single-char code → RFCTYPE integer. Each code is one seen in live metadata unless
+# its line says otherwise.
 _EXID_TO_RFCTYPE: dict[str, int] = {
     "C": RFCTYPE_CHAR,
     "D": RFCTYPE_DATE,

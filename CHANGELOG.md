@@ -83,8 +83,22 @@ that it is an assumption.
   - **The PROGRAM_ID limits** (64 characters, no `*`): a live probe could not read the
     registration result back.
 
+  - **The RFC server's return codes** 3 (failure) and 16 (TID already executed): no
+    capture of a SAP system receiving either from a registered server.
+
   Behaviour is unchanged; these values were already in use. The docs no longer call them
   confirmed (`docs/protocol/serialization.md`, `trfc.md`, `framing.md`).
+- **No SDK header is cited any more.** About 60 comments cited "SDK type definitions",
+  some with header line numbers. API parity notes now name the public SDK function they
+  mirror; wire facts cite a capture. Three were settled by new captures instead of
+  relabelling: the **negative packed-decimal sign nibble `0x0D`**
+  (`tests/golden/serialization/bcd_sign.json`), the **password scramble**, checked against
+  the `0x0117` record of reference-client logons
+  (`tests/golden/handshake/password_scramble.json`), and the UnitID and TID lengths (live).
+  Fixture notes that cited internal names now describe what the capture shows, and the
+  synthetic `trfc_call_request` fixture, which the tRFC captures contradict, is removed.
+  `tests/test_repo_hygiene.py` now also scans the fixtures and catches header line
+  references.
 
 ### Documentation
 

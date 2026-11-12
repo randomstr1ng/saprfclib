@@ -12,8 +12,8 @@
 #
 # Protocol citations: docs/protocol/trfc.md §"bgRFC Wire Format: BGRFC_DEST_SHIP",
 #   §"The 32-Character UnitID Format", §"bgRFC Submit + Confirm"
-# SDK refs: SDK type definitions (unit creation), 2272 (RfcInvokeInUnit — nothing executes
-#   yet), 2303 (RfcSubmitUnit), 2331 (RfcConfirmUnit), 2357 (RfcGetUnitState)
+# The unit API mirrors the NW RFC SDK's public one (create, invoke -- nothing executes
+#   yet -- submit, confirm, get state).
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from saprfclib.exceptions import CommunicationError
 # UnitID format validation (offline — no production symbol needed)
 # --------------------------------------------------------------------------- #
 
-_UNITID_LN = 32  # RFC_UNITID_LN from SDK type definitions
+_UNITID_LN = 32  # 16 bytes as hex (BGRFC_GET_UNIT_ID, live)
 _UNITID_CHARSET: frozenset[str] = frozenset("0123456789ABCDEF")
 
 
@@ -93,7 +93,7 @@ def test_unit_buffer_submit() -> None:
 
     Validates:
     1. Unit type 'T' when queues=[] (: 0x54 = 'T').
-    2. unit.call() returns None (RfcInvokeInUnit buffers — h:2272 'nothing executes yet').
+    2. unit.call() returns None (the call is buffered; nothing executes yet).
     3. __exit__ triggers BGRFC_DEST_SHIP to the backend (docs/protocol/trfc.md
        §"bgRFC Submit + Confirm").
     4. Multiple unit.call() invocations are buffered (one submit sends all).
@@ -190,14 +190,14 @@ def test_unit_lifecycle() -> None:
 
     GREEN: Plan 06-05 — Connection.confirm_unit / rollback_unit / get_unit_state implemented.
 
-    Validates UnitState enum values mirror RFC_UNIT_STATE (SDK type definitions-332):
+    Validates UnitState enum values mirror the SDK's public RFC_UNIT_STATE:
       NOT_FOUND=0, IN_PROCESS=1, COMMITTED=2, ROLLED_BACK=3, CONFIRMED=4
     """
     import uuid
 
     from saprfclib.stores import UnitState
 
-    # Verify enum members exist with the right names (SDK type definitions-332)
+    # Verify enum members exist with the right names
     assert hasattr(UnitState, "NOT_FOUND"), "UnitState.NOT_FOUND missing"
     assert hasattr(UnitState, "IN_PROCESS"), "UnitState.IN_PROCESS missing"
     assert hasattr(UnitState, "COMMITTED"), "UnitState.COMMITTED missing"

@@ -21,7 +21,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCANNED = [
     *sorted((ROOT / "src").rglob("*.py")),
     *sorted((ROOT / "docs").rglob("*.md")),
-    *sorted((ROOT / "tests").glob("*.py")),
+    *sorted((ROOT / "tests").rglob("*.py")),
+    *sorted((ROOT / "tests" / "golden").rglob("*.json")),
     ROOT / "README.md",
     ROOT / "CLAUDE.md",
 ]
@@ -36,8 +37,10 @@ BANNED = {
         r"\b(?:writeRfc|readRfc|rfcSupply|rfcDeserial|getNextParameter|readMetadata)\w*"
     ),
     "SAP-internal network/SNC function": re.compile(
-        r"\b(?:NiI(?:Write|Read)|STI[A-Z]\w+|sec1_\w+)"
+        r"\b(?:NiI(?:Write|Read)|STI[A-Z]\w+|GwI[A-Z]\w+|UtilCpy\w+|sec1_\w+)"
     ),
+    "SDK header cited as a source": re.compile(r"SDK type definitions|\bh:\d{2,4}\b"),
+    "SAP-internal versioned class name": re.compile(r"\b[A-Z][A-Z_]+_v\d{1,3}(?:_\d+)?\b"),
     "SAP-internal component name": re.compile(r"\b(?:NgRfc\w*|WebsocketDriver)\b"),
 }
 # Allowed occurrences: the methodology page's own title, which names the discipline, and
@@ -79,6 +82,11 @@ def test_no_internal_references_cited_as_sources() -> None:
         "(RFCID_TableContent)",
         "NiIWrite bswap",
         "the NgRfc stream",
+        "STIInit [10]=1",
+        "GwIConnect kind=0xb",
+        "(SDK type definitions-332)",
+        "see h:2272",
+        "DDIF_FIELDINFO_GET_v462_6",
     ],
 )
 def test_patterns_catch_what_they_are_for(line: str) -> None:

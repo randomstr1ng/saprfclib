@@ -8,7 +8,7 @@
       "name": "payload_length",
       "value": "",
       "type": "fixed",
-      "note": "Big-endian uint32; confirmed by NiIWrite bswap at protocol analysis"
+      "note": "Big-endian uint32, as in every live capture"
     },
     {
       "offset": 4,
@@ -23,6 +23,6 @@
     "payload_length": 4,
     "payload_hex": "d9c6c3f0"
   },
-  "capture_source": "synthetic — no live capture; confirms 4-byte NI header per protocol analysis",
+  "capture_source": "synthetic — no live capture; the 4-byte big-endian NI header seen in every live capture",
   "evidence": "NI write path (bswap confirms BE), NI read path (header=4)"
 }
