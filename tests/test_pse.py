@@ -33,11 +33,24 @@ def test_cases_present():
     assert len(CASES) >= 4
 
 
+def _ec_numbers(der: bytes) -> tuple[object, int]:
+    info = keys.PrivateKeyInfo.load(der)
+    return info.curve, info["private_key"].parsed["private_key"].native
+
+
 @pytest.mark.parametrize("name", CASES)
 def test_pse_matches_sapgenpse_export(name):
     data, exp = _fixture(name)
     cred = load_pse(data, exp["pin"])
-    n_ref, d_ref = _rsa_numbers(bytes.fromhex(exp["private_key_pkcs8"]))
+    ref = bytes.fromhex(exp["private_key_pkcs8"])
+    if name.startswith("pse_ec_"):
+        # EC: same curve and private scalar as sapgenpse's own PKCS#8 export.
+        assert _ec_numbers(cred.private_key) == _ec_numbers(ref)
+        assert keys.PrivateKeyInfo.load(cred.private_key).algorithm == "ec"
+        assert [c.hex() for c in cred.certificate_chain] == exp["certificates_from_export"]
+        assert [c.hex() for c in cred.trusted] == exp["trusted"]
+        return
+    n_ref, d_ref = _rsa_numbers(ref)
     n, d = _rsa_numbers(cred.private_key)
     assert n == n_ref
     # Equivalent private exponents may differ by a multiple of lambda(n); check by use.
@@ -196,3 +209,10 @@ def test_lps_record_tamper_is_detected():
     data[60] ^= 1
     with pytest.raises(PseError):
         load_pse(bytes(data), "test123")
+
+
+def test_dsa_pse_is_refused_with_a_clear_error():
+    """sapgenpse also writes DSA keys; the handshake supports RSA and EC only."""
+    data = (GOLDEN / "unsupported" / "pse_dsa_nopin.pse").read_bytes()
+    with pytest.raises(PseError, match="neither an RSA nor an EC key"):
+        load_pse(data, None)

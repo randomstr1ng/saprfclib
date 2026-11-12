@@ -54,9 +54,10 @@ The PSE is chosen as CommonCryptoLib chooses it (the `cred_v2` entry matching
 `snc_myname`, else the first usable one). `snc_pse=` without `snc_pse_pin=` also takes the
 PIN from `cred_v2`.
 
-Supported: RSA client keys; PSE files protected with the default or PBES2 encryption,
-in local protected storage, or unprotected; `cred_v2` in all forms written outside
-Windows. Not supported yet: Windows DPAPI protection, EC client keys.
+Supported: RSA and EC client keys (P-256, P-384, P-521, as `sapgenpse -a ECDSA` and
+current SAP systems create them); PSE files protected with the default or PBES2
+encryption, in local protected storage, or unprotected; `cred_v2` in all forms written
+outside Windows. Not supported yet: Windows DPAPI protection, DSA and EdDSA keys.
 
 ## Kerberos SNC (single sign-on with Active Directory)
 
