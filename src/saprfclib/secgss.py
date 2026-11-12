@@ -21,13 +21,14 @@ end:
 
 * protocol version 1.1, cipher suite ``0x0009`` — ephemeral ECDH on P-256 chosen by
   the server, AES-256-CBC, HMAC-SHA256, the TLS 1.2 ``P_SHA256`` PRF;
-* X.509 authentication of both sides with RSA PKCS#1 v1.5 signatures.
+* X.509 authentication of both sides with RSA PKCS#1 v1.5 or ECDSA signatures
+  (P-256, P-384, P-521 keys).
 
 Anything else the peer selects is refused with :class:`~saprfclib.exceptions.SncError`
 rather than attempted.
 
 Crypto primitives come from maintained third-party pure-Python libraries — AES from
-``tlslite-ng``, RSA from ``tlslite-ng``, ECDH from ``ecdsa``, certificate and key
+``tlslite-ng``, RSA from ``tlslite-ng``, ECDH and ECDSA from ``ecdsa``, certificate and key
 parsing from ``asn1crypto`` — plus ``hashlib``/``hmac`` from the standard library.
 None of these primitives are constant-time; see the security notes in the docs.
 
@@ -48,7 +49,8 @@ from typing import Any
 
 from asn1crypto import keys as _keys
 from asn1crypto import x509 as _x509
-from ecdsa import ECDH, NIST256p
+from ecdsa import ECDH, NIST256p, NIST384p, NIST521p, SigningKey, VerifyingKey
+from ecdsa.util import sigdecode_der, sigencode_der
 from tlslite.utils.cipherfactory import createAES
 from tlslite.utils.python_rsakey import Python_RSAKey
 
@@ -113,21 +115,57 @@ _EXT_CLIENT_IS_NOT_SLC = 5
 # was listed first.
 _SIGALG_RSA_PKCS1_SHA512 = 0x01000601
 _SIGALG_RSA_PKCS1_SHA256 = 0x01000201
+# ECDSA ids. Source: behavioural probe 2026-11-12 — a CommonCryptoLib acceptor with an
+# EC key, offered exactly one id, signed with ecdsa-with-SHA512 for 00000606, -SHA384
+# for 00000506 and -SHA256 for 00000206, and aborted for every other id it lists;
+# golden fixture snc/secgss_ec_loopback.json.
+_SIGALG_ECDSA_SHA512 = 0x00000606
+_SIGALG_ECDSA_SHA384 = 0x00000506
+_SIGALG_ECDSA_SHA256 = 0x00000206
 _SIGALG_HASH: dict[int, str] = {
     _SIGALG_RSA_PKCS1_SHA512: "sha512",
     _SIGALG_RSA_PKCS1_SHA256: "sha256",
+    _SIGALG_ECDSA_SHA512: "sha512",
+    _SIGALG_ECDSA_SHA384: "sha384",
+    _SIGALG_ECDSA_SHA256: "sha256",
 }
-# X.509 AlgorithmIdentifier for each, DER (OID + NULL parameters, as observed).
+# The key type each id signs with.
+_SIGALG_KEY: dict[int, str] = {
+    _SIGALG_RSA_PKCS1_SHA512: "rsa",
+    _SIGALG_RSA_PKCS1_SHA256: "rsa",
+    _SIGALG_ECDSA_SHA512: "ec",
+    _SIGALG_ECDSA_SHA384: "ec",
+    _SIGALG_ECDSA_SHA256: "ec",
+}
+# X.509 AlgorithmIdentifier for each, DER as observed: OID + NULL parameters for RSA,
+# the OID alone for ECDSA (fixture secgss_ec_loopback.json, both sides).
 _SIGALG_ALGID: dict[int, bytes] = {
     _SIGALG_RSA_PKCS1_SHA512: bytes.fromhex("300d06092a864886f70d01010d0500"),
     _SIGALG_RSA_PKCS1_SHA256: bytes.fromhex("300d06092a864886f70d01010b0500"),
+    _SIGALG_ECDSA_SHA512: bytes.fromhex("300a06082a8648ce3d040304"),
+    _SIGALG_ECDSA_SHA384: bytes.fromhex("300a06082a8648ce3d040303"),
+    _SIGALG_ECDSA_SHA256: bytes.fromhex("300a06082a8648ce3d040302"),
 }
 _ALGID_OID_TO_SIGALG: dict[str, int] = {
     "1.2.840.113549.1.1.13": _SIGALG_RSA_PKCS1_SHA512,
     "1.2.840.113549.1.1.11": _SIGALG_RSA_PKCS1_SHA256,
+    "1.2.840.10045.4.3.4": _SIGALG_ECDSA_SHA512,
+    "1.2.840.10045.4.3.3": _SIGALG_ECDSA_SHA384,
+    "1.2.840.10045.4.3.2": _SIGALG_ECDSA_SHA256,
 }
-# What we offer the server for *its* signature, most preferred first.
-_OFFERED_SIGALGS = (_SIGALG_RSA_PKCS1_SHA512, _SIGALG_RSA_PKCS1_SHA256)
+# What we offer the server for *its* signature, most preferred first. RSA before
+# ECDSA, strongest hash first within each, as in the reference client's list
+# (fixture secgss_ec_loopback.json: ... 01000601 01000201 ... 00000606 00000506 00000206).
+_OFFERED_SIGALGS = (
+    _SIGALG_RSA_PKCS1_SHA512,
+    _SIGALG_RSA_PKCS1_SHA256,
+    _SIGALG_ECDSA_SHA512,
+    _SIGALG_ECDSA_SHA384,
+    _SIGALG_ECDSA_SHA256,
+)
+# EC curves accepted for own keys and peer certificates: the ones sapgenpse creates and
+# the handshake was verified with (golden fixtures pse_ec_*, secgss_ec_loopback.json).
+_EC_CURVES = {"secp256r1": NIST256p, "secp384r1": NIST384p, "secp521r1": NIST521p}
 
 # Handshake message tags (context-specific, constructed unless noted).
 _TAG_CONTAINER = 0xA0
@@ -421,11 +459,88 @@ class SncCredential:
         return self.certificate_chain[0]
 
 
+def _ec_curve(curve: tuple[str, Any]) -> Any:
+    kind, name = curve
+    if kind != "named" or name not in _EC_CURVES:
+        raise SncError("EC key uses an unsupported curve; P-256, P-384 and P-521 are")
+    return _EC_CURVES[name]
+
+
+def _own_signer(credential: SncCredential, cert: _x509.Certificate) -> tuple[str, Signer]:
+    """The key type of the own certificate and a signer for its private key.
+
+    The signer gets the data and a hash name and returns the signature value: RSA
+    PKCS#1 v1.5, or for EC a DER ``Ecdsa-Sig-Value`` (RFC 3279), the form the
+    reference client sends (fixture secgss_ec_loopback.json).
+    """
+    kind = cert.public_key.algorithm
+    if kind == "rsa":
+        rsa = _rsa_private(credential.private_key)
+
+        def sign_rsa(data: bytes, hash_name: str) -> bytes:
+            return bytes(rsa.hashAndSign(bytearray(data), "PKCS1", hash_name))
+
+        return kind, sign_rsa
+    if kind != "ec":
+        raise SncError("own certificate key is neither RSA nor EC")
+    try:
+        info = _keys.PrivateKeyInfo.load(credential.private_key)
+        if info.algorithm != "ec":
+            raise SncError("own private key does not match the own certificate")
+        curve = _ec_curve(info.curve)
+        secret = info["private_key"].parsed["private_key"].native
+    except ValueError as e:
+        raise SncError("own EC private key is malformed") from e
+    sk = SigningKey.from_secret_exponent(secret, curve=curve)
+    if sk.get_verifying_key().to_string() != _ec_public(cert).to_string():
+        raise SncError("own private key does not match the own certificate")
+
+    def sign_ec(data: bytes, hash_name: str) -> bytes:
+        # RFC 6979 deterministic nonce: no dependence on the random source.
+        return bytes(
+            sk.sign_deterministic(
+                data, hashfunc=getattr(hashlib, hash_name), sigencode=sigencode_der
+            )
+        )
+
+    return kind, sign_ec
+
+
+def _ec_public(cert: _x509.Certificate) -> VerifyingKey:
+    pki = cert.public_key
+    _ec_curve(pki.curve)
+    try:
+        return VerifyingKey.from_der(pki.dump())
+    except Exception as e:  # ecdsa raises several types for a bad point or encoding
+        raise SncError("certificate EC public key is malformed") from e
+
+
+def _verify_signature(cert: _x509.Certificate, sigalg: int, signature: bytes, data: bytes) -> bool:
+    """Verify a handshake signature made with ``sigalg`` by the key of ``cert``."""
+    kind = _SIGALG_KEY[sigalg]
+    if cert.public_key.algorithm != kind:
+        raise SncError("signature algorithm does not match the certificate key")
+    if kind == "rsa":
+        return _verify_rsa(_rsa_public(cert), sigalg, signature, data)
+    vk = _ec_public(cert)  # outside the try: an unsupported curve is its own error
+    try:
+        return bool(
+            vk.verify(
+                signature,
+                data,
+                hashfunc=getattr(hashlib, _SIGALG_HASH[sigalg]),
+                sigdecode=sigdecode_der,
+            )
+        )
+    except Exception:  # BadSignatureError, or malformed DER/point: not a valid signature
+        return False
+
+
 def _rsa_private(der: bytes) -> Python_RSAKey:
     try:
         info = _keys.PrivateKeyInfo.load(der)
         if info.algorithm != "rsa":
-            raise SncError("own key is not an RSA key; only RSA keys are supported")
+            raise SncError("own key is not an RSA key")
         rsa = info["private_key"].parsed
     except ValueError:
         rsa = _keys.RSAPrivateKey.load(der)
@@ -464,25 +579,34 @@ _CERT_SIG_HASHES = frozenset({"sha256", "sha384", "sha512"})
 
 
 def _cert_signed_by(child: _x509.Certificate, issuer: _x509.Certificate) -> bool:
-    """True if ``issuer`` names and RSA-PKCS#1-v1.5-signs ``child``."""
+    """True if ``issuer`` names ``child``'s issuer and signs it (RSA PKCS#1 v1.5 or ECDSA)."""
     if child.issuer != issuer.subject:
         return False
     algo = child["signature_algorithm"]
     try:
-        if algo.signature_algo != "rsassa_pkcs1v15":
-            return False
+        scheme = algo.signature_algo
         h = algo.hash_algo
     except ValueError:
         return False
     if h not in _CERT_SIG_HASHES:
         return False
-    try:
-        key = _rsa_public(issuer)
-    except SncError:
-        return False
     tbs = child["tbs_certificate"].dump()
     sig = child["signature_value"].native
-    return bool(key.hashAndVerify(bytearray(sig), bytearray(tbs), "PKCS1", h))
+    if scheme == "rsassa_pkcs1v15":
+        try:
+            key = _rsa_public(issuer)
+        except SncError:
+            return False
+        return bool(key.hashAndVerify(bytearray(sig), bytearray(tbs), "PKCS1", h))
+    if scheme == "ecdsa":
+        try:
+            vk = _ec_public(issuer) if issuer.public_key.algorithm == "ec" else None
+            if vk is None:
+                return False
+            return bool(vk.verify(sig, tbs, hashfunc=getattr(hashlib, h), sigdecode=sigdecode_der))
+        except Exception:  # bad signature, malformed DER or point: not signed by issuer
+            return False
+    return False
 
 
 def _check_validity(cert: _x509.Certificate, now: float) -> None:
@@ -504,8 +628,8 @@ def _verify_chain(
 ) -> _x509.Certificate:
     """Return the peer's leaf certificate if it is trusted, else raise.
 
-    Trusted means: the leaf itself is one of ``trusted``, or a chain of RSA
-    signatures over certificates the peer sent leads to one of ``trusted``. Expiry
+    Trusted means: the leaf itself is one of ``trusted``, or a chain of RSA or
+    ECDSA signatures over certificates the peer sent leads to one of ``trusted``. Expiry
     is checked on every certificate on the path; key usage on the leaf.
     """
     if not chain:
@@ -768,7 +892,8 @@ class SecGssInitiator(_SecGssContext):
     callers leave them at their defaults (``os.urandom``, ``time.time``).
     ``ecdh_private_key`` likewise pins the ephemeral scalar for replay only, and
     ``signer`` replaces signing with the credential's private key (it receives the
-    data to sign and the hash name, and returns an RSA PKCS#1 v1.5 signature).
+    data to sign and the hash name, and returns an RSA PKCS#1 v1.5 signature, or a
+    DER ``Ecdsa-Sig-Value`` when the own certificate has an EC key).
     """
 
     _accepted_suites = frozenset({_SUITE_ECDHE_P256_AES256_SHA256})
@@ -786,16 +911,14 @@ class SecGssInitiator(_SecGssContext):
         self._cred = credential
         self._partner = parse_snc_name(partner_name)
         self._ecdh_fixed = ecdh_private_key
-        if signer is None:
-            rsa = _rsa_private(credential.private_key)
-
-            def signer(data: bytes, hash_name: str) -> bytes:
-                return bytes(rsa.hashAndSign(bytearray(data), "PKCS1", hash_name))
-
-        self._sign: Signer = signer
         self._own_cert = _x509.Certificate.load(credential.certificate)
-        if self._own_cert.public_key.algorithm != "rsa":
-            raise SncError("own certificate key is not RSA; only RSA keys are supported")
+        if signer is None:
+            self._key_kind, signer = _own_signer(credential, self._own_cert)
+        else:
+            self._key_kind = self._own_cert.public_key.algorithm
+            if self._key_kind not in ("rsa", "ec"):
+                raise SncError("own certificate key is neither RSA nor EC")
+        self._sign: Signer = signer
         self._init_state(random, clock)
         self._server_sigalgs: list[int] = []
         self._ecdh: ECDH | None = None
@@ -861,7 +984,11 @@ class SecGssInitiator(_SecGssContext):
         )
         self._transcript += key_transport + auth_request
 
-        sigalg = next((a for a in self._server_sigalgs if a in _SIGALG_HASH), None)
+        # The first id in the server's list that the own key can sign with (the
+        # reference client picks the same way; fixture secgss_ec_loopback.json).
+        sigalg = next(
+            (a for a in self._server_sigalgs if _SIGALG_KEY.get(a) == self._key_kind), None
+        )
         if sigalg is None:
             raise SncError("no common signature algorithm with the server", major=_GSS_S_FAILURE)
         signature = self._sign(bytes(self._transcript), _SIGALG_HASH[sigalg])
@@ -884,7 +1011,7 @@ class SecGssInitiator(_SecGssContext):
         aresp, fin = msgs
         sigalg, signature, chain = self._parse_auth_response(aresp)
         leaf = _verify_chain(chain, self._cred.trusted, self._clock())
-        if not _verify_rsa(_rsa_public(leaf), sigalg, signature, bytes(self._transcript)):
+        if not _verify_signature(leaf, sigalg, signature, bytes(self._transcript)):
             raise SncError("server handshake signature is invalid", major=_GSS_S_FAILURE)
         if not _names_match(self._partner, _cert_subject_rdns(leaf)):
             raise SncError("SNC partner name does not match the server certificate")

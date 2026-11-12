@@ -27,6 +27,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from tlslite.utils.python_rsakey import Python_RSAKey
 
+from saprfclib import secgss
 from saprfclib.exceptions import SncError
 from saprfclib.secgss import (
     GSS_S_COMPLETE,
@@ -41,8 +42,26 @@ from saprfclib.secgss import (
 GOLDEN = pathlib.Path(__file__).parent / "golden" / "snc"
 
 
+# The client's AuthRequest list when these sessions were recorded: RSA only. Since then
+# the client also offers the ECDSA ids, which changes its AuthRequest and with it every
+# transcript-dependent byte, so the replays run the client with the list it had at
+# recording time. _offer_as_recorded checks that list against the recorded token.
+_RECORDED_OFFER = (0x01000601, 0x01000201)
+
+
 def _load(name):
-    return json.loads((GOLDEN / f"{name}.json").read_text())
+    return json.loads((GOLDEN / f"{name}.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def _offer_as_recorded(monkeypatch):
+    listed = b"".join(struct.pack(">I", a) for a in _RECORDED_OFFER)
+    element = b"\x04" + bytes([len(listed) + 3]) + struct.pack(">I", len(listed))[1:] + listed
+    for name in ("secgss_live_handshake", "secgss_loopback_records"):
+        fx = _load(name)
+        client_token_2 = bytes.fromhex([t for t in fx["tokens"] if t["dir"] == "C>S"][1]["hex"])
+        assert element in client_token_2, f"{name}: recorded AuthRequest list differs"
+    monkeypatch.setattr(secgss, "_OFFERED_SIGALGS", _RECORDED_OFFER)
 
 
 class _Replay:

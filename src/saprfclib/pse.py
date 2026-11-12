@@ -76,6 +76,16 @@ _OID_PBES2 = "1.2.840.113549.1.5.13"
 _OID_PBKDF2 = "1.2.840.113549.1.5.12"
 _OID_AES256_CBC = "2.16.840.1.101.3.4.1.42"
 _OID_RSA = "1.2.840.113549.1.1.1"
+# id-ecPublicKey (RFC 5480). Source: golden fixtures pse_ec_*.pse (sapgenpse ECDSA keys).
+_OID_EC = "1.2.840.10045.2.1"
+# Curves an EC PSE key may use: those sapgenpse creates and the handshake was verified
+# with (P-256, P-384, P-521; golden fixtures pse_ec_*). Brainpool curves were refused
+# by sapgenpse, so they are untested and refused here too.
+_EC_CURVES = {
+    "1.2.840.10045.3.1.7": "P-256",
+    "1.3.132.0.34": "P-384",
+    "1.3.132.0.35": "P-521",
+}
 _HMAC_PRF = {
     "1.2.840.113549.2.7": "sha1",
     "1.2.840.113549.2.9": "sha256",
@@ -271,16 +281,45 @@ def _rsa_from_primes(p: int, q: int, n: int, e: int) -> bytes:
     return bytes(rsa.dump())
 
 
+def _ec_private_key(alg: _T, key: bytes) -> bytes:
+    """EC key from a PSE → PKCS#8 ``PrivateKeyInfo`` DER.
+
+    The PSE's key object is ``SEQUENCE { AlgorithmIdentifier { id-ecPublicKey,
+    curve }, BIT STRING { ECPrivateKey } }`` (RFC 5915 inside; golden fixtures
+    pse_ec_*.pse). The curve comes from the algorithm parameters, as in PKCS#8.
+    """
+    params = alg.kids()[1:]
+    curve = params[0].oid() if params and params[0].tag == 0x06 else None
+    if curve not in _EC_CURVES:
+        raise PseError("PSE EC key uses an unsupported curve; P-256, P-384 and P-521 are")
+    try:
+        ec = _keys.ECPrivateKey.load(key)
+        ec.native  # noqa: B018 — parse now, so a malformed key fails here
+    except ValueError as e:
+        raise PseError("malformed EC private key in PSE") from e
+    info = _keys.PrivateKeyInfo(
+        {
+            "version": 0,
+            "private_key_algorithm": _keys.PrivateKeyAlgorithm.load(alg.raw),
+            "private_key": ec,
+        }
+    )
+    return bytes(info.dump())
+
+
 def _private_key(sk: _T, cert: bytes) -> bytes:
-    """Private key object → PKCS#1 RSAPrivateKey DER (RSA only).
+    """Private key object → PKCS#1 RSAPrivateKey DER, or PKCS#8 DER for an EC key.
 
     The PSE stores RSA keys either as a full PKCS#1 structure or in a compact
     ``SEQUENCE { p, q }`` form; the latter is completed from the certificate's
     public key.
     """
     alg, bits = sk.kids()[:2]
-    if alg.kids()[0].oid() != _OID_RSA:
-        raise PseError("PSE key is not an RSA key; only RSA keys are supported")
+    oid = alg.kids()[0].oid()
+    if oid == _OID_EC:
+        return _ec_private_key(alg, bits.value[1:])
+    if oid != _OID_RSA:
+        raise PseError("PSE key is neither an RSA nor an EC key; only RSA and EC are supported")
     key, _ = _read(bits.value[1:])
     ints = [k.int() for k in key.kids()]
     if len(ints) == 2:

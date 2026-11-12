@@ -30,7 +30,7 @@ Only what was observed end to end is implemented:
 |---|---|---|
 | Protocol version | 1.1 | 1.1 |
 | Cipher suite | `0x0009` — ephemeral ECDH on P-256, AES-256-CBC, HMAC-SHA256, P_SHA256 PRF | `0x0007` — Kerberos key exchange, AES-256-CBC, HMAC-SHA256, P_SHA256 PRF |
-| Authentication | X.509 certificates on both sides, RSA PKCS#1 v1.5 signatures (SHA-512 or SHA-256) | a Kerberos service ticket with an AES session key |
+| Authentication | X.509 certificates on both sides, RSA PKCS#1 v1.5 or ECDSA signatures (P-256, P-384, P-521 keys) | a Kerberos service ticket with an AES session key |
 | Role | initiator (client) only | initiator (client) only |
 
 Anything else the server selects is refused with `SncError`. Suite `0x0008` (Kerberos
@@ -127,9 +127,29 @@ The live system answered `01 01 0009 00004000`: version 1.1, suite `0x0009`, chu
   sent** (each message's complete DER element, both directions, container and outer
   header excluded). The client's signature covers everything up to and including its own
   AuthRequest; the server's covers everything up to and including the client's Finished.
-- The signer picks the first id in the *peer's* list that it supports. The built-in
-  client offers `01000601` (RSA PKCS#1 v1.5 SHA-512) then `01000201` (SHA-256); the live
-  server chose SHA-512, and so does the client when the server lists it first.
+- The signer picks the first id in the *peer's* list that its key can sign with. The
+  ids understood by the built-in client:
+
+  | id | Signature | AlgorithmIdentifier in AuthResponse |
+  |---|---|---|
+  | `01000601` | RSA PKCS#1 v1.5, SHA-512 | `sha512WithRSAEncryption`, NULL parameters |
+  | `01000201` | RSA PKCS#1 v1.5, SHA-256 | `sha256WithRSAEncryption`, NULL parameters |
+  | `00000606` | ECDSA, SHA-512 | `ecdsa-with-SHA512`, no parameters |
+  | `00000506` | ECDSA, SHA-384 | `ecdsa-with-SHA384`, no parameters |
+  | `00000206` | ECDSA, SHA-256 | `ecdsa-with-SHA256`, no parameters |
+
+  The RSA ids are from the live handshake (the server chose SHA-512). The ECDSA ids were
+  established on 2026-11-12 against CommonCryptoLib as the acceptor with an EC key:
+  offered exactly one id, it signed with the algorithm in the table, and it aborted the
+  handshake for every other id in its own list. An ECDSA signature's BIT STRING holds
+  `00` followed by a DER `Ecdsa-Sig-Value` (RFC 3279), from the reference client and the
+  acceptor alike (fixture `secgss_ec_loopback.json`).
+- CommonCryptoLib lists twelve ids (`00000202 00000402 00000102 0e000601 0e000201
+  01000601 01000201 01000101 01000701 00000606 00000506 00000206`), RSA before ECDSA.
+  The built-in client offers the five above in that relative order: `01000601 01000201
+  00000606 00000506 00000206`. With an EC key the reference client, and the built-in
+  client, sign with `00000606` (SHA-512) whatever the curve, as the first ECDSA id the
+  server lists.
 
 ### Key schedule
 
@@ -295,6 +315,12 @@ server accepts both.
 
 ### Limitations and why
 
+- **EC curves other than P-256, P-384 and P-521: refused.** `sapgenpse` refused to create
+  Brainpool keys, so nothing could verify a handshake with them.
+- **DSA and EdDSA keys: refused.** `sapgenpse` writes them, but which of
+  CommonCryptoLib's other ids (`00000202`, `00000402`, `00000102`, `0e000601`, ...) would
+  carry their signatures was not established, so no handshake with them could be verified.
+
 - **Suite `0x0008` (Kerberos with AES-128): not offered, not implemented.** The client
   chooses what to offer, and `0x0007` (AES-256) was accepted by the server every time.
   `0x0008` would add nothing but a weaker cipher, and has never been seen on the wire, so
@@ -318,7 +344,8 @@ All of these fail closed with `SncError`:
 
 1. The server's signature must verify over the transcript with the certificate's key.
 2. The certificate must be one of the trusted certificates, or chain to one through RSA
-   PKCS#1 v1.5 signatures (SHA-256/384/512) over certificates the server sent.
+   PKCS#1 v1.5 or ECDSA signatures (SHA-256/384/512) over certificates the server sent.
+   An EC key must be on P-256, P-384 or P-521.
 3. Every certificate on that path must be within its validity period; if the leaf has a
    key-usage extension it must allow digital signatures.
 4. The leaf subject must match `snc_partnername` under the rules in
@@ -335,7 +362,10 @@ A PSE file created with `sapgenpse` holds the own key, own certificate, its issu
 and the trusted certificates (the "PK list"). Supported: container versions 2 and 4,
 protected with PKCS#12 `pbeWithSHAAnd3-KeyTripleDES-CBC` (the default) or PBES2 / PBKDF2
 (HMAC-SHA1/256/512) / AES-256-CBC, or unprotected; PSEs wrapped in local protected storage
-(LPS); RSA keys only.
+(LPS); RSA keys and EC keys on P-256, P-384 and P-521. An EC key is stored as
+`SEQUENCE { AlgorithmIdentifier { id-ecPublicKey, curve }, BIT STRING { ECPrivateKey } }`
+(RFC 5915 inside) and is returned as PKCS#8 (fixtures `pse_ec_*.pse`, checked against
+`sapgenpse export_p8`). DSA and EdDSA keys, which `sapgenpse` can also write, are refused.
 
 PINs stored by `sapgenpse seclogin` in `SECUDIR/cred_v2` are read in all three forms
 `sapgenpse` writes outside Windows: the default (3DES), the AES-256 header form, and LPS.
@@ -382,5 +412,4 @@ carrying a host or user restriction, EC and EdDSA own keys.
 
 - Which suites besides `0x0009` a server will accept from a client that offers them
   (P-384/P-521 variants, RSA key transport) — not exercised.
-- ECDSA own keys and ECDSA server certificates — not exercised.
 - Context expiry or re-keying on long-lived sessions — not observed.
