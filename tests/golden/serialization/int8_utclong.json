@@ -1,0 +1,83 @@
+{
+ "fixture": "int8_utclong",
+ "capture_source": "live captures 2026-11-12: the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) calling Z_SAPRFCLIB_TYPES, a purpose-built remote-enabled function module (local object on an S/4HANA ABAP system, kernel 793) that echoes INT8, UTCLONG, DATN and TIMN importing parameters and returns fixed values. Its metadata (RFC_GET_FUNCTION_INTERFACE) reports EXID '8' with 8 bytes for INT8 and 'p' with 8 bytes for UTCLONG.",
+ "source_of_values": "the values are what the reference client was given (requests, dir C>S) or returned to the caller (replies, dir S>C); the reference client refused 1582-10-10 (calendar gap) and '2026-11-12 10:21:26' (format).",
+ "evidence": "tier 1 live capture; every value also round-trips through the function module and back.",
+ "int8": [
+  {
+   "dir": "C>S",
+   "parameter": "IV_INT8",
+   "value": -2,
+   "hex": "feffffffffffffff"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_INT8",
+   "value": -2,
+   "hex": "feffffffffffffff"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_INT8_NEG",
+   "value": -81985529216486896,
+   "hex": "1032547698badcfe"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_INT8_ORDER",
+   "value": 72623859790382856,
+   "hex": "0807060504030201"
+  }
+ ],
+ "utclong": [
+  {
+   "value": "0001-01-01T00:00:00.0000000",
+   "hex": "0100000000000000"
+  },
+  {
+   "value": "1582-10-15T00:00:00.0000000",
+   "hex": "01c00739b663ed06"
+  },
+  {
+   "value": "1970-01-01T00:00:00.0000000",
+   "hex": "0100894c88819f08"
+  },
+  {
+   "value": "2000-02-29T23:59:59.9999999",
+   "hex": "00c0808dba52c108"
+  },
+  {
+   "value": "9999-12-31T23:59:59.9999999",
+   "hex": "00c00a49082aca2b"
+  },
+  {
+   "value": null,
+   "hex": "0000000000000000"
+  },
+  {
+   "value": "1000-06-15T12:00:00.5000000",
+   "hex": "41ab86a6ee896004"
+  },
+  {
+   "value": "1582-10-04T23:59:59.0000000",
+   "hex": "81296f38b663ed06"
+  },
+  {
+   "value": "0004-02-29T00:00:00.0000000",
+   "hex": "0180b330d18a0300"
+  },
+  {
+   "value": "1900-02-28T00:00:00.0000000",
+   "hex": "0140201179345108"
+  },
+  {
+   "value": "2026-11-12T10:21:26.1234567",
+   "hex": "88ad2d0a3942df08"
+  }
+ ],
+ "datn_timn": {
+  "note": "DATN and TIMN travel as DATE and TIME: UTF-16LE YYYYMMDD / HHMMSS.",
+  "IV_DATN": "32003000320036003100310031003200",
+  "IV_TIMN": "310030003200310032003600"
+ }
+}

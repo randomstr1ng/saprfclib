@@ -317,6 +317,6 @@ hatch run lint:type                   # mypy strict over src/
 - When a capture contradicts this document, the capture wins — and update this document.
 - Propose changes as PRs; don't push directly to `main`.
 - For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, Kerberos suite `0x0008`,
-  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`, RFC types 31–40, SAP LZ4 frames, the
-  inbound `0x5001` parameter block, the TID character set),
+  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`, RFC types 33–40, SAP LZ4 frames, the
+  inbound `0x5001` parameter block and inbound tRFC, the TID character set),
   check the GitHub issues before starting — a capture requirement may be blocking.

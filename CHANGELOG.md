@@ -45,7 +45,19 @@ that it is an assumption.
   of its last field; a structure whose width the ABAP runtime pads to its alignment (an
   odd-length tail before a 2-byte aligned type, for instance) was sent one or more bytes
   short per row. The width now matches what the server reports (`X030L-TABLEN`) for all
-  357 flat structures of a 382-structure live sample, 18 of them padded.
+  357 flat structures of a 382-structure live sample, 18 of them padded, and for up to 40
+  structures for each of the types the sample lacked (INT8, UTCLONG, the decimal floats
+  at 8 and 16, string references at 4, ...). Rows a server sends packed still decode.
+- **UTCLONG parameters and fields work.** Their metadata type code (`p`) was unknown,
+  so every UTCLONG parameter was dropped from the function interface with a warning, and
+  the codec read the value as a plain integer. UTCLONG is now decoded to and encoded from
+  `YYYY-MM-DDTHH:MM:SS.fffffff` (or a `datetime`), `None` for the initial value: 100 ns
+  ticks + 1 from 0001-01-01 on the Julian calendar before 1582-10-15 and the Gregorian
+  after it, as twelve values captured from the reference client show
+  (`tests/golden/serialization/int8_utclong.json`).
+- **DATN and TIMN fields in structures are no longer dropped.** The dictionary types
+  were unknown, so a structure holding one lost the field from its layout; they travel
+  exactly like DATS and TIMS (live).
 - **qRFC queue names are limited to 24 characters**, the width of the server's queue
   column. A longer name was accepted by the server and silently cut.
 - **Yes/no connection parameters are no longer read by truthiness** (issue #64).
@@ -60,9 +72,9 @@ that it is an assumption.
   that named internal functions of SAP libraries, or cited "protocol analysis", now cite
   the capture, golden fixture or live probe behind the fact. Where none exists, the fact is
   labelled `[ASSUMED]` together with what would settle it:
-  - **RFC types 31–40** (`INT8`, `UTCLONG` … `CDAY`): their codes beyond 31, widths and
-    byte order. INT8 = 31 with 8 bytes was seen in live metadata; no standard
-    remote-enabled function module on A4H uses the others.
+  - **RFC types 33–40** (`UTCSECOND` … `CDAY`): widths and byte order. Kernel 793's
+    dictionary has no data type for any of them, so no function module there can use
+    one. INT8 (little-endian, 8 bytes) and UTCLONG are now confirmed by capture.
   - **SAP LZ4 wRFC frames**: no compressed wRFC response has been captured.
   - **The inbound `0x5001` parameter block** a registered server decodes: not captured.
   - **The TID character set** beyond uppercase hex: every live TID is hex; a server

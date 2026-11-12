@@ -1125,21 +1125,23 @@ A structure's width is the end of its last field **rounded up to the largest ali
 its fields** — not the end of the last field. The reference client sends `ARFCRDATA` rows 1918
 bytes wide, though the last field ends at 1917 (tRFC capture,
 `tests/golden/trfc/trfc_reference.json`). The rule was checked against `X030L-TABLEN`, the
-width the server itself reports, for 382 structures read from a live S/4HANA system: it held
-for all 357 flat ones, 18 of which carry one or two bytes of trailing padding.
+width the server itself reports, on a live S/4HANA system: for all 357 flat structures of a
+random sample of 382 (18 of them padded by one or two bytes), and for up to 40 structures per
+type for each type the sample lacked — all of them except two holding object references
+(`REF`), which are not flat.
 
-| Alignment | DDIC data types (sample: each type's gcd of field offsets) |
-|-----------|-----------------------------------------------------------|
-| 1 | `DEC`, `CURR`, `QUAN`, `RAW`, `INT1` |
-| 2 | `CHAR`, `CLNT`, `LANG`, `CUKY`, `UNIT`, `NUMC`, `DATS`, `TIMS`, `INT2` |
-| 4 | `INT4` |
-| 8 | `FLTP` |
+| Alignment | DDIC data types (each type's gcd of field offsets across those structures) |
+|-----------|-----------------------------------------------------------------------------|
+| 1 | `DEC`, `CURR`, `QUAN`, `RAW`, `INT1`; `LRAW` **[ASSUMED]** (its fields sat at even offsets) |
+| 2 | `CHAR`, `CLNT`, `LANG`, `CUKY`, `UNIT`, `NUMC`, `DATS`, `TIMS`, `DATN`, `TIMN`, `LCHR`, `ACCP`, `INT2`, `PREC` |
+| 4 | `INT4`, and the string references `STRG`, `SSTR`, `RSTR` |
+| 8 | `FLTP`, `INT8`, `UTCL`, `D16D`, `D16R`, `D16N` |
+| 16 | `D34D`, `D34R`, `D34N` |
 
-**[ASSUMED]** for types the sample did not contain: `LCHR`, `ACCP` and `PREC` at 2, `LRAW` at
-1, and `INT8`, the decimal floats, `UTCL` and the string references at 8. A structure holding
-one of them, read back from a live system, settles it. The width matters when a row is
-**sent**: a TABLE's `0x0302` declares it and each `0x0303` row is that long. Replies are read
-with the width the server declares.
+The width matters when a row is
+**sent**: a TABLE's `0x0302` declares it and each `0x0303` row is that long. A reply's rows
+are read at the width they actually have (bytes ÷ declared row count), which the server's
+uncompressed path packs to the end of the last field.
 
 Golden fixtures: `tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin` (Unicode-unit reply),
 `ddif_fieldinfo_bapilogond_response.bin` (NUC-unit reply), and
