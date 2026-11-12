@@ -19,8 +19,9 @@ code and docs now points at an observation — or says plainly that it is an ass
   load and sign (`snc_pse=`, `snc_credential=`, `SECUDIR`), and servers with EC
   certificates or EC-signed chains are verified. The signature algorithm ids were mapped
   against SAP CommonCryptoLib as the acceptor; every combination of EC and RSA keys on
-  both sides completed a handshake and exchanged records with it, and the existing RSA
-  logon was rechecked against an S/4HANA system. Replayed byte for byte from
+  both sides completed a handshake and exchanged records with it. Against an S/4HANA
+  system, a logon with an EC (P-256) client key succeeded and the existing RSA logon was
+  rechecked. Replayed byte for byte from
   `tests/golden/snc/secgss_ec_loopback.json` and `secgss_ec_client_rsa_server.json`.
   DSA and EdDSA keys are refused with a clear error.
 - `tests/test_repo_hygiene.py` keeps internal names of SAP binaries and "protocol
