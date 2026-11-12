@@ -14,23 +14,30 @@ is raw bytes.
 
 Fixed-width CHAR/DATE/TIME/NUM use SAP's wide-character encoding (UTF-16); the byte order is
 settled by the codepage negotiated during the logon handshake — see [handshake.md](handshake.md).
-Every system tested negotiates `4103`, which is UTF-16LE. IEEE 754r decimal floats
-(DecFloat16/34) are transmitted big-endian regardless of machine byte order.
+Every system tested negotiates `4103`, which is UTF-16LE. IEEE 754-2008 decimal floats
+(DecFloat16/34) are densely packed decimal, little-endian on the wire — see the
+DECFLOAT section below (`decfloat_response.bin`).
 
-!!! note "Status: Live Capture Confirmed 2026-06-26"
-    INT4, INT2, INT1, FLOAT, CHAR, DATE, and TIME byte encodings are now **CONFIRMED** from
-    live capture of `STFC_STRUCTURE` (SAP NetWeaver 7.58, sysnr=00, 2026-06-26). Fixtures under
-    `tests/golden/serialization/` are real wire bytes. BCD is confirmed from a live capture of a
-    positive P15.2 value and, for both signs, a purpose-built function module (2026-11-12).
-    See [Known Gaps](#known-gaps).
+!!! note "Evidence"
+    The byte encodings below come from live captures — `STFC_STRUCTURE` against SAP
+    NetWeaver 7.58 on 2026-06-26 for the scalar types, purpose-built function modules for
+    DECFLOAT, INT8, UTCLONG and the packed-decimal sign. Not every file under
+    `tests/golden/serialization/` is a capture. The captured ones are `type_float`,
+    `type_int4`, `type_date`, `type_time`, `type_bcd_p15_2`, `bcd_sign.json`,
+    `int8_utclong.json`, `string_xstring.json` and `decfloat_response.bin`. The rest (`type_char`,
+    `type_int1`, `type_int2`, `type_num`, `type_byte`, `type_bcd`,
+    `type_int8`, `type_utclong`, `type_utcsecond` … `type_cday`, `type_structure`,
+    `type_table`) are constructed values, marked synthetic in their own JSON, and are not
+    evidence for a wire layout. Anything not established by a capture is marked `[ASSUMED]`;
+    open items are under [Known Gaps](#known-gaps).
 
 ---
 
 ## RFCTYPE Enum Values
 
-The 25 concrete type codes `saprfclib` handles. Values 31–40 (`RFCTYPE_INT8` through
+The 29 numbered type codes `saprfclib` defines (`src/saprfclib/codec.py`). Values 31–40 (`RFCTYPE_INT8` through
 `RFCTYPE_CDAY`) continue the sequence from `RFCTYPE_XSTRING = 30`; see **[A1]** for what is
-confirmed about them.
+known about them.
 
 | Value | Name | Wire Size | ABAP Type | Description |
 |-------|------|-----------|-----------|-------------|
@@ -38,7 +45,7 @@ confirmed about them.
 | 1 | `RFCTYPE_DATE` | 16 bytes (8 UC chars) | D | Date: YYYYMMDD in UTF-16 |
 | 2 | `RFCTYPE_BCD` | 1–16 bytes | P | Packed BCD decimal; length from descriptor |
 | 3 | `RFCTYPE_TIME` | 12 bytes (6 UC chars) | T | Time: HHMMSS in UTF-16 |
-| 4 | `RFCTYPE_BYTE` | N bytes | X | Raw binary, fixed length, zero-padded |
+| 4 | `RFCTYPE_BYTE` | N bytes | X | Raw binary, fixed length from descriptor |
 | 5 | `RFCTYPE_TABLE` | — | — | Internal table (container, not scalar) |
 | 6 | `RFCTYPE_NUM` | N × 2 bytes (UTF-16) | N | Numeric string, leading-zero-padded, UTF-16 |
 | 7 | `RFCTYPE_FLOAT` | 8 bytes | F | IEEE 754 double-precision float |
@@ -51,8 +58,8 @@ confirmed about them.
 | 23 | `RFCTYPE_DECF16` | 8 bytes | DECFLOAT16 | IEEE 754-2008 DPD decimal float, **little-endian** wire |
 | 24 | `RFCTYPE_DECF34` | 16 bytes | DECFLOAT34 | IEEE 754-2008 DPD decimal float, **little-endian** wire |
 | 28 | `RFCTYPE_XMLDATA` | — | — | No longer used — skip |
-| 29 | `RFCTYPE_STRING` | variable | STRING | Null-terminated; length-prefixed on wire |
-| 30 | `RFCTYPE_XSTRING` | variable | XSTRING | Raw bytes; length-prefixed (byte count) |
+| 29 | `RFCTYPE_STRING` | variable | STRING | UTF-8 plus a terminating NUL; no length prefix, the TLV header carries the byte count |
+| 30 | `RFCTYPE_XSTRING` | variable | XSTRING | Raw bytes; no internal prefix, the TLV header carries the byte count |
 | 31 | `RFCTYPE_INT8` | 8 bytes | INT8 | Signed 64-bit integer, little-endian (live) |
 | 32 | `RFCTYPE_UTCLONG` | 8 bytes | UTCLONG | UTC timestamp, 100 ns ticks (live, see below) |
 | 33 [A1] | `RFCTYPE_UTCSECOND` | 8 bytes | UTCSECOND | UTC timestamp/second (8-byte integer) |
@@ -129,7 +136,7 @@ value = wire_bytes.decode('utf-16-le')  # → "20260626"
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | `ceil((decimals+1)/2)` | packed-BCD | `bcd_digits` | `01 23` | Digit pairs in each byte, high nibble = MSD |
+| 0x00 | `ceil((precision+1)/2)` | packed-BCD | `bcd_digits` | `01 23` | Digit pairs in each byte, high nibble = MSD |
 | last | 1 (last nibble) | nibble | `sign_nibble` | `0x4C` (low nibble of last byte) | 0x0C = zero or positive; 0x0D = negative |
 
 **Wire size:** `ceil((precision + 1) / 2)` bytes, where `precision` is the total digit count.
@@ -137,8 +144,12 @@ value = wire_bytes.decode('utf-16-le')  # → "20260626"
 **Packing rules** (BCD is an array of raw bytes; the digits are packed two per byte):
 - Each byte holds two decimal digits: high nibble = more significant digit, low nibble = less significant digit.
 - The final *nibble* of the last byte is the sign: `0x0C` = zero or positive, `0x0D` = negative.
-- **Odd digit count:** last byte has one digit in the high nibble + sign in the low nibble.
-- **Even digit count:** last byte has two digits; the sign nibble is appended as the low nibble of one extra byte.
+- The field always holds an odd number of digit nibbles (`width * 2 - 1`): the last byte is
+  one digit in the high nibble plus the sign in the low nibble. Source: `type_bcd_p15_2`
+  (P15.2, 8 bytes) and `bcd_sign.json` (23 digits, 12 bytes).
+- A value with fewer digits is zero-filled from the left; `codec._encode_bcd` encodes 1234
+  in a 3-byte field as `01 23 4C`. **[ASSUMED]** for a declared even precision — every
+  capture so far has an odd digit count; a P-field with even precision would settle it.
 - **Zero / initial form:** all bytes `0x00` with sign nibble `0x0C` in the trailing nibble.
 
 **Sign nibble summary:**
@@ -152,44 +163,15 @@ function module returned −123.45, 123.45 and 0 as `…12 34 5d`, `…12 34 5c`
 reference client sent −0.01 and −98765.43 with `0x0D`. On decode saprfclib also reads `0x0F` and
 `0x0B` as positive **[ASSUMED]** — tolerated, never seen.
 
-**Python encode (example for 123.45 as BCD(5,2)):**
-```python
-import math
+**What the codec does** (`_encode_bcd` in `src/saprfclib/codec.py`): it scales the
+`Decimal` by `10**decimals` to an integer, refuses it if it has more digits than the field holds
+(`width * 2 - 1`), left-pads the digit string with zeros to that count, appends the sign nibble
+(`0x0D` for a negative value, else `0x0C`) and packs two nibbles per byte, most significant
+first. 123.45 at 3 bytes with 2 decimals encodes as `12 34 5C`.
 
-def encode_bcd(value: str, precision: int) -> bytes:
-    """Encode a decimal string to packed BCD.
-    value: digits only string (e.g. '12345' for 123.45)
-    precision: total digit count
-    """
-    negative = value.startswith('-')
-    digits = value.lstrip('-').replace('.', '').zfill(precision)
-    sign = 0x0D if negative else 0x0C
-    n_bytes = math.ceil((precision + 1) / 2)
-    result = bytearray(n_bytes)
-    # Pack digits from right (least significant)
-    j = len(digits) - 1
-    for i in range(n_bytes - 1, -1, -1):
-        low = sign if i == n_bytes - 1 else (int(digits[j]) if j >= 0 else 0)
-        j -= (1 if i == n_bytes - 1 else 1)
-        high = int(digits[j]) if j >= 0 else 0
-        j -= 1
-        result[i] = (high << 4) | low
-    return bytes(result)
-```
-
-**Hex Example (constructed, not captured; BCD(5,2)):**
-```hex
-01 23 4C  -- BCD(5,2): digits=01234, sign=0x0C (positive) → 12.34
-           -- Byte 0: 0x01 = high nibble 0 (leading zero), low nibble 1
-           -- Byte 1: 0x23 = high nibble 2, low nibble 3
-           -- Byte 2: 0x4C = high nibble 4 (digit), low nibble C (sign=positive)
-```
-> NOTE: these synthetic bytes `01 23 4C` decode (digits `01234`, decimals=2) to
-> **12.34**, not 123.45. The earlier "123.45" annotation was an inconsistency in the
-> synthetic fixture text; the *authoritative* BCD example is the live `type_bcd_p15_2`
-> capture below. `123.45` at BCD(5,2) is `12 34 5C` (digits `12345`), which the codec's
-> Hypothesis round-trips also cover. The `type_bcd` fixture still replays byte-for-byte
-> because decode→encode is value-faithful to whatever bytes it is handed.
+> The fixture `type_bcd` is synthetic and inconsistent: its bytes `01 23 4C` decode (digits
+> `01234`, decimals 2) to **12.34**, while its JSON claims 123.45. Its replay passes only
+> because decode→encode reproduces whatever bytes it is handed; it is not evidence.
 
 **Hex Example (live capture — BAPISFLIGHT.PRICE = 800000.50 as P15.2, SAP A4H 2026-06-26) [live]:**
 ```hex
@@ -202,14 +184,14 @@ the low nibble of the last byte, 0x0C=positive) on real SAP wire bytes. Fixture:
 `tests/golden/serialization/type_bcd_p15_2.{bin,json}`; the negative nibble `0x0D` is in
 `bcd_sign.json`.
 
-**Codec status — IMPLEMENTED:** `_decode_bcd` / `_encode_bcd` in `src/saprfclib/codec.py`
+**Codec:** `_decode_bcd` / `_encode_bcd` in `src/saprfclib/codec.py`
 implement the scheme above using `decimal.Decimal` exclusively — never `float`, which cannot
 represent base-10 decimals exactly and would corrupt financial values. The total digit count is
 derived from the descriptor's wire byte width (`width * 2 - 1`); decode accepts `0x0C`/`0x0F`/`0x0B`
 as positive and `0x0D` as negative, while encode emits only canonical `0x0C`/`0x0D`. A malformed
 buffer (too short) or a non-digit nibble in a digit position raises a typed `ValueError`
-(threats T-02-09 / T-02-11). Both BCD fixtures (`type_bcd`, `type_bcd_p15_2`) replay byte-for-byte;
-Hypothesis round-trips cover sign nibbles, odd/even lengths, the zero/initial form, and max decimals.
+(threats T-02-09 / T-02-11). The live `type_bcd_p15_2` fixture replays byte-for-byte
+(`tests/golden/serialization/test_codec_roundtrip.py`); Hypothesis round-trips cover sign nibbles, odd/even lengths, the zero/initial form, and max decimals.
 
 ---
 
@@ -233,9 +215,14 @@ Hypothesis round-trips cover sign nibbles, odd/even lengths, the zero/initial fo
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | N | bytes | `byte_data` | `DE AD BE EF` | Fixed length N from descriptor; zero-padded if shorter |
+| 0x00 | N | bytes | `byte_data` | `DE AD BE EF` | Fixed length N from descriptor |
 
-**Wire size:** `field_length` bytes exactly (no UTF-16 factor — this is raw binary).
+**Wire size:** `field_length` bytes (no UTF-16 factor — this is raw binary).
+
+The scalar encoder sends the value as given and does not pad it (`codec.encode`, BYTE
+branch); inside a structure a short value lands in a NUL-filled buffer. Whether the server
+accepts a short top-level BYTE value is untested **[ASSUMED]**; a probe would settle it. The
+`type_byte` fixture is synthetic.
 
 ---
 
@@ -258,11 +245,11 @@ Hypothesis round-trips cover sign nibbles, odd/even lengths, the zero/initial fo
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | IEEE 754 double | `float_value` | `6e 86 1b f0 f9 21 09 40` | **Confirmed** little-endian via live capture 2026-06-26 |
+| 0x00 | 8 | IEEE 754 double | `float_value` | `6e 86 1b f0 f9 21 09 40` | Little-endian (live capture 2026-06-26) |
 
 **Wire size:** Always 8 bytes.
 
-**Confirmed from live capture 2026-06-26:** RFCFLOAT=3.14159 was serialized as `6e 86 1b f0 f9 21 09 40` — IEEE 754 double little-endian. Same byte order as machine-native x86-64.
+**Live capture 2026-06-26:** RFCFLOAT=3.14159 was serialized as `6e 86 1b f0 f9 21 09 40` — IEEE 754 double little-endian. Same byte order as machine-native x86-64.
 
 **Python encode/decode:**
 ```python
@@ -283,11 +270,11 @@ wire_bytes = struct.pack('<d', value)
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `int_value` | `00 00 01 00` | Signed, **confirmed** little-endian (live capture 2026-06-26) |
+| 0x00 | 4 | int32-LE | `int_value` | `00 00 01 00` | Signed, little-endian (live capture 2026-06-26) |
 
 **Wire size:** Always 4 bytes.
 
-**Confirmed from live capture 2026-06-26:** RFCINT4=65536 was serialized as `00 00 01 00` — 4-byte little-endian signed integer. IMPORTSTRUCT offset 24 in STFC_STRUCTURE frame.
+**Live capture 2026-06-26:** RFCINT4=65536 was serialized as `00 00 01 00` — 4-byte little-endian signed integer. IMPORTSTRUCT offset 24 in STFC_STRUCTURE frame.
 
 **Independently confirmed by arithmetic (STFC_CHANGING golden pair).** The request
 carries `START_VALUE`=`0a000000` and `COUNTER`=`01000000`; the response carries
@@ -320,7 +307,7 @@ wire_bytes = struct.pack('<i', value)
 |--------|--------|------|------|-----------------|-------|
 | 0x00 | 2 | int16-LE | `int2_value` | `2A 00` | Signed, little-endian; obsolete in ABAP/4 |
 
-**Wire size:** Always 2 bytes. **Confirmed little-endian from live capture 2026-06-26:** RFCINT2=256 was serialized as `00 01` at IMPORTSTRUCT offset 10.
+**Wire size:** Always 2 bytes. **Little-endian, live capture 2026-06-26:** RFCINT2=256 was serialized as `00 01` at IMPORTSTRUCT offset 10.
 
 ---
 
@@ -356,8 +343,7 @@ exercised; the non-Unicode layout is undocumented here.
 
 ---
 
-### RFCTYPE_DECF16 (type=23) / RFCTYPE_DECF34 (type=24) — CONFIRMED
-
+### RFCTYPE_DECF16 (type=23) / RFCTYPE_DECF34 (type=24)
 **Encoding:** IEEE 754-2008 **densely packed decimal (DPD)**, **little-endian** on the
 wire. DECFLOAT16 is decimal64 (8 bytes), DECFLOAT34 is decimal128 (16 bytes).
 
@@ -374,7 +360,7 @@ every expectation from that fixture rather than from the standard.
 | `EV_MINUS_ONE` | `01 00 00 00 00 00 38 a2` | `-1` |
 | `EV_ZERO` | `00 00 00 00 00 00 38 22` | `0` |
 | `EV_WIDE_16` | `56 8e e2 c1 b9 34 39 26` | `1234567890123456` |
-| `EV_TWELVE_34` | `12 00 …(9 zero bytes)… 00 08 22` | `12` |
+| `EV_TWELVE_34` | `12` then 13 zero bytes then `08 22` (16 bytes) | `12` |
 | `EV_WIDE_34` | `34 35 82 77 71 12 3c 6f e5 28 1e 9c 4b 13 08 26` | `1234567890123456789012345678901234` |
 
 #### The byte order is little-endian, and this document previously said otherwise
@@ -425,7 +411,8 @@ rounds: more significant digits than the width holds, or an out-of-range exponen
 
 `RFC_GET_FUNCTION_INTERFACE` reports DECFLOAT16 as `EXID = 'a'` and DECFLOAT34 as
 `EXID = 'e'`. `a` was missing from the EXID table, so DECFLOAT16 parameters failed to
-parse and were dropped from the descriptor entirely — see the EXID note above.
+parse and were dropped from the descriptor entirely. Source: the 2026-08-31 capture behind
+`decfloat_response.bin`; the mapping lives in `_EXID_TO_RFCTYPE` in `src/saprfclib/metadata.py`.
 
 #### Finding a DECFLOAT-typed function module
 
@@ -451,45 +438,31 @@ No longer used. Skip; do not implement.
 
 ### RFCTYPE_STRING (type=29) — Variable-Length String
 
-**Wire:** UTF-8 encoded content, **no internal length prefix**. The length is carried by the
-enclosing TLV header (tag `0x0203`) as a byte count. Confirmed 2026-07-05 — an earlier assumption
-of a leading little-endian uint32 length plus UTF-16LE content was **wrong**, and the codec was
-corrected.
+**Wire:** UTF-8 content followed by **one NUL byte**, and **no length prefix**: the enclosing TLV
+header (tag `0x0203`) carries the byte count, terminator included. An empty string is the NUL
+alone. Live capture 2026-11-12, a purpose-built function module and the reference client, both
+directions (`tests/golden/serialization/string_xstring.json`):
 
-| TLV header | TLV payload |
-|------------|-------------|
-| `[0x02 0x03][utf8_byte_count]` | `[utf8_bytes]` |
-
-**Python decode:**
-```python
-string_value = tlv_payload.decode("utf-8")
-```
-
-**Hex Example ("ABC" as STRING, TLV payload only):**
 ```hex
-41 42 43  -- "ABC" in UTF-8
+48 65 6c 6c 6f 00                    -- "Hello"
+47 72 c3 bc c3 9f 65 20 e2 82 ac 00  -- "Grüße €"
+00                                   -- ""
 ```
+
+saprfclib writes the terminator and removes it when reading. An earlier assumption of a leading
+little-endian uint32 length plus UTF-16LE content was wrong.
 
 ---
 
 ### RFCTYPE_XSTRING (type=30) — Variable-Length Raw Bytes
 
-**Wire:** raw bytes, **no internal length prefix**. The length is carried by the enclosing TLV
-header (tag `0x0203`) as a byte count. Same pattern as STRING (confirmed 2026-07-05).
-
-| TLV header | TLV payload |
-|------------|-------------|
-| `[0x02 0x03][raw_byte_count]` | `[raw_bytes]` |
-
-**Python decode:**
-```python
-xstring_value = tlv_payload  # bytes as-is
-```
+**Wire:** the raw bytes, with **no length prefix and no terminator**; the TLV header carries the
+byte count, and an empty XSTRING is an empty record. Same capture
+(`string_xstring.json`): `de ad be ef` travels as exactly those four bytes.
 
 ---
 
-### RFCTYPE_INT8 (type=31) — Signed 64-bit Integer (8 bytes) — CONFIRMED
-
+### RFCTYPE_INT8 (type=31) — Signed 64-bit Integer (8 bytes)
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
 | 0x00 | 8 | int64-LE | `int8_value` | `08 07 06 05 04 03 02 01` = 0x0102030405060708 | Signed, little-endian |
@@ -500,8 +473,7 @@ Live 2026-11-12 (fixture `int8_utclong.json`): the function module returned
 
 ---
 
-### RFCTYPE_UTCLONG (type=32) — UTC Timestamp (8 bytes) — CONFIRMED
-
+### RFCTYPE_UTCLONG (type=32) — UTC Timestamp (8 bytes)
 An 8-byte little-endian integer. **0 is the initial value**; any other value is
 1 + the number of 100-nanosecond units since `0001-01-01T00:00:00`, counted on the calendar
 in force at the time — **Julian before 1582-10-15, Gregorian from then on**. The days
@@ -516,7 +488,7 @@ in force at the time — **Julian before 1582-10-15, Gregorian from then on**. T
 | `1970-01-01T00:00:00.0000000` | `01 00 89 4c 88 81 9f 08` |
 | `9999-12-31T23:59:59.9999999` | `00 c0 0a 49 08 2a ca 2b` |
 
-Live 2026-11-12, twelve values from 0001-01-01 to 9999-12-31, sent by the reference client
+Live 2026-11-12, eleven values (the initial value included) from 0001-01-01 to 9999-12-31, sent by the reference client
 and echoed by the function module (fixture `int8_utclong.json`). The reference client
 writes and reads values as `YYYY-MM-DDTHH:MM:SS.fffffff`, accepts a trailing `Z`, and
 refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns that string
@@ -638,8 +610,8 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 
 ### BCD (RFCTYPE_BCD, BCD(5,2) = 123.45) **[synthetic]**
 ```hex
-01 23 4C  -- Packed BCD: 01=0x0,0x1; 23=0x2,0x3; 4C=0x4, sign=0xC(+)
-           -- Represents digits 01234 with sign=positive, decimals=2 → 123.45
+12 34 5C  -- Packed BCD: 12=0x1,0x2; 34=0x3,0x4; 5C=0x5, sign=0xC(+)
+           -- Digits 12345 with sign=positive, decimals=2 → 123.45 (codec._encode_bcd output)
 ```
 
 ### STRING (RFCTYPE_STRING = "Hello")
@@ -651,60 +623,33 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 
 ## Evidence Summary
 
-| Type group | Status | Evidence |
-|------------|--------|----------|
-| INT, INT2, INT1, FLOAT | **CONFIRMED** | Live capture 2026-06-26 — little-endian confirmed for all four |
-| CHAR, DATE, TIME | **CONFIRMED** | Live capture 2026-06-26 — UTF-16LE, fixed width |
-| NUM, BYTE | **CONFIRMED** | Live capture — UTF-16LE zero-padded / raw fixed-length bytes |
-| STRING, XSTRING | **CONFIRMED** | Confirmed 2026-07-05 — no internal length prefix; TLV header carries the byte count |
-| INT8, UTCLONG | **CONFIRMED** | Live capture, purpose-built function module (2026-11-12) |
-| UTCSECOND…CDAY (33–40) | **[ASSUMED]** | No dictionary type on kernel 793 — see [A1] |
-| BCD | **CONFIRMED** | Both sign nibbles live-captured (`bcd_sign.json`) |
-| STRUCTURE | **PARTIAL** | Unicode offset layout exercised; non-Unicode layout undocumented |
-| DECF16, DECF34 | **UNCONFIRMED** | Big-endian DPD is documented behaviour; nothing seen on the wire. Not implemented. |
+| Type group | Evidence |
+|------------|----------|
+| INT, INT2, INT1, FLOAT | Live capture 2026-06-26; little-endian for all four |
+| CHAR, DATE, TIME | Live capture 2026-06-26; UTF-16LE, fixed width |
+| NUM, BYTE | Live capture 2026-11-12 (`string_xstring.json`): NUM(10) is UTF-16LE digits, `0000000042`; RAW(16) is the 16 raw bytes |
+| STRING, XSTRING | Live capture 2026-11-12 (`string_xstring.json`): UTF-8 + NUL / raw bytes, no length prefix |
+| BCD | Live captures; both sign nibbles (`type_bcd_p15_2`, `bcd_sign.json`) |
+| DECF16, DECF34 | Live capture, purpose-built function module; little-endian DPD (`decfloat_response.bin`) |
+| INT8, UTCLONG | Live capture, purpose-built function module, 2026-11-12 (`int8_utclong.json`) |
+| STRUCTURE | Unicode layout from live `DDIF_FIELDINFO_GET` (see framing.md) |
+| UTCSECOND…CDAY (33–40) | **[ASSUMED]**, see [A1] |
 
 ---
 
 ## Known Gaps
 
-### DecFloat16 / DecFloat34 wire form — OPEN
+### Types 33–40
 
-No reachable function module on the test system exposes a DECFLOAT-typed parameter
-(`STFC_DECFLOAT`, `RFC_DECFLOAT_TEST`, `DEMO_DECFLOAT_ARITH` all returned `FU_NOT_FOUND`,
-probed 2026-06-26). Big-endian DPD is HIGH-confidence documented behaviour but has never been
-observed on the wire, and no fixture is fabricated to paper over that.
+No dictionary type on kernel 793 carries them, so no capture is possible there; widths and
+byte order are **[ASSUMED]** (see [A1]). A release that has them, and a function module using
+them, would settle it.
 
-`encode` and `decode` raise `NotImplementedError` for both types. **Consequence:** a function
-module with a DECFLOAT parameter cannot be called until a capture lands. This is deliberate —
-a guessed decimal codec that is subtly wrong corrupts financial data silently, which is worse
-than a clear failure.
-
-**To close:** capture a live DECFLOAT16 and DECFLOAT34 value and commit both as fixtures.
-
-### BCD negative sign nibble — CLOSED (2026-11-12)
-
-`0x0D` is the negative nibble and `0x0C` the zero/positive one, both ways: fixture
-`tests/golden/serialization/bcd_sign.json`, a purpose-built function module and the reference
-client.
-
-### STRUCTURE non-Unicode offsets — OPEN
+### STRUCTURE non-Unicode offsets
 
 Structure field positioning uses one of two offset sets depending on whether the session
-negotiated Unicode mode. Every system tested negotiates `4103` (UTF-16LE), so only the Unicode
-layout is exercised or documented. **Consequence:** none for any currently reachable system.
-
----
-
-## Open Questions
-
-| # | Question | Status |
-|---|----------|--------|
-| OQ-01 | RFCTYPE_INT byte order on the wire | **RESOLVED** — little-endian, live capture 2026-06-26 |
-| OQ-02 | RFCTYPE_FLOAT byte order | **RESOLVED** — little-endian IEEE 754 double, live capture |
-| OQ-03 | STRING/XSTRING length prefix — LE or BE uint32? | **RESOLVED 2026-07-05** — there is no internal prefix. STRING is UTF-8 in the TLV, XSTRING is raw bytes, and the TLV header carries the byte count. The earlier assumption (LE uint32 + UTF-16LE) was wrong and the codec was corrected. |
-| OQ-04 | BCD odd digit count — digit+sign in the last byte, or padding? | **RESOLVED** — live P15.2 capture confirms final digit in the high nibble, sign in the low nibble, no padding |
-| OQ-05 | STRUCTURE field layout — which offset set, and how is it selected? | **OPEN** — decided by the negotiated codepage; only the Unicode path is exercised |
-| OQ-06 | Are INT8 and the temporal types (UTCLONG…CDAY) serialized as little-endian integers of 8/4/2 bytes? | **PARTLY CLOSED** — INT8 is (live 2026-11-12); UTCLONG is not a plain integer but 100 ns ticks + 1 on the Julian/Gregorian calendar (live). 33–40 stay **[ASSUMED]**: kernel 793 has no dictionary type for them. |
+negotiated Unicode mode. Every system tested negotiates `4103` (UTF-16LE), and a non-Unicode
+codepage is refused at logon, so only the Unicode layout is used or documented.
 
 ---
 

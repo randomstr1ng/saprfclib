@@ -19,7 +19,8 @@ around a proprietary `.so`.
 ```bash
 pip install saprfclib
 ```
-Pulls two pure-Python dependencies (`wsproto` and `h11`)
+Pulls five pure-Python dependencies: `wsproto` and `h11` (WebSocket RFC), and
+`asn1crypto`, `ecdsa` and `tlslite-ng` (built-in SNC).
 
 ## Quick Start
 
@@ -53,7 +54,7 @@ it in-process - no configuration needed.
 | SAProuter | `ashost`, `sysnr`, `saprouter="/H/router/S/3299/H/target"` |
 | Message server | `mshost`, `sysid`, `group` |
 | SNC (X.509, built in) | `snc_partnername`, `snc_pse`, `snc_pse_pin` (or `snc_lib` for a native GSS library) |
-| SNC (Kerberos SSO, built in) | `snc_partnername="p:CN=<name>@<REALM>"`, `snc_kerberos=True` (Windows logon session or ticket cache) or `KerberosLogin(...)`, `snc_sso=True` |
+| SNC (Kerberos SSO, built in) | `snc_partnername="p:CN=<name>@<REALM>"`, `snc_kerberos=True` (Windows logon session or ticket cache) or `saprfclib.krb5.KerberosLogin(...)`, `snc_sso=True` |
 | WebSocket RFC | `wshost`, `wsport`, `ws_path` |
 | SOCKS5 proxy (SAP BTP) | `proxy_type="socks5"`, `proxy_host`, `proxy_port` (+ `proxy_jwt` / OAuth triple) |
 
@@ -85,20 +86,20 @@ conn = saprfclib.connect(ashost="s4-2025", sysnr="00", client="001",
                          user="Developer", passwd="...", **cfg)
 ```
 
-See the [Connection Options guide](https://saprfclib.dev/getting-started/connection-options/)
+See the [Connection Options guide](https://randomstr1ng.github.io/saprfclib/getting-started/connection-options/)
 for the full parameter reference.
 
 ## Documentation
 
-Full documentation: **https://saprfclib.dev/**
+Full documentation: **https://randomstr1ng.github.io/saprfclib/**
 
-- [Getting Started](https://saprfclib.dev/getting-started/installation/) - install,
+- [Getting Started](https://randomstr1ng.github.io/saprfclib/getting-started/installation/) - install,
   connect, and make your first call in 10 minutes
-- [Cookbook](https://saprfclib.dev/cookbook/) - TABLE parameters,
+- [Cookbook](https://randomstr1ng.github.io/saprfclib/cookbook/) - TABLE parameters,
   RFC server, tRFC/qRFC, connection pool, SNC, WebSocket RFC
-- [API Reference](https://saprfclib.dev/api/connect/) - auto-generated from
+- [API Reference](https://randomstr1ng.github.io/saprfclib/api/connect/) - auto-generated from
   typed docstrings via MkDocs + mkdocstrings
-- [Protocol Docs](https://saprfclib.dev/protocol/framing/) - NI/CPIC framing,
+- [Protocol Docs](https://randomstr1ng.github.io/saprfclib/protocol/framing/) - NI/CPIC framing,
   ABAP type serialization, RFC handshake, SNC, tRFC/bgRFC wire specs
 
 ## Example Scripts

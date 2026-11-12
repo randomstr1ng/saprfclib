@@ -302,6 +302,12 @@ hatch run lint:type                   # mypy strict over src/
   the code they justify.
 - Uncertainty is labelled `[ASSUMED]` — searchable on purpose. Do not remove the label
   without capture evidence.
+- **No status labels in docs.** An unlabelled fact is established and cites its capture,
+  fixture or probe where it is stated; `[ASSUMED]` marks an inference; what is not known goes
+  under the page's Known Gaps / Open Questions. Never write "CONFIRMED", "RESOLVED",
+  "PARTIAL" and the like: they add nothing to a sourced fact and go stale. A closed gap leaves
+  the gap list and moves, with its evidence, to the section it belongs to.
+  `tests/test_repo_hygiene.py` enforces this.
 - Environment variables keep the `SAPRFC_` prefix; they describe SAP connection
   parameters, not the library.
 - Version comes from git tags via `hatch-vcs`. Never hand-edit a version string.

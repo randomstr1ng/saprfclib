@@ -1,7 +1,7 @@
 # tRFC / qRFC / bgRFC Wire Protocol
 
-**Status:** tRFC and qRFC submit and confirm CONFIRMED byte for byte against the reference
-client (live captures 2026-11-12, golden fixture `tests/golden/trfc/trfc_reference.json`).
+**Evidence:** tRFC and qRFC submit and confirm match the reference client byte for byte
+(live captures 2026-11-12, golden fixture `tests/golden/trfc/trfc_reference.json`).
 bgRFC submit is open — see [Known Gaps](#known-gaps).
 
 ---
@@ -198,9 +198,10 @@ Two consequences for anything building this frame:
 
 * The unit ID travels as **16 raw bytes**, not as its 32-character hex rendering,
   and not in UTF-16LE. The hex form is a display convention.
-* `UNIT_KIND` is an **INT4**. The `'T'`/`'Q'` characters below are an SDK-level
-  API convention; they are not what goes on the wire, and which integer means
-  which is not yet established.
+* `UNIT_KIND` is an **INT4**. The `'T'`/`'Q'` characters below are an API
+  convention; the wire carries the integers in "What a reference client actually
+  sends" below (`1409196105` for a type `T` unit). The value for `'Q'` is
+  **[ASSUMED]** (`1409196101`, by symmetry; `invoke.py`).
 
 ### The two simple modules
 
@@ -215,15 +216,14 @@ directly rather than through a structure:
 
 Both are ordinary signatures the dictionary describes, so neither needs a bespoke
 TLV builder — the normal invoke path encodes them. `BGRFC_GET_UNIT_ID` works and
-returns a 16-byte ID, so a client can take its unit IDs from the server.
+returns a 16-byte ID; saprfclib does not use it (see below).
 
 ### The 32-character UnitID
 
 A UnitID is **32 uppercase hex characters** — a UUID with the dashes removed.
 
-- **With a connection:** the client round-trips to `BGRFC_GET_UNIT_ID`, receives a 16-byte
-  UUID, and formats it as 32 uppercase hex characters.
-- **Without a connection:** the UUID is generated locally and formatted identically.
+saprfclib always generates it locally (`uuid4().hex.upper()` in `create_unit`). The
+reference client takes it from `BGRFC_GET_UNIT_ID` instead.
 
 Example: `A1B2C3D4E5F6789012345678901234AB`
 
@@ -234,8 +234,9 @@ Example: `A1B2C3D4E5F6789012345678901234AB`
 | `'T'` (0x54) | No queue names — synchronous execution |
 | `'Q'` (0x51) | One or more queue names specified |
 
-The rule is exactly "queue count < 1 → `'T'`, otherwise `'Q'`". It must match the queue list you
-actually send; a mismatch is rejected by the backend.
+The rule is "queue count < 1 → `'T'`, otherwise `'Q'`". The wire carries the matching
+`UNIT_KIND` integer; a wrong one is **not** reported — the unit then reads as `NOT_FOUND`
+(see "What a reference client actually sends").
 
 ---
 
@@ -265,7 +266,9 @@ sends one.
 with conn.create_unit(uid, queues=["Q1"]) as unit:
     unit.call("FM1", ...)   # buffered, not sent yet
     unit.call("FM2", ...)   # buffered
-# __exit__ → build_invoke_request("BGRFC_DEST_SHIP", ...)
+# __exit__ → build_bgrfc_request → BGRFC_DEST_SHIP. It still sends BGRFC_UNIT_ID /
+#   BGRFC_UNIT_TYPE / BGRFC_QUEUE_n / BGRFC_CALL_COUNT, which the module does not declare:
+#   the submit does not work (issue #34).
 
 conn.confirm_unit(identifier)
     └─ build_invoke_request("BGRFC_DEST_CONFIRM", ...)
@@ -279,57 +282,51 @@ conn.get_unit_state(identifier)
 ## Server-Side Dispatch
 
 When a registered RFC server receives an inbound call, the function name is matched before the
-normal handler lookup. **[ASSUMED]**: the server reads an inbound tRFC from parameters named
-`ARFCTID` / `ARFCFNAM`, which is not the client format above. No capture of a SAP system
-sending tRFC to a registered server exists to settle what arrives.
+normal handler lookup. **[ASSUMED]**: the server takes the TID from a parameter named
+`ARFCTID` and, failing that, from the 8 + 4 + 8 + 4 characters of the inbound `0x5001`
+block; neither is the client format above. No capture of a SAP system sending tRFC to a
+registered server exists to settle what arrives.
 
 ```
 inbound frame
   → decode function name from TLV 0x0102
        │
-       ├─ "ARFC_DEST_SHIP"     → read TID from ARFCIPID/PID/TIME/TIDCNT
-       │                         → check_transaction(tid)
-       │                              RFC_EXECUTED (0x10) → skip the handler, report success
-       │                              RFC_OK (0)          → mark received, run the handler
+       ├─ "ARFC_DEST_SHIP"     → read the TID (see above)
+       │                         → on_check(tid), or the TID store
+       │                              16 (executed) → skip the handler, report success
+       │                              0 (new)       → mark received, run the handler
        │
-       ├─ "ARFC_DEST_CONFIRM"  → confirm the transaction, drop duplicate protection
-       ├─ "BGRFC_DEST_SHIP"    → check the unit, then play it back
+       ├─ "ARFC_DEST_CONFIRM"  → placeholder: answers OK and does nothing
+       ├─ "BGRFC_DEST_SHIP"    → [ASSUMED] reads BGRFC_UNIT_ID / BGRFC_UNIT_TYPE / BGRFC_CALL_n,
+       │                         which only saprfclib's own builder writes; checks the unit,
+       │                         then plays it back
        └─ *(else)*             → ordinary handler dispatch
 ```
 
-### check_transaction callback contract
+### on_check callback contract
+
+`install_transaction_handlers(on_check=...)`:
 
 | Return | Meaning |
 |--------|---------|
-| `RFC_EXECUTED` (0x10) | TID already known and executed → skip the handler, return success |
-| `RFC_OK` (0) | New TID → persist it and execute |
-| `RFC_EXTERNAL_FAILURE` (0xf) | Handler error |
+| 16 (`RFC_EXECUTED`) | TID already known and executed → skip the handler, return success |
+| 0 (`RFC_OK`) | New TID → persist it and execute |
+
+The reply's return code is 0 for success, 16 for an executed TID and 3 for a failure; 16 and
+3 are **[ASSUMED]** (`server.py`, `_RC_EXECUTED`).
 
 ### Callback order
 
 ```
-check_transaction(tid)            → RFC_EXECUTED? → skip
+on_check(tid)                     → 16? → skip
 mark_received(tid) BEFORE execute ← crash safety: persist before you run
 run_handler()
-  ├─ success → on_commit(tid); on_confirm(tid)
+  ├─ success → mark_executed(tid); on_commit(tid)   (on_confirm only on a confirm)
   └─ error   → on_rollback(tid)
 ```
 
 `mark_received` **before** execution is what makes exactly-once survive a crash mid-handler. If
 you persist afterwards, a process death between execution and persistence replays the LUW.
-
----
-
-## Server context: call type
-
-The inbound call type is exposed to the handler as:
-
-| Value | Constant | Meaning |
-|-------|----------|---------|
-| 0 | `RFC_SYNCHRONOUS` | Standard synchronous call |
-| 1 | `RFC_TRANSACTIONAL` | tRFC |
-| 2 | `RFC_QUEUED` | qRFC — set when a queue name is present |
-| 3 | `RFC_BACKGROUND_UNIT` | bgRFC |
 
 ---
 
@@ -340,9 +337,11 @@ attacker-influenced input and become store keys, so validate before use:
 
 | Field | Length | Valid charset | Action on invalid |
 |-------|--------|---------------|-------------------|
-| TID | exactly 24 characters | `A-Z0-9/_=@-` | Reject, return `RFC_EXTERNAL_FAILURE` |
+| TID | exactly 24 characters | `A-Z0-9/_=@-` | Reject with a system failure (return code 3) |
 | UnitID | exactly 32 characters | `0-9A-F` (uppercase hex) | Reject |
-| Queue name | 1 to the maximum queue-name length | ABAP name characters | Reject empty or overlong |
+
+The client validates queue names (1–24 characters) before sending; the server does not see
+them in its current inbound path.
 
 ---
 
@@ -363,12 +362,13 @@ the call landed defeats exactly-once. Submit and confirm are deliberately separa
 keep them that way.
 
 ### 4. Off-by-2× on TID / UnitID byte length
-TID = 24 characters × 2 bytes = 48 bytes UTF-16LE. UnitID = 32 × 2 = 64 bytes. All length
-arithmetic is in code units, not Python `len()`.
+TID = 24 characters × 2 bytes = 48 bytes UTF-16LE. The UnitID travels as its **16 raw
+bytes**, not as the 32-character hex text. All character length arithmetic is in code
+units, not Python `len()`.
 
 ### 5. bgRFC unit type `'T'` vs `'Q'`
-The unit type must match the queue list exactly: `'T'` when `queues=[]`, `'Q'` when queues are
-specified.
+The `UNIT_KIND` sent must match the queue list: the type `'T'` value when `queues=[]`, the
+`'Q'` value when queues are given. A mismatch is not reported; the unit reads as `NOT_FOUND`.
 
 ### 6. Looking for a call-type byte
 The discriminator is the **function name string** in TLV `0x0102`, not a separate byte. Branch
@@ -378,25 +378,22 @@ on the decoded function name before the normal handler lookup.
 
 ## Known Gaps
 
-### Inbound tRFC (SAP to a registered server) — OPEN
-
+### Inbound tRFC (SAP to a registered server)
 A capture on 2026-07-05 of a tRFC the SAP system sent to a registered server showed a
 compact block encoding: CHAR values as `0x43 [len] 0x80 [value]`, the TID fields at offsets
 504 / 515 / 522 / 533 as 8 + 4 + 8 + 4 uppercase hex characters, `ARFCFNAM` at 1716, and an
 unexplained 11-byte preamble `34 08 0c 00 00 4c 07 00 00 f1 31` at offset 14. The server's
 inbound handler does not parse it yet ([ASSUMED] in `server.py`).
 
-### Several calls in one LUW — NOT EXPOSED
+### Several calls in one LUW (not in the public API)
 
 The wire format carries any number of calls (fixture `trfc`: two). `call_transactional`
 sends one per TID.
 
-### tRFC over WebSocket RFC — OPEN
-
+### tRFC over WebSocket RFC
 No capture. `call_transactional` raises `NotImplementedError` on a WebSocket connection.
 
-### BGRFC_DEST_SHIP payload byte layout — OPEN
-
+### BGRFC_DEST_SHIP payload byte layout
 The live bgRFC test submitted a unit with empty parameters, so no payload bytes were captured
 for bgRFC function parameters. **Consequence:** the bgRFC payload encoding is inferred from the
 tRFC path rather than confirmed. **To close:** capture a bgRFC unit carrying real parameters.
@@ -417,10 +414,13 @@ What is now established, by submitting against a live system (A4H kernel 793, 20
 
 So the remaining unknown is the whole of it: `SDATA` is a serialized container holding
 the buffered calls, and nothing can be submitted until its format is known. It is not
-the concatenated invoke TLV streams this library buffers today.
+what this library buffers today (per call, the function name in UTF-16LE and its
+`name=value` pairs joined by NUL characters).
 
 That capture has now been taken (SDK trace, A4H kernel 793, 2026-09-07: one type `T`
-unit carrying a single `STFC_CONNECTION` call with a marker string in `REQUTEXT`).
+unit carrying a single `STFC_CONNECTION` call with a marker string in `REQUTEXT`). The
+traces are not committed as fixtures; the values below and the `SDATA` layout come from
+them.
 
 ### What a reference client actually sends
 
@@ -433,7 +433,7 @@ unit carrying a single `STFC_CONNECTION` call with a marker string in `REQUTEXT`
 | `CALLER_USER` | the OS user | not the SAP user |
 | `CALLER_TCODE` | `"NW RFC Library 754"` | the library identifies itself here |
 | `CALLER_PROGRAM` | the executable name | |
-| `SENDING_TIME` | BCD `20260807082915` | |
+| `SENDING_TIME` | BCD `20260807082915` | as captured; a month before the trace date, unexplained |
 | `SENDING_INSTANCE` | the client hostname | |
 
 `UNIT_KIND` is the trap. An external client sends the **outbound** value even though the
@@ -539,8 +539,7 @@ defined, which is exactly what happened here before the tables were enumerated.
 against the backend's own record instead of against `get_unit_state()`, the function being
 tested. Checking a decoder with itself cannot detect a decoding fault.
 
-### ARFC_EXECUTE / ARFC_RUN_NOWAIT — OPEN
-
+### ARFC_EXECUTE / ARFC_RUN_NOWAIT
 Whether either is ever called separately from `ARFC_DEST_SHIP` is unconfirmed. Only
 `ARFC_DEST_SHIP` has been observed in dispatch, and no `ARFC_EXECUTE` frame has appeared in any
 capture.

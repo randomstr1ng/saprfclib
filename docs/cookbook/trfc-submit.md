@@ -35,10 +35,10 @@ try:
     conn.confirm_tid(tid)
     print(f"TID {tid} confirmed — exactly-once delivery guaranteed")
 
-except saprfclib.CommunicationError as exc:
-    # If the network fails during submit, do NOT confirm.
-    # The TID remains valid for a retry; SAP dedup protects against duplicates.
-    print(f"Submit failed — TID {tid} NOT confirmed; safe to retry: {exc}")
+except (saprfclib.RetryExhausted, saprfclib.CommunicationError) as exc:
+    # The network failed during the submit (after the library's own retries).
+    # Do NOT confirm: the TID stays valid, and a resubmit with it does not run twice.
+    print(f"Submit failed — TID {tid} NOT confirmed; safe to resubmit: {exc}")
 
 finally:
     conn.close()
@@ -75,7 +75,7 @@ try:
     conn.confirm_tid(qtid)
     print(f"qRFC submitted to queue MY_QUEUE, TID {qtid} confirmed")
 
-except saprfclib.CommunicationError as exc:
+except (saprfclib.RetryExhausted, saprfclib.CommunicationError) as exc:
     print(f"qRFC submit failed — do NOT confirm: {exc}")
 
 finally:
@@ -89,10 +89,15 @@ finally:
 | 1. Generate TID | `tid = conn.create_tid()` | Before every tRFC submit |
 | 2. Submit | `conn.call_transactional(..., tid=tid)` | Once per TID |
 | 3. Confirm | `conn.confirm_tid(tid)` | Only after successful submit |
-| Retry | Re-use the same `tid` and call `call_transactional` again | On `CommunicationError` only |
+| Retry | Re-use the same `tid` and call `call_transactional` again | After a transport failure only |
 
-Do **not** confirm the TID if `call_transactional` raises `CommunicationError` — the same
-TID is safe to resubmit and SAP will deduplicate.
+On a plain TCP connection `call_transactional` already retries a transport failure with the
+same TID (`max_retries`, `retry_delay` on `connect()`), then parks the request in `tid_store`
+if one is configured and raises `RetryExhausted`; `conn.retry_parked(tid)` sends the parked
+request again later. Over SNC there is no automatic retry, and a transport failure raises
+`CommunicationError`. In both cases: do **not** confirm the TID — it is safe to resubmit, and
+the server does not run a call twice under one TID. An `AbapApplicationError` is never retried:
+the server has refused the call.
 
 The function module's parameters are passed as for `call()`: importing, changing and tables
 parameters, checked against the server's metadata. Nothing comes back — a tRFC call has no

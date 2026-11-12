@@ -15,19 +15,21 @@ reproduced in this repository — see [NOTICE](https://github.com/randomstr1ng/s
 
 ## Evidence Tiers
 
-Every documented field carries an evidence tier. The tier is part of the claim: a
-byte layout marked `[ASSUMED]` is a hypothesis, not a specification.
+Every documented fact names its source. The source is part of the claim: a byte layout
+marked `[ASSUMED]` is a hypothesis, not a specification.
 
 | Tier | Source | Weight | What it establishes |
 |------|--------|--------|---------------------|
 | **Live capture** | Wireshark/tshark pcap of real traffic | **HIGHEST** | Ground truth for wire bytes. Overrides every other source, including this document. |
 | **Golden fixture** | A capture committed under `tests/golden/` | **HIGHEST** | Same as above, replayable in CI. |
 | **Behavioural probe** | What a live server accepts or rejects | **MEDIUM** | Semantics and validity ranges; not exact bytes. |
-| **Reference-client analysis** | Observed behaviour of SAP's own RFC client | **MEDIUM** | Which code paths exist and in what order; not authoritative for bytes. |
 | **Inference** | Extrapolation from a confirmed neighbouring field | **LOW** | Hypothesis only. Must be labelled `[ASSUMED]`. |
 
-**Rule:** a field documented as CONFIRMED must cite a live capture or a golden fixture.
-Anything else is `[ASSUMED]` until a capture lands. No value is documented without a
+**Rule:** a fact without a label is established and cites its live capture, golden fixture or
+probe right where it is stated. A fact that rests on inference is labelled `[ASSUMED]` and says
+what would settle it. What is not known at all goes under the page's "Known Gaps". There is
+no "confirmed" label: an unlabelled fact is one, and a gap that is closed leaves the gap list
+and moves, with its evidence, to the section it belongs to. No value is documented without a
 stated source — see [CLAUDE.md](https://github.com/randomstr1ng/saprfclib/blob/main/CLAUDE.md)
 for why this is enforced rather than encouraged.
 
@@ -128,12 +130,12 @@ Structural tags seen in every call:
 | `0x0102` | Function name (UTF-16LE) |
 | `0x0201` | Parameter name (UTF-16LE) |
 | `0x0203` | Parameter value (UTF-16LE or binary) |
-| `0x0205` | Parameter name in response |
+| `0x0205` | Declaration of a parameter the server should return (EXPORTING/CHANGING/TABLES), sent in the request; name UTF-16LE (`_TAG_EXPORT_DECL` in `src/saprfclib/invoke.py`, framing.md) |
 | `0xFFFF` len=0 | Terminator |
 
 ### Step 4 — Decode parameter values
 
-Parameter value records (`0x0203` / `0x0204`) hold the serialized ABAP value:
+Parameter value records (`0x0203`) hold the serialized ABAP value:
 
 | Type | Wire form |
 |------|-----------|
@@ -150,18 +152,21 @@ appear in the same frame, a few bytes apart.
 
 ### Step 5 — Commit a golden fixture
 
-For each confirmed frame:
+For each captured frame:
 
 1. Extract the raw bytes to `tests/golden/{category}/{name}.bin`.
 2. Write the field annotations to `tests/golden/{category}/{name}.json`, including
-   `message_type`, `ni_header_length`, `field_annotations[]`, `expected_parse`, and
-   `capture_source`.
+   `message_type`, `field_annotations[]`, `expected_parse`, `capture_source` and
+   `evidence` — the keys `load_fixture` in `tests/conftest.py` requires — plus
+   `ni_header_length` when the NI header is not the default 4 bytes.
 3. Satisfy the **zero-unknowns rule**: `sum(annotation.length) == len(bin_file)`. Every
    byte in a fixture must be accounted for. A byte nobody can explain is an open
    question, not a detail.
 
-`tests/golden/{category}/test_*.py` enforces the zero-unknowns rule on every fixture
-load, so a fixture cannot be added with unexplained bytes.
+The rule is enforced only for handshake fixtures (`tests/golden/handshake/test_handshake.py`);
+`load_fixture` does not check it, and some framing captures (`stfc_changing_*`,
+`stfc_structure_*`, `rfc_read_table_request`/`_response`) have no `.json` at all. A new fixture
+is checked against the rule in review, not by CI.
 
 Sanitising a fixture — removing a real hostname or credential — must preserve the
 original byte length, or every offset after the substitution becomes wrong. See the
@@ -181,13 +186,15 @@ substitution note in `tests/test_router.py` for the pattern.
 | CHAR width vs byte width | CHAR(N) is N *characters* = N×2 bytes in UTF-16LE. `field_length` in descriptors is in characters. The off-by-2× is the most common bug in this codebase. |
 | UTF-16 BOM | Use explicit `utf-16-le`; never bare `utf-16`, which emits and consumes a BOM. The wire format has none. |
 | Metadata prefetch frames | A client auto-issues `RFC_GET_FUNCTION_INTERFACE` and `DDIF_FIELDINFO_GET` before the user's call. The call you are looking for is not the first RFC frame in the capture — count carefully. |
-| RFCTEST is 264 bytes | The structure blob is 264 bytes including alignment padding. Scalar data lives in offsets 0–63; the trailing 200 bytes are CHAR space-padding. |
+| RFCTEST is 264 bytes | The structure blob is 264 bytes including alignment padding. Offsets 0–63 hold the scalar fields; 64–263 hold character data (see the layout below). |
 
 ---
 
 ## RFCTEST Structure Layout
 
-Confirmed from a live `STFC_STRUCTURE IMPORTSTRUCT` capture (2026-06-26), 264 bytes:
+From a live `STFC_STRUCTURE IMPORTSTRUCT` capture (2026-06-26), 264 bytes. The committed
+fixture `tests/golden/framing/stfc_structure_request.bin` is a different call with the same
+offsets (other values: FLOAT 1.5, INT2 2, INT4 4, `data1…` at offset 64):
 
 ```
 Offset  Size  Type     Field       Value (sent)    Wire bytes
@@ -199,14 +206,19 @@ Offset  Size  Type     Field       Value (sent)    Wire bytes
 14      8     CHAR(4)  RFCCHAR4    "ABCD"          41 00 42 00 43 00 44 00
 22      2     pad      —           —               00 00
 24      4     INT4     RFCINT4     65536           00 00 01 00 (LE = 0x00010000)
-28      8     [unk]    —           —               00 00 00 00 20 00 20 00
+28      8     [ASSUMED] HEX3+pad+CHAR(2)  —      00 00 00 00 20 00 20 00
 36      12    TIME     RFCTIME     "120000"        31 00 32 00 30 00 30 00 30 00 30 00
 48      16    DATE     RFCDATE     "20260626"      32 00 30 00 32 00 36 00 30 00 36 00 32 00 36 00
-64      200   [chars]  —           spaces          20 00 repeated (space UTF-16LE)
+64      200   [ASSUMED] RFCDATA1/2  spaces       20 00 repeated (space UTF-16LE)
 ```
 
-Offsets 28–35 are not yet explained — most likely RFCTEST fields left unset by the test
-call. Flagged as an open question rather than described as padding.
+**[ASSUMED]** Offsets 28–35 are `RFCHEX3` (3 bytes, zero), one pad byte and `RFCCHAR2`
+(2 blank characters), and 64–263 are `RFCDATA1`/`RFCDATA2` as two 50-character fields. The
+field names are ones the integration tests send to `STFC_STRUCTURE`
+(`tests/test_phase05_integration.py`, `tests/test_phase04_integration.py`), and the bytes
+match those widths; the committed fixture carries `data1…` at offset 64. The positions are
+inferred from the widths, not read from metadata. A `DDIF_FIELDINFO_GET` reply for `RFCTEST`,
+or a capture with `RFCHEX3` set, would settle it.
 
 ---
 

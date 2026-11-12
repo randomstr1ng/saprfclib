@@ -99,12 +99,13 @@ def enable_keepalive(sock: socket.socket) -> None:
                 pass
 
 
-# framing.md lines 355-368 reference implementation: 4-byte big-endian uint32.
+# NI length prefix: 4-byte big-endian uint32 (every NI-framed capture; framing.md).
 _NI_HEADER = struct.Struct(">I")
 _NI_HEADER_SIZE = _NI_HEADER.size  # 4
 
 
-# NI control messages are 8-byte ASCII payloads the NI layer handles itself,
+# NI control messages are ASCII payloads the NI layer handles itself (NI_PONG is 8
+# bytes, NI_RTERR is followed by an error record and is variable length),
 # before anything reaches the RFC layer (docs/protocol/framing.md). NI_RTERR is
 # how a SAProuter reports that it will not carry the route — wrong password,
 # route denied by the router's permission table, or the target unreachable.

@@ -37,7 +37,7 @@ def main() -> None:
             # Confirmation removes the TID from SAP's dedup table (ARFCRSTATE).
             conn.confirm_tid(tid)
             print(f"tRFC TID {tid} submitted and confirmed.")
-        except saprfclib.CommunicationError as exc:
+        except (saprfclib.RetryExhausted, saprfclib.CommunicationError) as exc:
             # Do NOT confirm if submit failed — keep the TID for a safe retry.
             print(f"tRFC submit failed; TID NOT confirmed (safe to retry): {exc}")
 
@@ -56,7 +56,7 @@ def main() -> None:
             )
             conn.confirm_tid(qtid)
             print(f"qRFC TID {qtid} submitted to queue {queue!r} and confirmed.")
-        except saprfclib.CommunicationError as exc:
+        except (saprfclib.RetryExhausted, saprfclib.CommunicationError) as exc:
             print(f"qRFC submit failed; TID NOT confirmed (safe to retry): {exc}")
     finally:
         conn.close()

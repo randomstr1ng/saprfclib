@@ -18,7 +18,8 @@
 # Frame layout (D-02, confirmed):
 #     offset  size  field
 #     0x00    8B    eye-catcher = "SNCFRAME" (D-22; golden fixture snc/snc_frame_headers.json)
-#     0x08    1B    frame_type: 2=FR_INIT, 4=FR_ACCEPT, 7=plain, 8=integrity, 9=privacy
+#     0x08    1B    frame_type: 2=FR_INIT, 4=FR_ACCEPT, 5=ACCEPT_ACK, 7=plain, 8=integrity,
+#                       9=privacy
 #     0x09    1B    protocol version = 6
 #     0x0a    2B    BE uint16: total header length (0x18 + extension header size)
 #     0x0c    4B    BE uint32: GSS token length

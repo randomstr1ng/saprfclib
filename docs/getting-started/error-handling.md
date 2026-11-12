@@ -8,13 +8,17 @@ error types with the most-specific exception first.
 
 ```
 SapRfcError
-├── AbapApplicationError   — ABAP application exception from the function module
-├── AbapSystemFailure      — ABAP short dump or system failure on the backend
-├── CommunicationError     — network or protocol-level failure
-├── TransactionalError     — tRFC / qRFC / bgRFC lifecycle error
-├── SncError               — SNC GSS-API handshake or frame error
-├── WebSocketError         — WebSocket upgrade, framing, or TLS error
-└── PoolTimeoutError       — ConnectionPool.acquire() timed out
+├── AbapApplicationError       — ABAP application exception from the function module
+├── AbapSystemFailure          — ABAP short dump or system failure on the backend
+├── CommunicationError         — network or protocol-level failure
+├── LogonError                 — the server refused the logon (also a ValueError)
+├── IncompleteDescriptorError  — a parameter's layout could not be resolved (also a ValueError)
+├── TransactionalError         — tRFC / qRFC / bgRFC lifecycle error
+│   └── RetryExhausted         — every retry of a transactional submit failed
+├── SncError                   — SNC GSS-API handshake or frame error
+├── WebSocketError             — WebSocket upgrade, framing, or TLS error
+├── ProxyError                 — SOCKS5 proxy negotiation, authentication or CONNECT failed
+└── PoolTimeoutError           — ConnectionPool.acquire() timed out
 ```
 
 ## Exception details
@@ -46,6 +50,8 @@ the backend (e.g. a program error, stack overflow, or system exception).
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `message` | `str \| None` | System failure description |
+| `msg_class`, `msg_type`, `msg_number` | `str \| None` | ABAP message, when the reply carries one |
+| `msg_v1`..`msg_v4` | `str \| None` | ABAP message variables |
 
 ### CommunicationError
 
@@ -65,6 +71,36 @@ TID, a TID store failure, or a protocol invariant violation.
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `message` | `str \| None` | Description of the transactional failure |
+
+### LogonError
+
+The server refused the logon: wrong user, password or SNC identity mapping. Not a
+`CommunicationError`, so transactional retries do not repeat it — repeating the same
+credentials cannot succeed and can lock the account. Also a `ValueError`. A logon refused with
+a structured ABAP exception (for example a missing authorization) raises that classified
+`AbapApplicationError` / `AbapSystemFailure` instead.
+
+### RetryExhausted
+
+Every retry of a tRFC/qRFC/bgRFC submit failed with `CommunicationError`; the request is
+parked in the configured store first.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `tid` | `str \| None` | TID of a tRFC/qRFC submit |
+| `unit_id`, `unit_type` | `str \| None` | bgRFC unit |
+| `cause` | `CommunicationError \| None` | The last failure |
+
+### IncompleteDescriptorError
+
+A STRUCTURE or TABLE parameter's layout could not be resolved from the server's
+dictionary, so its value cannot be encoded or decoded. Also a `ValueError`.
+
+### ProxyError
+
+The SOCKS5 proxy refused the method negotiation or the JWT authentication, or answered the
+CONNECT with a non-zero reply code. The message names the SOCKS5 reason, never the token or
+secret.
 
 ### SncError
 
@@ -102,12 +138,15 @@ timeout elapses. Carries diagnostic counters for debugging pool exhaustion.
 
 ## Argument errors are not `SapRfcError`
 
-Two failures happen **before** anything reaches the server, so they are plain
-`ValueError` and are not caught by `except saprfclib.SapRfcError`:
+Some failures happen **before** anything reaches the server, so they are plain
+`ValueError` or `TypeError` and are not caught by `except saprfclib.SapRfcError`. For
+example:
 
 - a keyword argument the function interface does not declare, when the connection
-  was opened with `strict_params=True`
-- an invalid `lang` code
+  was opened with `strict_params=True` (`ValueError`)
+- an invalid `lang` code or `snc_qop` level (`ValueError`)
+- only one of `user` and `passwd` (`ValueError`)
+- a yes/no parameter that is not `True`/`False`, `1`/`0` or `"1"`/`"0"` (`TypeError`)
 
 ```python
 try:
@@ -202,7 +241,7 @@ except saprfclib.CommunicationError as exc:
         print(f"  Caused by: {exc.original_exception}")
 
 except saprfclib.SapRfcError as exc:
-    # Catch-all for TransactionalError, SncError, WebSocketError, PoolTimeoutError
+    # Every other saprfclib error
     print(f"RFC error: {exc}")
 
 finally:

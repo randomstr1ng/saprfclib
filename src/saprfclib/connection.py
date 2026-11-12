@@ -2652,10 +2652,16 @@ class Connection:
             _tlv_ext(_TAG_FUNCTION, _RFCPING_NAME),
             # Terminator: no repeated tag
             _TAG_TERMINATOR.to_bytes(2, "big") + b"\x00\x00",
-            # Trailing call-frame marker. Behavioural evidence only: the gateway
-            # accepts this frame and answers the ping.
-            b"\xff\xff\x00\x00\x00\xf8\x00\x00\x85\x00",
         ]
+        # Close the terminator with FF FF, then the invoke footer: BE32 body length,
+        # 00 00, 85 00. The length counts everything after the 80-byte GW header and
+        # marker up to the footer, COM_HEAD included: the reference client's logon
+        # frames carry 0xf9, 0xfb and 0xec for frames of 341, 339 and 324 bytes,
+        # always frame length - 88 (tests/golden/framing/logon_request.bin and live
+        # reference logons with other user and password lengths, 2026-11-12). It was
+        # a constant 0xf8 before, right only for one user/password length.
+        body = len(_COM_HEAD) + len(b"".join(parts)) + 2
+        parts.append(b"\xff\xff" + struct.pack(">I", body) + _INVOKE_FOOTER_MAGIC)
         return b"".join(parts)
 
     # ------------------------------------------------------------------ #
@@ -4886,13 +4892,10 @@ def _resolve_via_message_server(
     """Resolve a logon group to a concrete (ashost, sysnr).
 
     Prefers the message server's HTTP interface, which is line-oriented and was
-    confirmed against a live server (tests/golden/router/ms_http_logon_v12.txt).
-    The binary protocol in router.py is still built from a partial capture: on a
-    live message server it accepts the connection and then answers nothing, so
-    every frame it sends is unverified. Letting it choose silently would mean an
-    unverified path deciding which application server the caller talks to.
-
-    Pass ``ms_use_http=False`` to force the binary path anyway.
+    checked against a live server (tests/golden/router/ms_http_logon_v12.txt).
+    ``ms_use_http=False`` uses the binary protocol in router.py instead, which was
+    reproduced against a live server from a SAP GUI capture
+    (tests/golden/router/sapms_*.bin, docs/protocol/message_server.md).
     """
     from saprfclib.router import MessageServerClient, resolve_rfc_server_http
 
@@ -6131,6 +6134,9 @@ async def connect_async(
     metadata_cache_key: str | None = None,
     saprouter: str | None = None,
     mshost: str | None = None,
+    msserv: int | str | None = None,
+    ms_http_port: int | str | None = None,
+    ms_use_http: bool = True,
     sysid: str | None = None,
     group: str | None = None,
     port: int | None = None,
@@ -6196,6 +6202,7 @@ async def connect_async(
     strict_params = _flag("strict_params", strict_params)
     allow_restricted_logon = _flag("allow_restricted_logon", allow_restricted_logon)
     ws_tls_verify = _flag("ws_tls_verify", ws_tls_verify)
+    ms_use_http = _flag("ms_use_http", ms_use_http)
     if snc_sso is not None:
         snc_sso = _flag("snc_sso", snc_sso)
     if isinstance(snc_kerberos, (bool, int, str)):  # a KerberosLogin passes as is
@@ -6224,6 +6231,9 @@ async def connect_async(
             metadata_cache_key=metadata_cache_key,
             saprouter=saprouter,
             mshost=mshost,
+            msserv=msserv,
+            ms_http_port=ms_http_port,
+            ms_use_http=ms_use_http,
             sysid=sysid,
             group=group,
             port=port,
@@ -6287,27 +6297,27 @@ async def connect_async(
         )
 
     from saprfclib.router import (
-        MessageServerClient,
         first_hop_address,
         open_route_async,
         parse_route_string,
     )
 
     if mshost is not None:
-        # Message-server resolve: sync I/O; run off the event loop via to_thread.
-        def _ms_resolve() -> tuple[str, int]:
-            ms_transport = connect_tcp(
+        # Message-server resolve, as connect() does it (HTTP first unless
+        # ms_use_http=False): sync I/O, run off the event loop.
+        ashost, sysnr = await asyncio.to_thread(
+            lambda: _resolve_via_message_server(
                 mshost,
-                _ms_port(sysid),
+                group=group,
+                sysid=sysid,
+                msserv=msserv,
+                ms_http_port=ms_http_port,
+                use_http=ms_use_http,
                 timeout=timeout,
                 connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
             )
-            try:
-                return MessageServerClient(ms_transport).resolve(group or "PUBLIC")
-            finally:
-                ms_transport.close()
-
-        ashost, sysnr = await asyncio.to_thread(_ms_resolve)
+        )
 
     # See connect(): an explicit port replaces the derivation.
     port = port if port is not None else 3300 + int(sysnr)

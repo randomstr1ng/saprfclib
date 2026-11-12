@@ -1,12 +1,14 @@
 # Connection Options
 
-`saprfclib.connect()` supports five transport modes. All modes share the same
-`conn.call()` / `conn.close()` interface once connected.
+`saprfclib.connect()` reaches a system directly, through SAProuter, through a message
+server, through a SOCKS5 proxy, or over WebSocket RFC, optionally with SNC. All of them share
+the same `conn.call()` / `conn.close()` interface once connected. The complete parameter list
+is in the [API reference](../api/connect.md).
 
 ## Direct TCP (application server)
 
 Connect directly to an SAP application server by hostname and system number.
-The gateway port is calculated as `3300 + sysnr`.
+The gateway port is `3300 + sysnr`, or `4800 + sysnr` with SNC; `port=` overrides it.
 
 ```python
 conn = saprfclib.connect(
@@ -15,9 +17,12 @@ conn = saprfclib.connect(
     client="100",
     user="USER",
     passwd="pass",
-    timeout=30.0,     # Socket timeout in seconds (optional)
+    connect_timeout=10.0,   # default 10 s for the TCP connect
+    read_timeout=None,      # default: wait as long as the server takes
 )
 ```
+
+`timeout=` still works and sets both, but is deprecated.
 
 ## SAProuter hop
 
@@ -42,6 +47,13 @@ conn = saprfclib.connect(
 Connect to a logon group via the SAP message server. The message server returns
 the least-loaded application server, and saprfclib connects to it directly.
 
+By default (`ms_use_http=True`) the group is resolved over the message server's HTTP
+interface. Its port is 8100 + the message server's instance number, which is **not** the
+application server's system number: give it as `ms_http_port` (or `msserv`), or have a
+`sapms<SID>` entry in `/etc/services`. Otherwise `connect()` raises `ValueError` rather than
+guessing. `ms_use_http=False` uses the binary message-server protocol on `msserv` (3600 +
+instance) instead.
+
 ```python
 conn = saprfclib.connect(
     ashost="dummy",           # Required positionally; ignored when mshost is set
@@ -52,6 +64,7 @@ conn = saprfclib.connect(
     mshost="sapms.example.com",
     sysid="A4H",
     group="PUBLIC",
+    ms_http_port=8101,        # 8100 + message-server instance number
 )
 ```
 
@@ -76,13 +89,34 @@ conn = saprfclib.connect(
 
 For Kerberos SNC (single sign-on with Active Directory), pass `snc_kerberos=True` to use
 the Windows logon session (on Windows) or the ticket cache, or
-`snc_kerberos=KerberosLogin(...)` for a password, keytab or specific cache, with
+`snc_kerberos=KerberosLogin(...)` (`from saprfclib.krb5 import KerberosLogin`) for a
+password, keytab or specific cache, with
 `snc_partnername="p:CN=<name>@<REALM>"` (the same partner name as in SAP Logon) and
 usually `snc_sso=True`.
 
 To use a native GSS-API library instead (e.g. CommonCryptoLib), pass `snc_lib` with its
 absolute path and leave out `snc_pse`. See the [SNC cookbook](../cookbook/snc-connection.md)
 for setup, partner-name rules and the protection levels (`snc_qop`).
+
+## SOCKS5 proxy (SAP BTP Connectivity Proxy)
+
+`proxy_type="socks5"` opens the connection through a SOCKS5 proxy such as the SAP BTP
+Connectivity Proxy, in front of the Cloud Connector. `ashost` is the virtual host the proxy
+resolves; `gwhost` is the SAP system's own host, which the gateway checks:
+
+```python
+conn = saprfclib.connect(
+    ashost="s4-virtual-host", sysnr="00", client="100", user="USER", passwd="pass",
+    proxy_type="socks5",
+    proxy_host="connectivity-proxy.kyma-system.svc.cluster.local",
+    proxy_port=20004,
+    gwhost="sap-internal-host",
+)
+```
+
+Untrusted mode authenticates with a JWT: pass `proxy_jwt`, or `proxy_client_id`,
+`proxy_client_secret` and `proxy_token_url` to fetch one. `saprfclib.connectivity_proxy_kwargs()`
+reads these from a bound Connectivity service. Details: [SOCKS5](../protocol/socks5.md).
 
 ## WebSocket RFC (BTP / Cloud)
 
@@ -170,6 +204,22 @@ A **one-character** code is never looked up — it is taken at face value and se
 given. Systems can have custom languages that appear in no standard table, and the
 SDK does not validate one-character input either. The trade-off is that a typo in a
 one-character code reaches the server rather than being caught locally.
+
+## Yes/no parameters
+
+`strict_params`, `allow_restricted_logon`, `ws_tls_verify`, `snc_sso`, `snc_kerberos` (as a
+switch) and `ms_use_http` accept `True`/`False`, `1`/`0`, or the NW RFC SDK strings
+`"1"`/`"0"`. Anything else — `"false"`, `"yes"`, `2` — raises `TypeError` before a
+connection is opened, because reading such a value by truthiness would turn `"0"` into *on*.
+
+## Other options
+
+- `port` — gateway port, overriding `3300 + sysnr` (or `4800 + sysnr` with SNC).
+- `allow_restricted_logon=True` — keep a connection whose logon succeeded but whose embedded
+  `RFCPING` was refused (typically a user without `S_RFC` for it), instead of raising.
+- `trace=` — an `RfcTrace`, which writes every frame in the NW RFC SDK's trace format with
+  credentials redacted.
+- `metadata_cache=` — share function descriptions between connections.
 
 ## Unknown keyword arguments
 

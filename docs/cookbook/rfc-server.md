@@ -73,8 +73,9 @@ def handle_stfc(request: dict) -> dict:
 # Optional: register an authentication callback.
 # Return True to allow the call, False to deny it.
 # Inbound credentials are never logged by saprfclib.
-def check_auth(user: str = "", password: str = "") -> bool:
-    return user.upper() == "RFC_USER"
+def check_auth(user: str | None = None, password: str | None = None) -> bool:
+    # user is None when the caller sent no credentials
+    return (user or "").upper() == "RFC_USER"
 
 server.set_authentication_check(check_auth)
 
@@ -91,6 +92,6 @@ server.serve_forever()
 - `nuc_length` is the character count in the non-Unicode encoding; `uc_length` is double
   that value for UTF-16 (2 bytes per code unit).
 - The `RESPTEXT` export is sent back to the SAP caller automatically when the handler returns.
-- For tRFC/qRFC inbound calls the `func_desc` argument to `@server.function` can be `None`
-  because the server short-circuits before deserializing the request when it detects a
-  duplicate TID.
+- For tRFC/qRFC inbound calls the handler still needs a `FunctionDesc` to see its
+  parameters: without one it is called with `{}`. Only a duplicate TID skips the handler
+  before the request is decoded.

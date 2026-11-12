@@ -1,17 +1,21 @@
 # Kerberos client (`saprfclib.krb5`)
 
-**Status:** CONFIRMED against Active Directory (Windows Server 2022) on 2026-11-10:
+**Evidence:** live against Active Directory (Windows Server 2022) on 2026-11-10:
 pre-authenticated AS exchange with a password and with a keytab, TGS exchange for a
 user principal and an SPN, use of tickets from MIT-written credential caches, and Kerberos
 SNC logons built on them ([snc-mechanism.md](snc-mechanism.md#kerberos-key-exchange)).
-Tickets from the Windows logon session confirmed on Windows 11 on 2026-11-11.
+Tickets from the Windows logon session: live on Windows 11 on 2026-11-11.
 **Implemented in:** `src/saprfclib/krb5/` — `crypto.py`, `messages.py`, `client.py`,
 `files.py`, `lsa.py`, `login.py`.
-**Evidence:** RFC test vectors and MIT-written files under `tests/golden/krb5/`,
-replayed by `tests/test_krb5.py`; live tests behind the `integration` marker.
+**Evidence:** RFC 3961/3962 test vectors in `tests/test_krb5.py`, and MIT-written files
+under `tests/golden/krb5/` replayed by the same tests; the LSA reply parsing is tested
+offline in `tests/test_krb5_lsa.py`; live tests behind the `integration` marker.
 
-Unlike the SNC mechanism, Kerberos is a published standard. Everything here follows the
-RFCs and the MIT file-format documentation; no value is taken from observation alone.
+Unlike the SNC mechanism, Kerberos is a published standard. The Kerberos protocol and file
+formats here follow the RFCs and the MIT file-format documentation. The Windows logon
+session follows Microsoft's public Win32 API documentation; the behaviour listed under
+[Windows logon session](#windows-logon-session) as observed comes from the live Windows 11
+test, not from a specification.
 
 | Piece | Specification |
 |---|---|
@@ -19,7 +23,7 @@ RFCs and the MIT file-format documentation; no value is taken from observation a
 | Messages (AS-REQ/REP, TGS-REQ/REP, AP-REQ, KRB-ERROR), key usages | RFC 4120 |
 | PA-PAC-REQUEST | MS-KILE 2.2.3 |
 | Credential cache v3/v4, keytab v2 | MIT krb5 documentation, "Credential cache file format", "Keytab file format" |
-| Tickets of the Windows logon session | Win32 `LsaCallAuthenticationPackage` with `KerbRetrieveEncodedTicketMessage`; structures from `NTSecAPI.h` |
+| Tickets of the Windows logon session | Win32 `LsaCallAuthenticationPackage` with `KerbRetrieveEncodedTicketMessage`; structure layouts from Microsoft's public Win32 API documentation, checked by the live Windows 11 test (2026-11-11) |
 
 ## Scope
 

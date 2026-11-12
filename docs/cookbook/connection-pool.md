@@ -41,7 +41,7 @@ for t in threads:
 for t in threads:
     t.join()
 
-# Close the pool when done — this closes all idle and checked-out connections.
+# Close the pool when done: idle connections close now, checked-out ones when released.
 pool.close()
 ```
 
@@ -54,5 +54,5 @@ pool.close()
 - The pool is thread-safe: multiple threads may call `acquire()` concurrently.
 - Do not share a single acquired connection across threads — each `with pool.acquire()` block
   owns exactly one connection for its duration.
-- `pool.close()` waits for checked-out connections to be returned, then closes all of them.
-  Call it once at application shutdown.
+- `pool.close()` does not wait: it closes the idle connections at once, and each
+  checked-out connection is closed when it is released. Call it once at application shutdown.

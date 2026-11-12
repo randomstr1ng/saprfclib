@@ -45,10 +45,11 @@ __all__ = ["encode", "decode"]
 
 
 # --------------------------------------------------------------------------- #
-# RFCTYPE integer constants. 0-30: the type codes the server reports in function
-# metadata (live captures under tests/golden/). 31-40 continue the sequence; only 31
-# (INT8, 8 bytes) has been seen live — A4H's metadata for GET_TASK_INFO.E_DISPATCHED_TASKS,
-# 2026-11-12. 32-40 are [ASSUMED]; see docs/protocol/serialization.md [A1].
+# RFCTYPE integer constants: the library's numbering of the types. On the wire the
+# metadata names a type by its EXID character (metadata._EXID_TO_RFCTYPE); the numbers
+# match the NW RFC SDK's public RFCTYPE values. INT8 (31) and UTCLONG (32) are captured
+# (tests/golden/serialization/int8_utclong.json); 33-40 are [ASSUMED], see
+# docs/protocol/serialization.md [A1].
 # --------------------------------------------------------------------------- #
 RFCTYPE_CHAR = 0
 RFCTYPE_DATE = 1
@@ -299,7 +300,7 @@ _BYTE_LIKE_TYPES = frozenset({RFCTYPE_BYTE, RFCTYPE_XSTRING})
 # otherwise it is 1 + the number of 100-nanosecond units since 0001-01-01T00:00:00 on
 # the calendar in force -- Julian before 1582-10-15, Gregorian from then on. The days
 # 1582-10-05 .. 1582-10-14 do not exist. Source: live 2026-11-12, a purpose-built
-# function module echoing UTCLONG values from the reference client, twelve values
+# function module echoing UTCLONG values from the reference client, eleven values
 # from 0001-01-01 to 9999-12-31 including 1000-06-15, 1582-10-04, 1582-10-15 and
 # 0004-02-29 (tests/golden/serialization/int8_utclong.json). The reference client
 # refuses the reform gap, and writes values as YYYY-MM-DDTHH:MM:SS.fffffff; a
@@ -608,8 +609,9 @@ def _encode_bcd(value: Decimal, field: FieldDesc) -> bytes:
 # STRUCTURE-in-STRUCTURE and TABLE-in-STRUCTURE recurse with NO depth limit.
 #
 # Security: each field span is bounds-checked (offset + length <= len(data))
-# before slicing (threat T-02-07 — no over-read). TABLE rows are derived from
-# len(data) // row_size (bounded by the actual buffer) and sliced lazily over a
+# before slicing (threat T-02-07 — no over-read). The TABLE row width is
+# len(data) // row_count (see _decode_table, bounded by the actual buffer) and rows
+# are sliced lazily over a
 # memoryview, never pre-allocated from an attacker-controlled count (T-02-06).
 
 
@@ -885,7 +887,11 @@ def decode(
         case rfctype if rfctype == RFCTYPE_BYTE:
             return buf
         case rfctype if rfctype == RFCTYPE_STRING:
-            return buf.decode("utf-8")
+            # UTF-8 ending in one NUL byte, the empty string being just the NUL. Live
+            # 2026-11-12: "Hello" travels as 48 65 6c 6c 6f 00, in both directions
+            # (tests/golden/serialization/string_xstring.json). Drop the terminator.
+            raw = bytes(buf)
+            return (raw[:-1] if raw.endswith(b"\x00") else raw).decode("utf-8")
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return buf
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
@@ -959,7 +965,8 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
         case rfctype if rfctype == RFCTYPE_BYTE:
             return bytes(value)
         case rfctype if rfctype == RFCTYPE_STRING:
-            return cast(bytes, value.encode("utf-8"))
+            # UTF-8 plus the terminating NUL the reference client sends (see decode).
+            return cast(bytes, value.encode("utf-8")) + b"\x00"
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return bytes(value)
         case rfctype if rfctype == RFCTYPE_STRUCTURE:

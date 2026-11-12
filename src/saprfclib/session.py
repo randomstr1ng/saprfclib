@@ -275,7 +275,7 @@ class Session:
     # Phase 2 — GW connect (handshake.md lines 78-138)
     # ----------------------------------------------------------------- #
     def _handle_gw_connect_response(self, data: bytes) -> bytes:
-        """Read GW_CONNECT_RESPONSE; extract the 8-byte connection handle (offset 44)."""
+        """Read GW_CONNECT_RESPONSE; extract the 8-byte connection handle (payload offset 40)."""
         if len(data) < _GW_HANDLE_OFFSET + _GW_HANDLE_LEN:
             raise ValueError(
                 f"GW connect response too short: {len(data)} < {_GW_HANDLE_OFFSET + _GW_HANDLE_LEN}"

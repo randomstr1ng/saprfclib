@@ -1,9 +1,9 @@
 # NI/CPIC Framing Layer
 
-**Status:** CONFIRMED — live capture (2026-06-26), golden fixtures committed under
-`tests/golden/framing/`.
-**Confidence:** HIGH — byte-exact `STFC_CONNECTION` capture against SAP NetWeaver 7.58,
-replayed in CI.
+**Evidence:** live captures from 2026-06-26 on, committed as golden fixtures under
+`tests/golden/framing/` and replayed in CI; the first was a byte-exact `STFC_CONNECTION`
+capture against SAP NetWeaver 7.58. Each section names its own capture or fixture; anything
+not established that way is marked `[ASSUMED]`.
 
 ---
 
@@ -46,16 +46,19 @@ Offset  Length  Type        Name            Notes
 
 ### Evidence
 
-**Tier: live capture.** Every frame in `tests/golden/framing/` begins with a 4-byte
-big-endian length whose value equals `len(frame) - 4`. The relationship holds across all
-committed fixtures — request and response, minimum 128 bytes and maximum 6091 bytes — so the
-header is fixed-width and the length excludes itself.
+**Tier: live capture.** Every fixture in `tests/golden/framing/` that was captured at the
+NI layer begins with a 4-byte big-endian length whose value equals `len(frame) - 4` —
+request and response, from 68 bytes (`client_ni_init_request.bin`) to 6091 bytes
+(`rfc_read_table_response.bin`) — so the header is fixed-width and the length excludes
+itself. Many fixtures were recorded above the NI layer and start at the GW header instead,
+with no length prefix: `rfcping_*`, `gfi_*`, `ddif_*`, `multiframe_*`, `basxml_*`, `wrfc_*`,
+among others.
 
 Both directions use the same framing: the read path consumes 4 bytes, byte-swaps them from
 network order, and then reads exactly that many payload bytes.
 
 ```python
-# The whole of NI framing, verified against every golden fixture
+# The whole of NI framing, verified against every NI-prefixed golden fixture
 assert struct.unpack_from(">I", frame, 0)[0] == len(frame) - 4
 ```
 
@@ -63,26 +66,19 @@ The header and payload are written together in a single scatter-gather write, so
 not observable in two pieces on a healthy connection — do not rely on that for parsing,
 though: TCP may still split it, and `transport.py` reassembles.
 
-### RAW_MODE
-
-Some internal connection types run unframed — no length header in either direction. Standard
-RFC always uses framed mode, and `saprfclib` implements only the framed path.
-
 ---
 
 ## NI Control Messages
 
-The NI layer handles 8-byte ASCII control messages itself, before passing data up to the RFC
-layer.
+The NI layer handles control messages itself, before passing data up to the RFC layer.
+Each is identified by an ASCII prefix:
 
-| Message      | Bytes (ASCII+NUL)       | Purpose                          |
-|--------------|-------------------------|----------------------------------|
-| `NI_PING\0`  | `4e 49 5f 50 49 4e 47 00` | NI-level keepalive ping          |
-| `NI_PONG\0`  | `4e 49 5f 50 4f 4e 47 00` | Response to NI_PING              |
-| `NI_RTERR\0` | `4e 49 5f 52 54 45 52 52` | Router error                     |
-| `NI_ROUTEAVI`| `4e 49 5f 52 4f 55 54 45` | Route availability check         |
+| Message      | Prefix bytes              | Seen as                                          |
+|--------------|---------------------------|--------------------------------------------------|
+| `NI_PONG\0`  | `4e 49 5f 50 4f 4e 47 00` | SAProuter accepting a route; 8-byte payload (`tests/golden/router/ni_pong_route_accepted.bin`) |
+| `NI_RTERR\0` | `4e 49 5f 52 54 45 52 52 00` | SAProuter refusing a route; the marker is followed by a NUL-separated `*ERR*` record, so the payload is variable-length (213 bytes in `tests/golden/router/ni_rterr_route_denied.bin`) |
 
-These are NI payloads of exactly 8 bytes — the NI header's `payload_length` is 8. Regular RFC
+`transport.py` matches both on the prefix only. Regular RFC
 data is passed through without inspection.
 
 ---
@@ -139,22 +135,31 @@ Offset  Length  Notes
                   0x050C  this frame completes the response (including every
                           single-frame reply, and client requests)
  32      2      zero in all 85 frames observed
- 34      1      CPIC rc-valid flags (bit 0x10: rc fields at [32]/[36] are valid;
-                  0x05 in registration response → bit clear = no error info)
+ 34      1      0x00 in every GW-framed golden fixture. Meaning not established.
  35      1      0x12 on exactly the two captured refusals — cpic_logon_error_response
                   and signon_incomplete_752_response — and 0 on the other 83
                   frames. [ASSUMED] that it marks a refused exchange: two frames
                   is a correlation with an independently identified category, not
                   an enumeration.
- 36      4      CPIC return code BE int32 (0 = success)
- 40      4      Additional CPIC status BE int32
- 44      8      GW connection handle: 4 ASCII digits + 4 binary bytes
+ 36      4      zero in every GW-framed golden fixture, including both refusals.
+                  [ASSUMED] a CPIC return code; a capture of a CPIC-level error
+                  that sets it would settle this.
+ 40      8      GW connection handle, 8 ASCII characters (session.py
+                  _GW_HANDLE_OFFSET = 40; e.g. stfc_connection_response.bin). 8
+                  blanks on the outbound 0x0601 connect.
+ 48      4      BE uint32 on 0x06xx data frames: 0 on client requests; 28000,
+                  0x8500 or a small value on server responses (stfc_connection_
+                  response.bin: 28000; rfcping_response.bin: 0x8500). Meaning not
+                  established. On 0x0601 frames bytes 48+ hold the partner LU
+                  name instead (see "Server registration").
  52      4      BE uint32, always 2 on responses and 0 on requests
  56      4      BE uint32: THIS FRAME'S OWN PAYLOAD LENGTH. Exact on all 16 frames
                   cross-checked, and 0 on client requests.
  60      4      BE uint32: 1 when this frame completes the response, 0 otherwise
- 64      8      SAP GW service / dispatcher name (e.g. "sapdp00 ", null-padded)
- 72      4      Trailing bytes (0x49 0x01 0x00 0x00 in registration response)
+ 64      8      0x0601 frames: GW service name ("sapdp00 " in gw_connect_response.bin).
+                  0x06CB server responses: zero, with ASCII "4103" (the codepage)
+                  at [69:73] (stfc_connection_response.bin).
+ 72      4      0x49 0x01 0x00 0x00 in gw_connect_response.bin
 ```
 
 *Sources: `gw_connect_response.bin` for the registration-response values, plus a
@@ -183,11 +188,12 @@ each was wrong in a way that looked plausible:
 The GW handshake (frames 4-13 in the session) uses different message types (`02 03`, `06 01`,
 `06 0F`, `06 05`) for session establishment. `06 CB` = RFC data appears only after handshake.
 
-**Implementation note:** Only bytes [44..51] (the GW handle) are consumed by `session.py`
-(`_GW_HANDLE_OFFSET = 40`, `_GW_HANDLE_LEN = 8`, measured from the start of the NI payload).
-Bytes [8-39] are CPIC internal state that `saprfclib` does not need to parse.
-Fields [0x20..0x23] (CPIC rc) and [0x24..0x27] (additional status) are only non-zero on error;
-successful registration returns zeros at both positions.
+**Implementation note:** all offsets in the table are NI-payload offsets. From the
+GW_CONNECT reply `session.py` reads the GW handle at [40:48] (`_GW_HANDLE_OFFSET = 40`,
+`_GW_HANDLE_LEN = 8`) and the gateway-assigned connection index at [78:80]
+(`_GW_CONN_IDX_OFFSET = 78`); from the server GW_DONE it checks the codepage echo at [69].
+The other header bytes are not parsed. (The `.json` annotation of `gw_connect_response.bin`
+counts from the start of the frame, NI prefix included, so its offsets are 4 higher.)
 
 ---
 
@@ -286,16 +292,17 @@ Evidence column: **capture** = the tag was observed on the wire in a committed f
 established.
 
 Captures drawn on: STFC_CONNECTION, STFC_EXCEPTION, STFC_DEEP_TABLE, RFC_READ_TABLE,
-STFC_CHANGING, STFC_STRUCTURE.
+STFC_CHANGING, STFC_STRUCTURE, RFC_GET_FUNCTION_INTERFACE, DDIF_FIELDINFO_GET, and the
+tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 
 | Tag (hex) | Evidence    | Role                                                                  |
 |-----------|-------------|-----------------------------------------------------------------------|
-| 0x000b    | capture     | RFC version string (e.g. "754" UTF-16LE)                             |
+| 0x000b    | capture     | RFC version string: "754" as UTF-16LE on call frames, as 3-byte ASCII in the logon frame (logon_request.bin) |
 | 0x0101    | capture     | Session info, 8 bytes (logon_request.bin; tRFC call header)          |
 | 0x0102    | capture     | Function name (UTF-16LE, e.g. "STFC_CONNECTION")                     |
 | 0x0103    | capture     | 4 bytes: `00000e0b` in a logon, `00000e09` in a tRFC call header     |
 | 0x0106    | capture     | 11 bytes, codepage descriptor (logon_request.bin)                    |
-| 0x0130    | capture     | Program name (UTF-16LE, e.g. "SAPLSTFC", padded to 80 bytes)        |
+| 0x0130    | capture     | Program name: in replies UTF-16LE padded to 80 bytes (e.g. "SAPLSTFC"); in the logon frame 7-byte ASCII "python3" (logon_request.bin) |
 | 0x0131    | [ASSUMED]   | EPP (Extended Performance Profile)                                    |
 | 0x0160    | [ASSUMED]   | Int16 field                                                           |
 | 0x0201    | capture     | Parameter name (UTF-16LE, scalar IMPORTING/EXPORTING pair)           |
@@ -303,9 +310,15 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0205    | capture     | Output table/param declaration (name UTF-16LE, one per return param) |
 | 0x0301    | capture     | TABLE param name (UTF-16LE) — binary row format                      |
 | 0x0302    | capture     | TABLE row descriptor (8 bytes; contains row count + row size)        |
-| 0x0303    | capture     | TABLE type descriptor (402 bytes; from RFC_GET_FUNCTION_INTERFACE)   |
+| 0x0303    | capture     | TABLE row data, one record per row, uncompressed (17 × 402 bytes in gfi_uncompressed_params_response.bin) |
 | 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length)     |
-| 0x0330    | capture     | TABLE header (4 bytes; part of binary TABLE encoding)                |
+| 0x0330    | capture     | TABLE DM table id, 4-byte BE uint32 (see "Binary TABLE descriptor layout") |
+| 0x0305    | capture     | SAPCOMPRESS-compressed TABLE rows, fragments of one stream (gfi_compressed_params_response.bin) |
+| 0x0306    | capture     | Empty; table end (gfi_compressed_params_response.bin, ddif_fieldinfo_rfcsi_response.bin) |
+| 0x0310    | capture     | 4-byte BE uint32 used row width, 402 in gfi_compressed_params_response.bin |
+| 0x0331    | capture     | 4-byte BE uint32 near the start of a reply (values 1 and 2 in basxml_et_data_multirow_response.bin). Meaning not established |
+| 0x0335    | capture     | Returned form of a table the client sent: 12 bytes, three BE uint32 `[10, dm_table_id, row_count]`, followed by `0x0302` and `0x0304` rows (basxml_et_data_response.bin: `[10, 1, 4]`) |
+| 0x0336    | capture     | 4-byte BE uint32 closing a `0x0335` table (basxml_et_data_response.bin) |
 | 0x0337    | [ASSUMED]   | Marker / empty record                                                 |
 | 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
 | 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
@@ -314,7 +327,7 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0415    | capture     | Message class (2 chars, e.g. "00", "FL")                             |
 | 0x0416    | capture     | Message type (1 char, e.g. "X", "E")                                 |
 | 0x0417    | capture     | ABAP exception/message number (3 chars, e.g. "000", "341")           |
-| 0x0418    | capture     | ABAP call-stack breadcrumb (`;W=…,E=…;S=…;D=…` — not parsed)         |
+| 0x0418    | capture     | ABAP call-stack breadcrumb (`;W=…,E=…;S=…;D=…`); only `E=<n>` is read, on the wRFC logon path |
 | 0x0420    | capture     | RFC return code (4B BE uint32; 0=success)                            |
 | 0x0421    | [ASSUMED]   | Auth / call context                                                   |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
@@ -348,14 +361,15 @@ NI header (4B) + APPC header (76B) + RFC marker ffff<conn idx> (4B)
     0x0205  len=16         export param decl "ECHOTEXT" (UTF-16LE)   } one per
     0x0205  len=16         export param decl "RESPTEXT" (UTF-16LE)   } export param
     0x0201  len=16         import param name "REQUTEXT" (UTF-16LE)   }
-    0x0203  ext len=510    import param value (CHAR(255) UTF-16LE, space-padded)
+    0x0203  len=510        import param value (CHAR(255) UTF-16LE, space-padded)
     0xFFFF  len=0          TLV stream terminator
++ invoke footer (8B): 0x0000 | BE16 len(tlv)=0x0288 | 0x0000 | 0x8500
 ```
 
 ### Response (server → client)
 
 ```
-NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
+NI header (4B) + APPC header (76B) + RFC marker 00000001 (4B)
 └── TLV stream:
     0x0500  len=0          call-end / response-start marker
     0x0503  len=0          success marker — a result follows
@@ -365,15 +379,14 @@ NI header (4B) + APPC header (76B) + RFC marker 00000004 (4B)
     0x0205  len=16         export param decl (schema — echos request)
     ...
     0x0201  len=16         result param name (UTF-16LE)
-    0x0203  ext len=510    result param value (CHAR(255) UTF-16LE, space-padded)
+    0x0203  len=510        result param value (CHAR(255) UTF-16LE, space-padded)
     ...                    (one name/value pair per output param)
     0x0130  len=80         calling program name "SAPLSTFC" (UTF-16LE padded)
     0x0667  len=8          float64 LE = server call duration in microseconds
     0xFFFF  len=0          TLV stream terminator
 ```
 
-### RFCPING — CONFIRMED (2026-08-26)
-
+### RFCPING
 `RFCPING` is an ordinary zero-parameter function call, not a special frame. It needs
 the same GW header, RFC marker, TLV body and invoke footer as any other call; a bare
 TLV body is rejected by the gateway, which reads the function name where it expects
@@ -418,11 +431,11 @@ reader, both of which produced real bugs (issue #7):
   before it gets there and misreads every subsequent tag.
 
 Note the response RFC marker is `00000002` here, where the STFC_CONNECTION response
-above shows `00000004`. The marker value varies; the 80-byte strip keys off the
+above shows `00000001`. The low half is the connection index the gateway assigned (see
+"RFC Marker"), so it differs per connection; the 80-byte strip keys off the
 leading `0x06` GW-frame byte and is unaffected either way.
 
-### XML-encoded table rows (0x3c02 / 0x3c05) — CONFIRMED (2026-08-28)
-
+### XML-encoded table rows (0x3c02 / 0x3c05)
 Some tables come back as plain-text XML instead of binary rows. An empty `0x3c02`
 brackets the block on both sides and the XML is carried in `0x3c05` chunks:
 
@@ -439,8 +452,10 @@ the flag that avoids truncating STRING columns into `DATA`'s fixed work area. Wi
 the flag set, `DATA` still arrives declared (`0x0301`/`0x0330`/`0x0302`) but carries
 no rows.
 
-Golden fixtures: `tests/golden/framing/rfc_read_table_response.bin` (empty table) and
-`basxml_et_data_response.bin` (one populated row).
+Golden fixtures: `tests/golden/framing/basxml_et_data_response.bin` (flag set, one
+populated row; `DATA` declared with row count 0) and
+`rfc_read_table_response.bin` (flag not set: `ET_DATA` arrives as an empty
+`<ET_DATA></ET_DATA>` block while `DATA` carries its 2 rows as `0x0304` records).
 
 Two properties that are easy to get wrong:
 
@@ -480,13 +495,16 @@ chooses, not on item boundaries**. Golden fixture:
     refused with `NotImplementedError` rather than fed to the text reader, which
     would silently produce nonsense.
 
-### Compressed tables — CONFIRMED (2026-08-26)
+### Compressed tables
 
-A table larger than roughly 8 KB is sent SAPCOMPRESS-compressed under tag `0x0305`
-instead of one `0x0303`/`0x0304` record per row. The switch happens when
-`row_size × row_count >= 0x2001` (8193). This is not a rare path: it is every
-function module with enough parameters, so `RFC_GET_FUNCTION_INTERFACE` metadata for
-most BAPIs arrives compressed.
+A large table is sent SAPCOMPRESS-compressed under tag `0x0305` instead of one
+`0x0303`/`0x0304` record per row. In the committed captures a `PARAMS` table of
+404 × 17 = 6868 bytes arrives uncompressed (`gfi_uncompressed_params_response.bin`) and
+one of 404 × 44 = 17776 bytes compressed (`gfi_compressed_params_response.bin`). The
+exact size at which the server switches is not established: [ASSUMED] somewhere between
+those two sizes, roughly 8 KB; captures of tables just either side of a candidate
+threshold would settle it. This is not a rare path: `RFC_GET_FUNCTION_INTERFACE`
+metadata for any function module with enough parameters arrives compressed.
 
 Golden fixture: `tests/golden/framing/gfi_compressed_params_response.bin` — the GFI
 response for `BAPI_USER_GET_DETAIL` (44 parameters, 404 × 44 = 17776 bytes).
@@ -518,18 +536,19 @@ The joined payload then carries an 8-byte wrapper before the SAPCOMPRESS stream:
 
 Trailing bytes after the compressed stream pad the last record to its fixed size.
 
-!!! warning "Two row shapes, two slicing rules"
-    Per-row records and a compressed blob cannot be handled the same way.
+!!! warning "Two row shapes, two widths"
+    The same row type reaches the client at two widths.
 
     * **Per-row `0x0303`/`0x0304`** — each record is one row at its *used* width. The
-      `0x0302` stride may be larger: a structure-definition response declared
-      `row_size=140` while every record was 138 bytes.
-    * **Compressed `0x0305`** — the decompressed blob carries no row boundaries, so
-      it must be sliced by the `0x0302` stride.
+      `0x0302` row size may be larger: `gfi_uncompressed_params_response.bin` declares
+      `row_size=404` while each of its 17 `0x0303` records is 402 bytes.
+    * **Compressed `0x0305`** — the decompressed blob carries no row boundaries; here
+      it is 17776 bytes for 44 rows, i.e. 404 per row.
 
-    Slicing per-row records by the declared stride misaligns every row after the
-    first; slicing a decompressed blob by the record length is impossible. The
-    `0x0302` row size is authoritative only for the compressed form.
+    So neither the `0x0302` row size nor a layout width can be used to slice both
+    forms. `codec.py` takes the row width as the byte count of the table's rows divided
+    by the row count `0x0302` declares, and refuses a byte count that does not divide
+    evenly. That gives 402 for the per-row form and 404 for the compressed one.
 
 ### Exception Response (server → client when ABAP exception raised)
 
@@ -574,7 +593,7 @@ NI header (4B) + GW header (0x0601 GW_CONNECT)
   [10]     0x01 / [16] 0xC0 / [21] 0x04 / [22] 0x00   as captured (server_registration_request.bin; the gateway's replies carry 0x06 at [21])
   [40:48]  8 spaces        no GW handle yet on outbound connect
   [48:56]  "NWRFC   "      remote RFC partner LU name (NOT the PROGRAM_ID)
-  [76:80]  ffff ffff       request marker (ACK flips [78:80] → 0004)
+  [76:80]  0000 ffff       request marker (ACK carries 0000 0004)
   variable: local IP / NI hostname / service / OS user / time() blob @ [122:138]
 ```
 
@@ -720,8 +739,10 @@ Confirmed from STFC_STRUCTURE capture (2026-06-28). Golden fixtures:
 `tests/golden/framing/stfc_structure_response.bin` (1438B).
 
 STRUCTURE params (ABAP structures) use the same `0x0201 + 0x0203` pair as scalars.
-The value is the raw binary struct (each field encoded per its ABAP type, in declaration order,
-no padding between fields beyond each field's natural size). Length = sum of field byte widths.
+The value is the raw binary struct: each field encoded per its ABAP type, in declaration order,
+at its aligned offset. Fields are **not** packed tightly. In `stfc_structure_request.bin` a
+pad byte follows the INT1 at offset 12, and 2 pad bytes precede the INT4 at offset 24. The
+alignment per DDIC type is in "Row width: the structure's padded width" below.
 
 ```
 Client → server (IMPORTSTRUCT with RFCTEST struct):
@@ -747,8 +768,7 @@ Client → server (IMPORTING table with rows):
     ...
     0x0205  len=20         expected export table name "EXPORT_TAB" (UTF-16LE)
     0x3c02  len=0          BASXML section start (marker, empty)
-    0x3c05  len=12         raw ASCII: <IMPORT_TAB>
-    0x3c05  len=217        raw ASCII: <item><I>1</I><C>ROW01</C><STR>string1</STR>...</item>...
+    0x3c05  len=217        raw ASCII: <IMPORT_TAB><item><I>1</I><C>ROW01</C>...</item>...</IMPORT_TAB>
     0x3c02  len=0          BASXML section end (marker, empty)
     0xFFFF  len=0          TLV terminator
 
@@ -780,8 +800,8 @@ RFC_READ_TABLE capture (2026-06-28). Golden fixtures:
 ```
 Server → client (TABLES param with rows):
     0x0301  len=8          table name "DATA" (UTF-16LE)
-    0x0330  len=4          table header [UNKNOWN; 4 bytes]
-    0x0302  len=8          row descriptor [UNKNOWN; 8 bytes: contains row count + width]
+    0x0330  len=4          DM table id (see "Binary TABLE descriptor layout")
+    0x0302  len=8          row width + row count (see "Binary TABLE descriptor layout")
     0x0304  len=1024       row 1 data (UTF-16LE, padded to ABAP table row width)
     0x0304  len=1024       row 2 data (UTF-16LE, padded to ABAP table row width)
     ...                    one 0x0304 per row
@@ -870,32 +890,35 @@ def parse_tlv(data: bytes, offset: int = 0) -> tuple[int, bytes, int]:
 **Source:** `tests/golden/framing/stfc_connection_request.bin` (740 bytes)
 Live capture SAP A4H sysnr=00 port=3300, STFC_CONNECTION call.
 
-**Note on offsets:** All frame offsets below are from byte 0 of the frame (including NI
-prefix). GW header occupies bytes [0x04:0x50] = 76 bytes. RFC marker at [0x50:0x54].
-TLV stream starts at [0x54].
+**Note on offsets:** the left column is the offset from byte 0 of the frame (NI prefix
+included). The GW header occupies [0x04:0x50], the RFC marker [0x50:0x54], and the TLV
+stream starts at 0x54. GW header offsets in the right column are NI-payload offsets, as in
+the "APPC/Gateway Header" table. Generated from the fixture bytes.
 
 ```
-Offset   Bytes                                    Field
-──────── ──────────────────────────────────────── ────────────────────────────────────
-0x0000:  00 00 02 e0                              NI payload_length = 736 (BE uint32)
-0x0004:  06 cb 02 00 ff ff 00 00  00 00 00 00     APPC/GW header byte [0:11]
-0x0010:  00 00 00 00 00 00 00 00  00 00 00 08     APPC/GW header byte [12:23]
-0x0020:  00 00 05 0c 00 00 00 00  00 00 00 00     APPC/GW header byte [24:35]
-0x002c:  37 35 35 36 38 34 34 32                  connection handle "75568442" (ASCII) [GW40:48]
-0x0034:  00 00 00 00 00 00 00 00  ...×28 zeros    APPC/GW header trailing zeros
-0x0050:  ff ff 00 01                              RFC stream marker (NOTE: this golden
-                                                  was captured from older SDK; current
-                                                  binary uses ff ff 00 04 — see RFC Marker section)
-0x0054:  05 02 00 00 05 02                        TLV 0x0502 len=0 (call-start)
-0x005a:  00 0b 00 06 37 00 35 00  34 00 00 0b     TLV 0x000b len=6 "754" (version)
-0x0066:  01 02 00 1e                              TLV 0x0102 len=30 (func name open)
-0x006a:  53 00 54 00 46 00 43 00  5f 00 43 00     "STFC_" (UTF-16LE)
-0x0072:  4f 00 4e 00 4e 00 45 00  43 00 54 00     "ONNECT" (UTF-16LE)
-0x007a:  49 00 4f 00 4e 00                        "ION" (UTF-16LE)
-0x007d:  01 02                                    TLV 0x0102 close
-0x007f:  05 12 00 00 05 12                        TLV 0x0512 len=0 (param section)
-...      [export param declarations + REQUTEXT name/value pair]
-0x02e6:  ff ff 00 00 ff ff                        TLV 0xFFFF len=0 (terminator)
+Offset   Bytes                                            Field
+0x0000:  00 00 02 e0                                      NI payload_length = 736 (BE uint32)
+0x0004:  06 cb 02 00 ff ff 00 00                          GW header [0:8]
+0x000c:  00 00 00 00 00 00 00 00                          GW header [8:16]
+0x0014:  00 00 00 00 00 00 00 00                          GW header [16:24]
+0x001c:  00 00 00 08 00 00 05 0c                          GW header [24:32]
+0x0024:  00 00 00 00 00 00 00 00                          GW header [32:40]
+0x002c:  37 35 35 36 38 34 34 32                          GW handle "75568442" (ASCII), GW header [40:48]
+0x0034:  00 00 00 00 00 00 00 00                          GW header [48:56]
+0x003c:  00 00 00 00 00 00 00 00                          GW header [56:64]
+0x0044:  00 00 00 00 00 00 00 00                          GW header [64:72]
+0x004c:  00 00 00 00                                      GW header [72:76]
+0x0050:  ff ff 00 01                                      RFC marker: FF FF + connection index 1
+0x0054:  05 02 00 00 05 02                                TLV 0x0502 len=0 (call-start)
+0x005a:  00 0b 00 06 37 00 35 00 34 00 00 0b              TLV 0x000b len=6 "754" (UTF-16LE) + close tag
+0x0066:  01 02 00 1e                                      TLV 0x0102 len=30 (function name)
+0x006a:  53 00 54 00 46 00 43 00 5f 00 43 00 4f 00 4e 00  "STFC_CON" (UTF-16LE)
+0x007a:  4e 00 45 00 43 00 54 00 49 00 4f 00 4e 00        "NECTION" (UTF-16LE)
+0x0088:  01 02                                            TLV 0x0102 close tag
+0x008a:  05 12 00 00 05 12                                TLV 0x0512 len=0 (parameter section)
+...                                                       [0x0205 ECHOTEXT, 0x0205 RESPTEXT, 0x0201 REQUTEXT, 0x0203 len=510]
+0x02d6:  ff ff 00 00 ff ff                                TLV 0xFFFF len=0 (terminator)
+0x02dc:  00 00 02 88 00 00 85 00                          invoke footer: 0000 | BE16 0x0288 = TLV length 648 | 0000 | 8500
 ```
 
 See `tests/golden/framing/stfc_connection_request.json` for full field-by-field annotation.
@@ -904,22 +927,15 @@ See `tests/golden/framing/stfc_connection_request.json` for full field-by-field 
 
 ## Open Questions
 
-!!! note "RESOLVED: APPC/Gateway header (76 bytes) field layout"
-    Fields [8-39] were decoded against the `gw_connect_response.bin` golden fixture. Key
-    fields: [16] flags, [21] sub-type, [24-27] CPIC handle/sequence, [34] rc-valid flag,
-    [36-39] CPIC return code, [40-43] additional status, [44-51] gateway handle.
-    `saprfclib` consumes only [44-51]; everything else is CPIC internal state it does not
-    need. Full layout in the "APPC/Gateway Header" section above.
-
 !!! note "MEDIUM: Port 3200 (dispatcher) wire format"
     All captures used port 3300 (gateway). If a client connects directly to port 3200
     (dispatcher), does the APPC header still appear? Resolve by capturing both ports against
     the same system.
 
 !!! note "LOW: COM_HEAD scope"
-    COM_HEAD is confirmed present in the logon frame and absent from subsequent call frames.
-    Not yet verified: whether it also appears on the first message of a tRFC/qRFC/bgRFC
-    exchange, or is strictly session establishment.
+    COM_HEAD is present in the logon frame and absent from subsequent call frames, tRFC
+    submits and confirms included (tests/golden/trfc/). Not verified: a tRFC/qRFC/bgRFC
+    exchange that is the first message on its connection.
 
 !!! note "LOW: Classic RFC (non-NG) wire format"
     NG-RFC uses COM_HEAD + TLV. Classic CPI-C connections use a different format. Every system
@@ -933,14 +949,12 @@ See `tests/golden/framing/stfc_connection_request.json` for full field-by-field 
 Items where the wire behaviour is documented but incompletely confirmed, or confirmed but not
 yet implemented. Each states what is known, what is not, and the consequence of the gap.
 
-### SAProuter NI_ROUTE prefix — CONFIRMED (corrected 2026-11-08)
-
+### SAProuter NI_ROUTE prefix
 Layout, the multi-router correction and where the client connects: see
-[message_server.md → NI_ROUTE layout](message_server.md#ni_route-layout-confirmed-corrected-2026-11-08).
+[message_server.md → NI_ROUTE layout](message_server.md#ni_route-layout).
 Golden fixtures under `tests/golden/router/`, replayed in CI.
 
-### Message-server SAPMS group logon — CONFIRMED (2026-06-27)
-
+### Message-server SAPMS group logon
 The `**MESSAGE**` server-list frame is parsed by `parse_sapms_server_list` in
 `src/saprfclib/router.py` and validated against `tests/golden/router/sapms_server_list.bin`
 (598 bytes, 3 entries).
@@ -988,24 +1002,27 @@ Entry  Size  Field              Notes
 — the count is inferred from the remaining bytes. [ASSUMED] that a frame always contains whole
 entries (`size % 160 == 0`).
 
-**Server selection:** the first entry with `port > 0` is the active application server.
-`sysnr = (port - 3200) // 100` (port 3200 → sysnr 0).
+**Server selection:** `parse_sapms_server_list` returns every entry, port 0 included,
+and leaves the choice to the caller. In the captured frame one of the three entries has a
+non-zero port, 3200, which is a dispatcher port (3200 + sysnr). Where the library derives a
+system number from a message-server port, on the HTTP server-list path, it computes
+`sysnr = port - 3200` and rejects results outside 0–99 (`router.py`). [ASSUMED] that a
+non-zero port marks an active server: the capture has a single active server, so a
+capture with several would settle it.
 
 **Still [ASSUMED]:** `key` (offset 15), `msg_type` / `direction` (70/71), `opcode_field` /
 `sub_opcode` (114/116), `field3` (80-120), `ip_addr_secondary` (141), `trailing_flags` (147),
 and the inferred entry-count mechanism. None of these block correct server selection, which is
 why they remain open.
 
-### Function-interface metadata column layout — CONFIRMED (2026-06-27)
-
+### Function-interface metadata column layout
 `RFC_GET_FUNCTION_INTERFACE` returns 12 columns: `PARAMCLASS, PARAMETER, TABNAME, FIELDNAME,
 EXID, POSITION, OFFSET, INTLENGTH, DECIMALS, DEFAULT, PARAMTEXT, OPTIONAL`. `EXID` is a
 single-character type code (`'C'` = CHAR, `'I'` = INT4, …); `INTLENGTH` and `OFFSET` are
 Unicode byte counts, not character counts — the usual 2× trap. Parsed by `_parse_params_row`
 in `metadata.py`, live-verified.
 
-#### TABLES params: the direction types the parameter, not EXID — CONFIRMED
-
+#### TABLES params: the direction types the parameter, not EXID
 A TABLES parameter is declared with the `EXID` of its **row structure**, not of the table.
 `RFC_READ_TABLE`'s `DATA`, `FIELDS` and `OPTIONS` all come back as `PARAMCLASS='T'` with
 `EXID='u'` (structure) and `TABNAME` naming the row type (`TAB512`, `RFC_DB_FLD`,
@@ -1031,8 +1048,7 @@ A TABLES param also needs its row layout attached — the secondary DDIC-layout 
 `TABNAME` runs for `RFCTYPE_TABLE` as well as `RFCTYPE_STRUCTURE`, otherwise the descriptor
 reaches the encoder with `type_desc=None` and no rows can be laid out.
 
-### DDIC layout resolution: `DDIF_FIELDINFO_GET`, not `RFC_GET_STRUCTURE_DEFINITION` — CONFIRMED (2026-09-30)
-
+### DDIC layout resolution: `DDIF_FIELDINFO_GET`, not `RFC_GET_STRUCTURE_DEFINITION`
 The reference library (NW RFC SDK 750 PL18 / pyrfc) resolves a DDIC structure or table's
 field layout with **`DDIF_FIELDINFO_GET`**, keyed on `TABNAME`. `RFC_GET_STRUCTURE_DEFINITION`
 is a *different* RFC, and the reference client calls DDIF (captures of its metadata lookups).
@@ -1093,8 +1109,7 @@ also carries a second table (`FIXED_VALUES`), so the `DFIES_TAB` byte range must
     `DEC`/`CURR`/`QUAN`→BCD, `STRG`/`SSTR`→STRING, `RSTR`→XSTRING, `D16*`/`D34*`→
     DECFLOAT16/34, …).
 
-##### Layout: trust the server's OFFSET on a Unicode reply — CONFIRMED (2026-09-30, live)
-
+##### Layout: trust the server's OFFSET on a Unicode reply
 A live `DDIF_FIELDINFO_GET` reply carries the field placement the kernel actually uses,
 including **alignment padding** and the **flattened nested layout** that `ALL_TYPES='X'`
 produces. Verified against a live SAP kernel for `SYST` (`DDIF_FIELDINFO_GET(TABNAME='SYST',
@@ -1118,8 +1133,7 @@ where a char field's `INTLEN` is `2 × LENG` — `_build_type_desc_from_ddif` ta
     enough for a descriptor that is never used to slice real bytes, while the Unicode branch is
     exact for every real system. Type always comes from `DATATYPE`.
 
-##### Row width: the structure's padded width — CONFIRMED (2026-11-12, live)
-
+##### Row width: the structure's padded width
 A structure's width is the end of its last field **rounded up to the largest alignment among
 its fields** — not the end of the last field. The reference client sends `ARFCRDATA` rows 1918
 bytes wide, though the last field ends at 1917 (tRFC capture,
@@ -1155,8 +1169,7 @@ fields they care about — `RFC_READ_TABLE`'s `FIELDS` rows are the canonical ca
 rather than skipped: fixed-width character fields must land blank-padded and numeric fields
 zero-padded, so leaving the buffer's NUL fill in place would put the wrong bytes on the wire.
 
-### Logon password scrambling (tag 0x0117) — CONFIRMED
-
+### Logon password scrambling (tag 0x0117)
 Tag `0x0117` (17 bytes) is not a hash. It is a reversible byte cipher over the password:
 `seed (4B LE) + scramble(password_bytes, seed)`. The seed is stored **little-endian**, not
 big-endian. Implemented as `_scramble_password` in `src/saprfclib/connection.py` and verified
@@ -1167,16 +1180,23 @@ against a live logon. See [handshake.md](handshake.md) for the derivation.
     are effectively in the clear on the network. Use SNC or WebSocket RFC over TLS for any
     connection that leaves a trusted segment.
 
-### System-failure error detail — NOT IMPLEMENTED
+### System-failure error detail
 
-`AbapSystemFailure` currently exposes only `message`. The full error-info field set
-(return code, ABAP message class/type/number, message variables V1–V4, group, key) is not
-parsed out of the response TLV, and the tags carrying it on a system failure have not been
-identified in a capture. Consequence: less diagnostic detail on system failures than a C-SDK
-client provides. Not a correctness problem for the returned data.
+`AbapSystemFailure` carries `msg_class`, `msg_type`, `msg_number`, `msg_v1`–`msg_v4` and
+`message` (`exceptions.py`). Two paths fill it:
 
-### Multi-frame requests — CONFIRMED (2026-11-08)
+* **wRFC logon** — a LOGON reply carrying `0x0403`/`0x0411` and `0x0402` becomes an
+  `AbapSystemFailure` with class, type and number from `0x0415`–`0x0417`. The message
+  carries the `E=<n>` code from `0x0418` plus the key and text (`connection.py`; golden
+  fixture `wrfc_logon_receive_error.bin`).
+* **Invoke reply with a non-zero `0x0420`** — `invoke.py` reads `0x0415`–`0x0417`,
+  `0x0411`–`0x0414` and `0x0402` into those fields. [ASSUMED] that a system failure
+  uses the same tags as an exception: no committed fixture carries a non-zero `0x0420`,
+  so a capture of a short dump answered through RFC would settle it.
 
+Group and key are not exposed on this exception.
+
+### Multi-frame requests
 The client side has the same limit: a gateway resets the connection when one client
 frame carries a TLV stream of more than **28000 bytes**. Probed live by growing one
 request byte by byte: a 27998-byte stream (plus the 8-byte footer) is accepted in a single
@@ -1254,7 +1274,10 @@ confirmed structure and answers exactly the question being asked.
 reads another frame:
 
 - **complete** — the walk reached the terminator.
-- **truncated** — at least one record parsed, then a record ran past the end.
+- **truncated** — at least one record parsed, and then either a record ran past the end
+  or the buffer ended exactly on a record boundary with no terminator. The second case is
+  a gateway chunk that happened to end between two fixed-width `0x0305` records (issue #44;
+  fixtures `multiframe_boundary_split_part1.bin` / `_part2.bin`).
 - **not_tlv** — nothing parsed. A CPIC-layer refusal lands here: its body is
   EBCDIC, so record zero claims 50629 bytes inside a 97-byte frame.
 
@@ -1269,7 +1292,7 @@ Every continuing frame in the 22-frame reply carried exactly 28000 bytes of
 payload (28080 with the header). That is why a `DD03L` read crosses into several
 frames at around 2000 rows, and why 20000 rows needed 22 of them.
 
-#### Confirmed: bytes 56–59 are the frame's own payload length
+#### Bytes 56–59 are the frame's own payload length
 
 BE uint32, exact on all 16 frames checked — the 2 above plus 9 independently
 captured golden fixtures, where it equals the body length on every server
@@ -1344,9 +1367,10 @@ takes 3 s of wall clock is a very different problem depending on whether
 `ConnectionMetrics` measures latency with a local clock, which cannot make that
 distinction; the field is what closes the gap.
 
-The tag is not guaranteed present in every response — it appears in the RFCPING,
-STFC_CONNECTION and RFC_PING_AND_WAIT replies captured so far, and no rule has
-been established that requires it. Any reader must treat absence as "unknown"
+The tag is not guaranteed present in every response. It appears in every successful
+invoke reply among the golden fixtures (the 16 listed under "Tag 0x0503" below) and in
+the RFC_PING_AND_WAIT probe replies. Exception replies do not carry it
+(`stfc_exception_response.bin`), and no rule has been established that requires it. Any reader must treat absence as "unknown"
 rather than zero.
 
 ### Message variables, and a free-text tag that does not exist
@@ -1390,13 +1414,24 @@ dropping them. On this kernel that is the common case, not an edge case.
 
 ### Tag 0x0503 — the success marker
 
-An empty record, and its presence is the signal. Across all ten RFC-layer replies
-in `tests/golden/`, `0x0503` is present **exactly when `0x0417` is absent**:
+An empty record, and its presence is the signal. Across the GW-framed invoke replies in
+`tests/golden/`, `0x0503` is present **exactly when `0x0417` is absent**:
 
 | | `0x0503` | `0x0417` | `0x0420` |
 |---|---|---|---|
-| successful replies (7) | present | absent | present |
-| exception replies (3) | absent | present | absent |
+| successful replies (16) | present | absent | present |
+| exception replies (4) | absent | present | absent |
+
+Successful: `basxml_et_data_response`, `basxml_et_data_multirow_response`,
+`ddif_fieldinfo_rfcsi_response`, `ddif_fieldinfo_bapilogond_response`,
+`gfi_compressed_params_response`, `gfi_uncompressed_params_response`, `ping_gfi_reply`,
+`rfc_read_table_response`, `rfc_read_table_delta_response`, `rfcping_response`,
+`stfc_changing_response`, `stfc_connection_response`, `stfc_deep_table_response`,
+`stfc_structure_response`, `struct_definition_empty_response` (all `framing/`) and
+`serialization/decfloat_response`. Exceptions: `stfc_exception_response`,
+`exception_msg_variables_response`, `gfi_fu_not_found_response`,
+`signon_incomplete_752_response`. One reply carries neither marker:
+`server_response.bin`, a refused logon carrying only `0x0402` text after `0x0500`.
 
 So the two are complementary markers for the same question — whether a result or
 an exception follows — and `0x0420` (the return code) tracks the success side.
@@ -1436,50 +1471,47 @@ purpose-built function module raising one message with four distinct variables.
 
 | Tag | Was assumed to be | Outcome |
 |-----|-------------------|---------|
-| `0x0412`–`0x0414` | Message variables V2–V4 | **Confirmed.** `ALPHA1`, `BRAVO2`, `CHARLIE3`, `DELTA4` each landed in its own tag, in order. The values were distinct on purpose — four copies of one string would have parsed identically with the tags in any order. Fixture `exception_msg_variables_response.bin`. |
+| `0x0412`–`0x0414` | Message variables V2–V4 | Live: `ALPHA1`, `BRAVO2`, `CHARLIE3`, `DELTA4` each landed in its own tag, in order. The values were distinct on purpose — four copies of one string would have parsed identically with the tags in any order. Fixture `exception_msg_variables_response.bin`. |
 | `0x040B` | Free-text exception message | **Disproven and removed.** A reply carrying a genuine four-variable message is exactly what would populate a free-text tag, and `0x040B` is absent from it. So is `0x0402`: kernel 793 sends no assembled text for a classic exception at all, leaving the client to build the sentence from class, number and variables. |
 
 The `0x0418` call-stack breadcrumb is now parsed, though only for the `E=<n>` code
 inside it — that is where the number in issue #14 came from, and it had been
-hardcoded in three places rather than read. The rest of its grammar is still
+hardcoded in two places rather than read (`connection.py`). The rest of its grammar is still
 unparsed.
 
-### Binary TABLE descriptor layout (0x0302 / 0x0330) — CONFIRMED
+### Binary TABLE descriptor layout (0x0302 / 0x0330)
 
-`0x0302` is 8 bytes: `[BE uint32 row width][BE uint32 row count]`. The order was
-previously inferred by pattern-matching and is now confirmed independently, from
-a single reply carrying two tables with different counts:
+`0x0302` is 8 bytes: `[BE uint32 row width][BE uint32 row count]`. The order is settled
+by a single reply carrying two tables with different counts, golden fixture
+`tests/golden/framing/gfi_uncompressed_params_response.bin`:
 
 | table | `0x0330` | `0x0302` | `0x0303` records that followed |
 |-------|----------|----------|-------------------------------|
-| `PARAMS` | `00000001` | `00000194 00000003` → 404, 3 | 3 |
-| `RESUMABLE_EXCEPTIONS` | `00000002` | `0000003e 00000000` → 62, 0 | 0 |
+| `PARAMS` | `00000004` | `00000194 00000011` → 404, 17 | 17 |
+| `RESUMABLE_EXCEPTIONS` | `00000005` | `0000003e 00000000` → 62, 0 | 0 |
 
-Counts of 3 and 0 against 3 and 0 records settle which uint32 is which — a single
-table could not, since either reading fits one number. The widths match what the
-same reply declares for those fields (`uc-len 404` and `uc-len 62`), and `0x0330`
-is a per-table sequential id rather than an opaque four bytes.
+Counts of 17 and 0 against 17 and 0 records settle which uint32 is which. A single
+table could not, since either reading fits one number. `0x0330` counts up per table
+within a reply: 4 and 5 here, and `0x1f`, `0x20`, `0x21` for `DATA`, `FIELDS` and
+`OPTIONS` in `rfc_read_table_response.bin`.
 
 **The declared width is not always the transmitted record length.** In that same
-reply each `0x0303` record is **402** bytes where the width says 404. It matters
-because the two forms are read differently and only one of them may use the
-width:
+reply each `0x0303` record is **402** bytes where the width says 404:
 
-* uncompressed `0x0303` — each record is one row, so row boundaries come from
-  the records. Splitting the concatenated bytes by the declared width instead
-  would drift two bytes per row.
-* compressed `0x0305` — there are no per-row boundaries, so the width is the row
-  stride and is correct there: a 44-row `BAPI_USER_GET_DETAIL` interface
-  decompresses to exactly 17776 bytes, which is 44 × 404.
+* uncompressed `0x0303`: each record is one row. Splitting the concatenated bytes by
+  the declared width would drift two bytes per row.
+* compressed `0x0305`: there are no per-row boundaries. A 44-row
+  `BAPI_USER_GET_DETAIL` interface (`gfi_compressed_params_response.bin`) decompresses
+  to exactly 17776 bytes, which is 44 × 404.
 
-`saprfclib` treats `0x0302` as informational when reading and takes rows from the
-records, so it is right in both cases; the note is here because the obvious
-simplification is wrong.
+`saprfclib` never slices by the `0x0302` width. `codec.py` takes the row width as the
+table's byte count divided by the `0x0302` row count, which gives 402 for the first form
+and 404 for the second. The note is here because the obvious simplification is wrong.
 
-### Unsupplied optional CHANGING parameters — UNCONFIRMED
+### Unsupplied optional CHANGING parameters [ASSUMED]
 
-Supplied CHANGING parameters use `0x0201` + `0x0203`, same as IMPORTING — confirmed. Not
-confirmed: whether an *unsupplied* optional CHANGING parameter should be omitted from the
+Supplied CHANGING parameters use `0x0201` + `0x0203`, same as IMPORTING (live,
+`stfc_changing_request.bin`). Not established: whether an *unsupplied* optional CHANGING parameter should be omitted from the
 request entirely or sent as a zero-value placeholder. `saprfclib` omits it, matching its policy
 for IMPORTING and EXPORTING. If a given function module expects an explicit placeholder, the
 call would fail at the ABAP layer rather than silently misbehave.
@@ -1494,5 +1526,4 @@ call would fail at the ABAP layer rather than silently misbehave.
 
 ---
 
-*Last updated: 2026-06-28.*
 *Captures: SAP NetWeaver 7.58, sysnr=00, port=3300.*

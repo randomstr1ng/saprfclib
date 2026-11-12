@@ -1,12 +1,11 @@
 # SOCKS5 Proxy Transport (SAP BTP Connectivity Proxy)
 
-**Status:** CONFIRMED — a live connection through an SAP BTP Connectivity Proxy SOCKS5
+**Evidence:** a live connection through an SAP BTP Connectivity Proxy SOCKS5
 endpoint + Cloud Connector completed and the `STFC_CONNECTION` call round-tripped
 (`nohat-rfc-working.pcap`, 2026-10-02, SAP A4H). The no-auth (0x00) path, the CONNECT
-request/reply (RFC 1928), and the `gwhost` requirement are all confirmed live. The 0x80
-JWT frame layout is from SAP's own published documentation (CC-BY 4.0) and reference
-sample; it is still awaiting a live untrusted-mode capture.
-**Confidence:** HIGH.
+request/reply (RFC 1928), and the `gwhost` requirement were all seen live. The 0x80
+JWT frame layout is **[ASSUMED]**: it follows SAP's published documentation (CC-BY 4.0) and
+reference sample, and no live untrusted-mode capture exists yet.
 
 ---
 
@@ -103,8 +102,9 @@ different places**, and through a proxy they are not the same name:
   Connector. For a Connectivity Proxy this is the *virtual host* configured in the
   Cloud Connector (e.g. `s4-2025-raw`).
 - The **GW handshake frames** (`0x0601` GW_CONNECT and `0x060f` GW_INFO) carry a
-  gateway host that the **server-side gateway resolves locally** — byte `[80:192]`
-  of the `0x060f` frame. The generic SOCKS5 tunnel forwards raw TCP, so the Cloud
+  gateway host that the **server-side gateway resolves locally** — payload bytes `[80:192]`
+  of the `0x060f` frame (frame bytes `[84:196]` of `gw_info_proxy.bin`, which includes
+  the 4-byte NI prefix). The generic SOCKS5 tunnel forwards raw TCP, so the Cloud
   Connector does not rewrite this field (unlike its RFC-aware protocol handler); the
   virtual host reaches the gateway unchanged and cannot be resolved there.
 
@@ -113,7 +113,7 @@ exchange and GW_CONNECT succeed, then the gateway answers the `0x060f` frame wit
 
 ```
 *ERR* hostname 's4-2025-raw' unknown … NI (network interface) …
-      SAP-Gateway on host vhcala4hci / sapgw00
+      SAP-Gateway on host sapdemo1 / sapgw00
 ```
 
 and tears the conversation down, so the following RFC call fails with
@@ -131,7 +131,7 @@ conn = saprfclib.connect(
 )
 ```
 
-**CONFIRMED (2026-10-02, `nohat-rfc-working.pcap`):** with `gwhost="198.51.100.9"`
+**Live (2026-10-02, `nohat-rfc-working.pcap`):** with `gwhost="198.51.100.9"`
 (the SAP system's internal IPv4) the gateway accepted the `0x060f` frame and the
 `STFC_CONNECTION` call returned its `ECHOTEXT`. The exact accepted frame is committed
 as `tests/golden/handshake/gw_info_proxy.bin`, and
@@ -141,8 +141,8 @@ a hostname works too if the gateway can resolve it.
 
 ## Security (D-41, threat T-07-PROXY-CRED)
 
-The JWT, the OAuth `client_secret`, and any proxy password are used only to build wire
-bytes. They never enter a log record or a `ProxyError` message; a failure reports the
+The JWT and the OAuth `client_secret` are used only to build wire bytes (there is no
+proxy password: the RFC 1929 method is not offered). They never enter a log record or a `ProxyError` message; a failure reports the
 SOCKS5 reply code and its meaning only. `fetch_connectivity_token` refuses a non-`https`
 `token_url` rather than send the secret in cleartext.
 
@@ -159,7 +159,7 @@ SOCKS5 reply code and its meaning only. `fetch_connectivity_token` refuses a non
 
 ## Known gaps / `[ASSUMED]`
 
-- The no-auth (0x00) path is confirmed live (see Status). **[ASSUMED]** the 0x80 JWT frame
+- The no-auth (0x00) path was seen live (see Evidence above). **[ASSUMED]** the 0x80 JWT frame
   is confirmed against two SAP sources but not yet against a live untrusted-mode capture; a
   capture of a real 0x80 handshake would promote it to tier-1.
 - The message-server resolve leg (`mshost`) still connects to the message server

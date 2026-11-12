@@ -1,0 +1,75 @@
+{
+ "fixture": "string_xstring",
+ "capture_source": "live capture 2026-11-12: the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) calling Z_SAPRFCLIB_STRINGS, a purpose-built remote-enabled function module (local object on an S/4HANA ABAP system, kernel 793) with STRING, XSTRING, NUMC(10) (data element NUMC10) and RAW(16) (SYSUUID_X16) parameters; it echoes its importing values and returns fixed ones. Values are the 0x0203 records of the call (C>S) and the reply (S>C).",
+ "evidence": "tier 1 live capture. The reference client decoded every reply value to the 'value' shown.",
+ "values": [
+  {
+   "dir": "C>S",
+   "parameter": "IV_STR",
+   "type": "STRING",
+   "value": "Hello",
+   "hex": "48656c6c6f00"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_STR_K",
+   "type": "STRING",
+   "value": "Grüße €",
+   "hex": "4772c3bcc39f6520e282ac00"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_STR",
+   "type": "STRING",
+   "value": "",
+   "hex": "00",
+   "note": "reply for an unset STRING"
+  },
+  {
+   "dir": "C>S",
+   "parameter": "IV_XSTR",
+   "type": "XSTRING",
+   "value_hex": "deadbeef",
+   "hex": "deadbeef"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_XSTR_K",
+   "type": "XSTRING",
+   "value_hex": "0102feff",
+   "hex": "0102feff"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_XSTR",
+   "type": "XSTRING",
+   "value_hex": "",
+   "hex": "",
+   "note": "empty XSTRING: an empty 0x0203 record"
+  },
+  {
+   "dir": "C>S",
+   "parameter": "IV_NUM",
+   "type": "NUM",
+   "length": 10,
+   "value": "0000000042",
+   "hex": "3000300030003000300030003000300034003200"
+  },
+  {
+   "dir": "C>S",
+   "parameter": "IV_RAW",
+   "type": "BYTE",
+   "length": 16,
+   "value_hex": "000102030405060708090a0b0c0d0e0f",
+   "hex": "000102030405060708090a0b0c0d0e0f"
+  },
+  {
+   "dir": "S>C",
+   "parameter": "EV_RAW_K",
+   "type": "BYTE",
+   "length": 16,
+   "value_hex": "00112233445566778899aabbccddeeff",
+   "hex": "00112233445566778899aabbccddeeff"
+  }
+ ]
+}
