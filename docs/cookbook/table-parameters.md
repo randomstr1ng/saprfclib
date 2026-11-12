@@ -75,5 +75,6 @@ conn.close()
 
 - `ROWCOUNT=0` returns all rows — be cautious on large tables.
 - If `DELIMITER` is omitted, all field values are concatenated without a separator.
-- To pass multiple WHERE conditions, add multiple rows to `OPTIONS`.  SAP joins them with AND.
+- `OPTIONS` rows are concatenated into one WHERE clause, so a long condition can span rows;
+  write `AND` / `OR` yourself between conditions.
 - The `FIELDS` table is optional: omitting it returns all fields concatenated.

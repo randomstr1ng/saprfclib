@@ -38,7 +38,8 @@ conn.close()
   and spaces after commas do not matter; RDN order does.
 - The port defaults to the secure gateway port `48NN`. Pass `port=` if yours differs.
 - Instead of a PSE file you can pass `snc_credential=SncCredential(private_key=...,
-  certificate_chain=(...,), trusted=(...,))` built from DER bytes you load yourself.
+  certificate_chain=(...,), trusted=(...,))` (`from saprfclib.secgss import SncCredential`)
+  built from DER bytes you load yourself.
 - `snc_myname` is optional; when given it must name the PSE's own certificate.
 
 An existing CommonCryptoLib setup works unchanged. With `SECUDIR` set (or `~/sec`) and a
@@ -156,11 +157,12 @@ conn = saprfclib.connect(
     passwd="...",
     snc_lib="/usr/sap/sapcryptolib/libsapcrypto.so",   # absolute path
     snc_partnername="p:CN=A4H, OU=IDEMOSYSTEM, OU=SAP Web AS, O=SAP Trust Community, C=DE",
-    snc_myname="p:CN=my-client, O=MyOrg, C=DE",         # optional
 )
 ```
 
-The library finds its own credentials (for CommonCryptoLib: `SECUDIR` and `cred_v2`).
+The library finds its own credentials (for CommonCryptoLib: `SECUDIR` and `cred_v2`), with
+its default identity: on this path `snc_myname` is not passed to the GSS library and has no
+effect.
 
 ## Quality of protection
 

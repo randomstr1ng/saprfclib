@@ -512,7 +512,7 @@ class MessageServerClient:
 
 
 # --------------------------------------------------------------------------- #
-# SAPMS binary frame — CONFIRMED against a live message server 2026-08-31
+# SAPMS binary frame — reproduced against a live message server (docs/protocol/message_server.md)
 # --------------------------------------------------------------------------- #
 #
 # The attach frame is exactly 110 bytes (0x6e) of body behind the 4-byte NI
@@ -524,16 +524,18 @@ class MessageServerClient:
 #                                "invalid client version"; 1-3 get the
 #                                connection dropped without a reply.
 #   0x0d   1  errorno          — 0 outbound; the server's return code inbound.
-#   0x0e  40  toname           — ASCII, space-padded.
-#   0x36   1  msgtype          — 0 gets no reply; 1-7 are all answered.
-#   0x43   1  must be 3        — 0, 1, 2 and 4 each get the connection dropped.
-#   0x44  40  fromname         — ASCII, space-padded; the client's own name.
+#   0x0e  40  toname           — ASCII; saprfclib space-pads (SAP GUI leaves NULs).
+#   0x36   1  msgtype          — 0 in the SAP GUI capture; saprfclib sends 0.
+#   0x42   1  speaker          — 0x02 from the client; replies carry 0x02 or 0x03.
+#   0x43   1  operation        — 0x08 attach, 0x01 request, 0x04 detach.
+#   0x44  40  fromname         — ASCII; the client's own name.
 #   0x6c   2  service number   — network order.
 #
-# Every value above was established by sending candidate frames to a live
-# message server (A4H, kernel 793, port 3601) and recording which drew a reply,
-# which drew a specific error, and which were dropped. Golden fixture:
-# tests/golden/router/sapms_attach_access_denied.bin.
+# Source: SAP GUI performing a group logon, reproduced by this library against the
+# live message server, which answered errorno 0 and returned the server list
+# (golden fixtures tests/golden/router/sapms_*.bin). An earlier probe concluded "0x43
+# must be 3" and "msgtype 0 gets no reply"; both were wrong (the sweep never tried 8,
+# the operation a real client sends) and are recorded in message_server.md.
 #
 # What the previous implementation sent: a 114-byte body, with 0x0e read as a
 # one-byte "sender type" and a 10-byte "opcode name" placed at 0x44 — which is
@@ -596,8 +598,9 @@ _SEL_GROUP_LIST = 0x1F
 _REQUEST_BODY_LEN = 52
 
 # Message-server return codes, as the server reports them in the errorno byte.
-# Confirmed live: -20 for an attach this server's ACL refuses, and -12 by sending
-# version 5 deliberately. The remainder are decoded to the same scheme.
+# Live: -12 by sending version 5 deliberately, and -20 for a frame with an invalid
+# operation byte (there was no ACL on the test system; message_server.md). The
+# remainder are [ASSUMED] to follow the same scheme.
 _MS_ERRORS: dict[int, str] = {
     -12: "invalid client version",
     -18: "message server shutdown",

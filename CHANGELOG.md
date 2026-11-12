@@ -53,11 +53,25 @@ that it is an assumption.
   the codec read the value as a plain integer. UTCLONG is now decoded to and encoded from
   `YYYY-MM-DDTHH:MM:SS.fffffff` (or a `datetime`), `None` for the initial value: 100 ns
   ticks + 1 from 0001-01-01 on the Julian calendar before 1582-10-15 and the Gregorian
-  after it, as twelve values captured from the reference client show
+  after it, as eleven values captured from the reference client show
   (`tests/golden/serialization/int8_utclong.json`).
 - **DATN and TIMN fields in structures are no longer dropped.** The dictionary types
   were unknown, so a structure holding one lost the field from its layout; they travel
   exactly like DATS and TIMS (live).
+- **STRING values carry their terminating NUL.** A STRING travels as UTF-8 followed by
+  one NUL byte (live capture, `tests/golden/serialization/string_xstring.json`); the
+  library returned that NUL as part of the value (`"Hello\x00"`) and sent strings without
+  it. Both directions now match the reference client. The synthetic `type_string` and
+  `type_xstring` fixtures, which encoded a layout the capture disproves, are removed.
+- **The logon frame's length field is computed.** The invoke footer of the logon frame
+  carried a constant body length, right for one user/password length only; it is now the
+  real length, as in every reference-client logon captured.
+- **`connect_async()` resolves message-server groups like `connect()`**: it takes
+  `msserv`, `ms_http_port` and `ms_use_http` and uses the HTTP interface by default; it
+  used to ignore them and always use the binary protocol.
+- **`SN=` in a built-in SNC partner name means serialNumber**, as in the SNC name the
+  frame header carries; the certificate check read it as surname, so such a partner name
+  never matched.
 - **qRFC queue names are limited to 24 characters**, the width of the server's queue
   column. A longer name was accepted by the server and silently cut.
 - **Yes/no connection parameters are no longer read by truthiness** (issue #64).
@@ -104,6 +118,19 @@ that it is an assumption.
   and 8-character prefixes some frames hold. A hygiene check keeps them out.
 
 ### Documentation
+
+- **Every doc page checked against the code and fixtures.** About 140 corrections: GW,
+  NI and logon offsets re-read from the captures (frame and payload coordinates named),
+  wrong hex examples regenerated, stale "open" and "not implemented" statements removed,
+  cookbook examples fixed (`RetryExhausted` after the built-in tRFC retries, `pool.close()`
+  not waiting, authentication callbacks receiving `None`), the connection-option and
+  exception references completed, and claims without a source labelled `[ASSUMED]` or
+  removed.
+- **No status labels in the docs.** "CONFIRMED", "RESOLVED", "PARTIAL" and the like are
+  gone: an unlabelled fact cites its source where it is stated, `[ASSUMED]` marks an
+  inference, and open items sit under Known Gaps. Several labels had drifted out of date
+  (the DecFloat byte order among them). The rule is in `CLAUDE.md` and
+  `docs/protocol/methodology.md`, and `tests/test_repo_hygiene.py` enforces it.
 
 - `docs/protocol/trfc.md`: the tRFC/qRFC submit and confirm as captured — the `STATE` and
   `DATA` rows, the serialized call and its header, the queue name — and what live TIDs

@@ -12,7 +12,8 @@ pip install saprfclib
     this library.
 
 No native dependencies. `saprfclib` requires Python 3.12 or later and installs
-two pure-Python dependencies: `wsproto` and `h11` (needed for WebSocket RFC support).
+five pure-Python dependencies: `wsproto` and `h11` for WebSocket RFC, and `asn1crypto`,
+`ecdsa` and `tlslite-ng` for the built-in SNC.
 WebSocket RFC and SNC work out of the box — there are no optional install extras required.
 
 ## Development install

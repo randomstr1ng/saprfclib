@@ -33,11 +33,11 @@
     "wire_size_bytes": 3,
     "precision": 5,
     "decimals": 2,
-    "value": "123.45",
+    "value": "12.34",
     "sign": "positive",
     "sign_nibble": "0x0C"
   },
-  "capture_source": "synthetic value (P5.2=123.45) — encoding CONFIRMED against live BCD capture 2026-06-26 (BAPI_FLIGHT_GETLIST FLIGHT_LIST.PRICE P15.2=800000.50, SAP A4H sysnr=00, port 3300 offset 0x44D); same packed-BCD scheme (2 digits/byte, sign in low nibble of last byte, 0x0C=positive). See live fixture type_bcd_p15_2",
+  "capture_source": "synthetic value: bytes 01 23 4C are P5.2 = 12.34 (this note said 123.45, which the bytes do not encode) — the encoding follows the live BCD capture 2026-06-26 (BAPI_FLIGHT_GETLIST FLIGHT_LIST.PRICE P15.2=800000.50, SAP A4H sysnr=00, port 3300 offset 0x44D); same packed-BCD scheme (2 digits/byte, sign in low nibble of last byte, 0x0C=positive). See live fixture type_bcd_p15_2",
   "evidence": "RFCTYPE_BCD serialization [ASSUMED pending independent confirmation]",
   "gap_status": "confirmed — live capture 2026-06-26; BCD packed-decimal encoding confirmed from BAPISFLIGHT.PRICE live wire bytes (00 00 00 08 00 00 05 0C = 800000.50, P15.2). Positive sign nibble 0x0C confirmed. Negative (0x0D): live capture 2026-11-12, bcd_sign.json; standard packed BCD per no-guessing policy"
 }

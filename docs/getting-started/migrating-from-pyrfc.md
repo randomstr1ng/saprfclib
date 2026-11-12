@@ -32,8 +32,8 @@ The common connection parameters keep their names: `ashost`, `sysnr`, `client`, 
 | `conn.close()` | `conn.close()` | or use a `with` block |
 | `conn.get_function_description(f)` | `saprfclib.get_function_desc(conn, f)` | different shape, see below |
 | `snc_mode="1"` | *(removed)* | `snc_partnername` (or `snc_lib`) is the switch |
-| `snc_qop="3"` | `snc_qop=3` | `int`, not `str` |
-| `snc_sso="1"` | `snc_sso=True` | `bool`, not `str` |
+| `snc_qop="3"` | `snc_qop="3"` or `3` | 1, 2, 3, 8 or 9; anything else raises `ValueError` |
+| `snc_sso="1"` | `snc_sso="1"` or `True` | `"1"`/`"0"`, `1`/`0`, `True`/`False`; `"true"` or `"yes"` raise `TypeError` |
 | `snc_lib=...` | `snc_lib=...` | optional: without it the built-in mechanism is used |
 | `SNC_LIB` = CommonCryptoLib, X.509 | `snc_pse=` / `SECUDIR` | no SAP library; see [SNC](../cookbook/snc-connection.md) |
 | `SNC_LIB` = CommonCryptoLib, Kerberos | `snc_kerberos=True` | Windows logon session or ticket cache |

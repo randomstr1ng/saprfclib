@@ -1,9 +1,8 @@
 # SNC (Secure Network Communications) Layer
 
-**Status:** CONFIRMED — live SNC handshake against CommonCryptoLib X.509 passed 2026-08-05,
-re-confirmed against a second lab system on 2026-11-08. The frame codec and GSS binding are
-additionally proven offline against a mock GSS library.
-**Confidence:** HIGH for every implemented path; see [Known Gaps](#known-gaps).
+**Evidence:** a live SNC handshake against CommonCryptoLib X.509 on 2026-08-05, repeated
+against a second lab system on 2026-11-08. The frame codec and GSS binding are also tested
+offline against a mock GSS library. See [Known Gaps](#known-gaps).
 
 ---
 
@@ -22,14 +21,17 @@ RfcInvoke() / logon TLV                — RFC application + handshake payloads
         → inner Transport.send_message() — NI framing + TCP writev (framing.md)
 ```
 
-The GSS mechanism underneath is either saprfclib's own implementation of SAP's X.509
-mechanism ([snc-mechanism.md](snc-mechanism.md)) or a native GSS-API library loaded with
+The GSS mechanism underneath is either saprfclib's own implementation of SAP's mechanism,
+with its X.509 and Kerberos key exchanges ([snc-mechanism.md](snc-mechanism.md)), or a
+native GSS-API library loaded with
 `ctypes` from `snc_lib`. The frame layer described here is the same for both.
 
 **Activation:** `snc_partnername` switches SNC on, as in the NW RFC SDK. The mechanism is
-the native library when `snc_lib` is given, otherwise the built-in one, whose credential
-comes from `snc_credential`, else `snc_pse` (PIN from `snc_pse_pin` or `cred_v2`), else
-`SECUDIR` (see [snc-mechanism.md](snc-mechanism.md#credentials-psepy)). Without any SNC
+the native library when `snc_lib` is given, the built-in Kerberos key exchange when
+`snc_kerberos` is given (it cannot be combined with `snc_lib`, `snc_pse` or
+`snc_credential`), otherwise the built-in X.509 one, whose credential comes from
+`snc_credential`, else `snc_pse` (PIN from `snc_pse_pin` or `cred_v2`), else `SECUDIR`
+(see [snc-mechanism.md](snc-mechanism.md#credentials-psepy)). Without any SNC
 parameter the plain TCP path is byte-for-byte unchanged.
 
 ---
@@ -49,7 +51,7 @@ Offset  Length  Type        Name          Notes
  0x0a     2      uint16-BE   hdr_len       Total header length = 0x18 + extension-header size
  0x0c     4      uint32-BE   token_len     GSS token byte count
  0x10     4      uint32-BE   data_len      Application data byte count
- 0x14     2      uint16-BE   mech_id       Mechanism id, 3 for the X.509 mechanism
+ 0x14     2      uint16-BE   mech_id       Mechanism id, 3 for SAP's mechanism (X.509 and Kerberos)
  0x16     2      uint16-BE   qop_flags     QOP levels on handshake frames, 0 on data frames
 [0x18]    var    bytes       ext_headers   Extension headers, ONLY if hdr_len > 0x18
 [hdr_len] token_len bytes    gss_token     GSS token bytes
@@ -75,20 +77,23 @@ slot 0 = BE16 mechanism id (00 03)
          || BE32 DN length || DN DER of the partner name
 ```
 
-Slot 0 is the target name as a GSS exported-name token (RFC 2743 §3.2). The DN is encoded
-as the reference client does: RDNs reversed (C first), values as PrintableString, or
-T61String when a character falls outside that set, `C` upper-cased, `DC` as IA5String,
-`SN` meaning serialNumber. saprfclib refuses non-ASCII partner names: the reference
+Slot 0 is the target name as a GSS exported-name token (RFC 2743 §3.2). The layout above
+and the DN of the captured partner name (RDNs reversed, C first; every value a
+PrintableString) match golden fixture `tests/golden/snc/snc_frame_headers.json` byte for
+byte. The remaining encoding rules come from the reference library's exported names for
+probe partner names (behavioural probe, 2026-11-08): a value outside the PrintableString
+set is written as T61String, `C` is upper-cased, `DC` is an IA5String, and `SN` is encoded
+as serialNumber (2.5.4.5). saprfclib refuses non-ASCII partner names: the reference
 encodes them as T.61 sequences, and whether a server accepts that is untested.
-Source: golden fixture `tests/golden/snc/snc_frame_headers.json` (byte-identical match).
 
 ### GW envelope (SNC gateway port)
 
 On the secure gateway port each SNC frame travels inside an 80-byte GW header
-(type `06 CB`) followed by an 8-byte trailer `BE32 len(SNC frame) || 00 00 85 00`.
+(type `06 CB`). Client frames are followed by an 8-byte trailer
+`BE32 len(SNC frame) || 00 00 85 00`; server frames carry no trailer.
 Handshake and data frames differ in two places: byte 10 is `0x28` on handshake frames and
 `0x08` on data frames, and bytes 48:52 are `00 00 85 00` on handshake frames and zero on
-data frames. Bytes 78:80 carry the connection index the gateway assigned in its CONNECT
+client data frames. Bytes 78:80 carry the connection index the gateway assigned in its CONNECT
 reply, which the client echoes in every later frame. Source: same fixture.
 
 ### DoS Guard
@@ -100,9 +105,11 @@ allocate against it, not after.
 
 ### Frame Detection (passthrough)
 
-Every inbound frame's first bytes are checked against the eye-catcher. A frame that does
-**not** begin with it is non-SNC NI traffic and is passed through unchanged — `SncTransport`
-must never corrupt a non-SNC frame.
+On a direct SNC channel (no GW envelope), every inbound frame's first bytes are checked
+against the eye-catcher. A frame that does **not** begin with it is non-SNC NI traffic and
+is passed through unchanged — `SncTransport` must never corrupt a non-SNC frame. In
+GW-envelope mode (RFC connections on the SNC gateway port) every frame after the
+handshake is taken as a GW-wrapped SNC frame and parsed without this check.
 
 ---
 
@@ -135,24 +142,18 @@ Client                                Server
    ([snc-mechanism.md](snc-mechanism.md#kerberos-key-exchange)); the X.509 exchange ends
    on a server token and has no ACCEPT_ACK.
 
-**Handshake before data:** no application data is
-wrapped or sent until the handshake reaches `GSS_S_COMPLETE`. `SncTransport` sets an
-`_established` gate only inside `_handshake` and re-asserts it at the top of
-`send_message` (belt-and-suspenders).
+**Handshake before data:** `SncTransport` sets an `_established` gate only inside
+`_handshake`. Until it is set, `send_message` and `recv_message` pass messages through
+unprotected: that is how the plain GW_CONNECT / GW_INFO / GW_DONE exchange reaches the
+gateway before `activate_snc()` starts the handshake. The logon and every later RFC
+message are sent only after `GSS_S_COMPLETE`, and then always protected.
 
 ### Per-connection lifecycle
 
-Initialisation order, which matters — the credential must exist before the partner name is
-imported against it:
-
-```
-session init → set own name (snc_myname) → session start
-             → import partner name (snc_partnername) → acquire credential
-```
-
 `saprfclib` implements the **initiator (client)** role only; the acceptor role is not
-implemented. `GssBinding.__init__` acquires an initiator credential (`GSS_C_INITIATE`), then
-imports the partner name.
+implemented. `GssBinding.__init__` (native library) acquires an initiator credential
+(`GSS_C_INITIATE`, desired name `GSS_C_NO_NAME`), then imports the partner name. It does
+not pass `snc_myname` to the library: the library picks its own default credential.
 
 ---
 
@@ -179,8 +180,12 @@ Four helpers are also resolved: `gss_import_name`, `gss_acquire_cred`,
 Python `bytes` and freed via `gss_release_buffer` — a mech-allocated buffer that is never
 released is a leak in a long-lived pooled connection.
 
-This binding is **provider-agnostic**: CommonCryptoLib (`libsapcrypto.so`, X.509),
-`libgssapi_krb5.so` (Kerberos), or any RFC 2744-compliant library works unchanged.
+The binding uses only RFC 2744 entry points, but the frame layer around it always sends
+mechanism id 3, the SAP mechanism OID in the extension header and the adapter string
+`Internal SNC-Adapter (Rev 1.1) to CommonCryptoLib` in FR_INIT frames. CommonCryptoLib
+(`libsapcrypto.so`) is the only library used live. Whether another RFC 2744 library (for
+example `libgssapi_krb5.so`) works through it is [ASSUMED] and untested; a live logon
+with one would settle it.
 Without `snc_lib`, no GSS library is loaded at all: the built-in mechanism
 ([snc-mechanism.md](snc-mechanism.md)) handles X.509 and Kerberos in Python.
 
@@ -216,8 +221,10 @@ and carry 0 in `qop_flags`.
 
 Source: golden fixture `tests/golden/snc/snc_frame_headers.json`, a reference client against
 a server configured with `snc/data_protection/min = 3`. Types 7 and 8 on the wire need a
-server with a lower minimum and have not been observed live; the frame layouts follow the
-table above.
+server with a lower minimum and have not been observed live. Their layouts are
+[ASSUMED]: type 7 carries the payload as `app_data` with no token, and type 8 carries the
+`gss_get_mic` token as `gss_token` and the payload as `app_data`. A capture against a
+server with `snc/data_protection/min` below 3 would settle them.
 
 On receive, saprfclib refuses any data frame protected below its own minimum, and any
 non-data frame once the channel is established. A frame's type is chosen by the sender,
@@ -239,11 +246,15 @@ in the wrapped output) and is re-verified on the wire at the live checkpoint.
 
 | kwarg             | SAP env var        | Meaning                                                    | Default |
 |-------------------|--------------------|------------------------------------------------------------|---------|
-| `snc_lib`         | `SNC_LIB`          | Path to the GSS provider `.so` (required for SNC)          | —       |
-| `snc_partnername` | `SNC_PARTNERNAME`  | Server GSS identity, e.g. `p:CN=SAP Server,...`            | —       |
-| `snc_myname`      | `SNC_MYNAME`       | Client identity (optional; lib default if absent)         | `None`  |
-| `snc_qop`         | `SNC_QOP`          | QOP level 1 / 2 / 3                                        | `3`     |
-| `snc_sso`         | `SNC_SSO`          | Log on with the SNC identity instead of a password (see Known Gaps) | `False` |
+| `snc_lib`         | `SNC_LIB`          | Path to a native GSS library `.so`; without it the built-in mechanism is used | `None` |
+| `snc_partnername` | `SNC_PARTNERNAME`  | Server SNC name, e.g. `p:CN=SAP Server,...`; required whenever SNC is on | — |
+| `snc_myname`      | `SNC_MYNAME`       | Client identity (optional). Built-in X.509: selects the `cred_v2` entry and must match the own certificate; Kerberos: must name the ticket's client principal; native library: not passed to the library | `None` |
+| `snc_qop`         | `SNC_QOP`          | 1, 2, 3, 8 or 9 (see [QOP Levels](#qop-levels))            | `3`     |
+| `snc_sso`         | `SNC_SSO`          | Log on with the SNC identity instead of a password (see [Settled details](#snc-logon-without-a-password-snc_sso)) | `False` |
+| `snc_pse`         | —                  | Built-in X.509: path of the client PSE                     | `None`  |
+| `snc_pse_pin`     | —                  | PIN of `snc_pse`; without it the PIN is taken from `cred_v2` | `None` |
+| `snc_credential`  | —                  | Built-in X.509: an `SncCredential` instead of a PSE file   | `None`  |
+| `snc_kerberos`    | —                  | Built-in Kerberos: `True` or a `KerberosLogin` ([kerberos.md](kerberos.md)) | `None` |
 
 **Quote stripping:** `SNC_MYNAME` and `SNC_PARTNERNAME` may arrive wrapped in double quotes
 from the SAP environment. `GssBinding` strips a single enclosing quote pair before passing the
@@ -272,19 +283,14 @@ carries the GSS `major` / `minor` status codes only — never token or name byte
 
 ---
 
-## Known Gaps
+## Settled details
 
-Values that could not be established without a live capture are recorded here rather than
-invented. Nothing below is guessed into the implementation.
-
-### SNC eye-catcher (8 bytes) — RESOLVED
-
+### SNC eye-catcher (8 bytes)
 The 8-byte eye-catcher at frame offset `0x00` is **`b"SNCFRAME"`** — eight characters, with no
 trailing NUL inside the field. `SncTransport` uses this as its default; the `eye_catcher`
 parameter remains injectable for testing.
 
-### SNC logon without a password (`snc_sso`) — RESOLVED
-
+### SNC logon without a password (`snc_sso`)
 `snc_sso=True` logs on with the SNC identity: the server maps the client certificate to a
 user (SU01 → SNC). It changes **only the logon records**; the SNC frames, including their
 extension header, are identical to a password logon. Compared with a password logon
@@ -299,15 +305,19 @@ they are a separate logon method, in which a ticket issued and signed by an SAP 
 presented instead of a password, and they do not involve SNC. No capture of an RFC logon
 with one exists, so its encoding is unknown; it would be a feature of its own.
 
-### CommonCryptoLib GSS mechanism OID — RESOLVED
-
+### CommonCryptoLib GSS mechanism OID
 CommonCryptoLib (`libsapcrypto.so`) uses a SAP-specific GSS mechanism OID rather than a
 standard Kerberos mechanism: `1.3.36.3.1.37.1`, DER-encoded as
 `\x06\x06\x2b\x24\x03\x01\x25\x01` (8 bytes). This is `_SAP_SNC_OID` in `snc.py`, and
-the context ID `_SNC_CTX_ID = 3` was confirmed from a live capture.
+the context ID `_SNC_CTX_ID = 3` is from a live capture.
 
 `_build_snc_ext_header()` builds the mechanism extension header from these two values. The full
-CommonCryptoLib X.509 handshake was confirmed end-to-end against a live system on 2026-08-05.
+CommonCryptoLib X.509 handshake ran end to end against a live system on 2026-08-05.
+
+## Known Gaps
+
+- The acceptor (server) role is not implemented: no capture of a SAP system opening an SNC
+  connection to a registered server exists.
 
 ---
 
@@ -320,5 +330,4 @@ CommonCryptoLib X.509 handshake was confirmed end-to-end against a live system o
 
 ---
 
-*Live SNC handshake confirmed 2026-08-05 against CommonCryptoLib X.509, partner `p:CN=A4H`.*
-*Not implemented: the acceptor (server) role.*
+*Live SNC handshake 2026-08-05 against CommonCryptoLib X.509.*

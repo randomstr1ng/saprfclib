@@ -70,6 +70,26 @@ def _hits() -> list[str]:
     return out
 
 
+# Docs carry no status labels (docs/protocol/methodology.md, "Evidence Tiers"): an unlabelled
+# fact is established and cites its source, [ASSUMED] marks an inference, and what is not
+# known is listed under Known Gaps / Open Questions. Labels like CONFIRMED go stale.
+DOC_STATUS_LABEL = re.compile(
+    r"\b(?:CONFIRMED|UNCONFIRMED|RESOLVED|PARTLY CLOSED)\b|\[UNKNOWN|\*\*(?:Status|Confidence):"
+    r"|^#{2,6} .* — (?:OPEN|CLOSED|PARTIAL)\b"
+)
+DOCS = [*sorted((ROOT / "docs").rglob("*.md")), ROOT / "README.md"]
+
+
+def test_docs_carry_no_status_labels() -> None:
+    hits = [
+        f"{p.relative_to(ROOT).as_posix()}:{n}: {line.strip()[:100]}"
+        for p in DOCS
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        if DOC_STATUS_LABEL.search(line)
+    ]
+    assert not hits, "\n".join(hits)
+
+
 def test_no_internal_references_cited_as_sources() -> None:
     hits = _hits()
     assert not hits, "\n".join(hits)

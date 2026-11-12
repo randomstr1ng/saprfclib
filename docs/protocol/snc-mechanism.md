@@ -1,6 +1,6 @@
 # Built-in SNC Mechanism (OID 1.3.36.3.1.37.1: X.509 and Kerberos)
 
-**Status:** CONFIRMED for the client role.
+**Evidence** (client role; the acceptor is not implemented):
 - X.509: a live handshake, logon and RFC calls against an SAP S/4HANA lab system on
   2026-11-08, plus a full record-layer exchange with SAP CommonCryptoLib acting as the
   acceptor.
@@ -14,7 +14,10 @@
 **Evidence:** golden fixtures `tests/golden/snc/secgss_live_handshake.json` (live server),
 `tests/golden/snc/secgss_loopback_records.json` and
 `tests/golden/snc/secgss_kerberos_loopback.json` (CommonCryptoLib acceptor), replayed
-byte for byte by `tests/test_secgss.py` and `tests/test_secgss_kerberos.py`.
+byte for byte by `tests/test_secgss.py` and `tests/test_secgss_kerberos.py`; for ECDSA,
+`tests/golden/snc/secgss_ec_loopback.json` (EC client and server keys) and
+`tests/golden/snc/secgss_ec_client_rsa_server.json` (EC P-384 client, RSA server), both
+against CommonCryptoLib as the acceptor, replayed by `tests/test_secgss_ec.py`.
 
 This page describes the GSS tokens that travel inside the SNC frames of
 [snc.md](snc.md). The frame layer is unchanged: the built-in mechanism produces the same
@@ -365,15 +368,21 @@ Revocation is not checked.
 A PSE file created with `sapgenpse` holds the own key, own certificate, its issuer chain
 and the trusted certificates (the "PK list"). Supported: container versions 2 and 4,
 protected with PKCS#12 `pbeWithSHAAnd3-KeyTripleDES-CBC` (the default) or PBES2 / PBKDF2
-(HMAC-SHA1/256/512) / AES-256-CBC, or unprotected; PSEs wrapped in local protected storage
+(HMAC-SHA256, fixture `pse_v4_pbes2_sha256.pse`) / AES-256-CBC, or unprotected. The reader
+also accepts PBKDF2 with HMAC-SHA1 or HMAC-SHA512 [ASSUMED: no fixture; a PSE written with
+either PRF would settle it]; PSEs wrapped in local protected storage
 (LPS); RSA keys and EC keys on P-256, P-384 and P-521. An EC key is stored as
 `SEQUENCE { AlgorithmIdentifier { id-ecPublicKey, curve }, BIT STRING { ECPrivateKey } }`
 (RFC 5915 inside) and is returned as PKCS#8 (fixtures `pse_ec_*.pse`, checked against
-`sapgenpse export_p8`). DSA and EdDSA keys, which `sapgenpse` can also write, are refused.
+`sapgenpse export_p8`). DSA and EdDSA keys, which `sapgenpse` can also write, are refused
+(fixture `unsupported/pse_dsa_nopin.pse` for DSA).
 
-PINs stored by `sapgenpse seclogin` in `SECUDIR/cred_v2` are read in all three forms
-`sapgenpse` writes outside Windows: the default (3DES), the AES-256 header form, and LPS.
-The first two are keyed on the OS user name the entry was created for; LPS is not.
+PINs stored by `sapgenpse seclogin` in `SECUDIR/cred_v2` are read in four forms, one
+fixture each under `tests/golden/pse/`: the default (3DES, `cred_simple`), the header form
+with 3DES (`cred_uid`, written with the CommonCryptoLib profile setting
+`ccl/enable_credential_uid_from_os = 1`), the header form with AES-256 (`cred_aes`,
+`ccl/credential_encryption_algorithm = AES256`), and LPS (`cred_lps`). The first three are
+keyed on the OS user name the entry was created for; LPS is not.
 
 Which PSE is used when none is named follows CommonCryptoLib: `SECUDIR` (or
 `$HOME/sec`), the `cred_v2` entry whose name matches `snc_myname` (case-insensitive,
@@ -381,11 +390,12 @@ blanks after commas ignored), else the first entry whose PIN can be recovered, e
 unprotected `SAPSNCS.pse`.
 
 Golden files: `tests/golden/pse/*.pse` (each paired with the key and certificates
-`sapgenpse` exported from it) and `tests/golden/pse/cred_*/cred_v2` (each written by
-`sapgenpse seclogin` for a known PIN).
+`sapgenpse` exported from it), `tests/golden/pse/cred_*/cred_v2` (each written by
+`sapgenpse seclogin` for a known PIN) and `tests/golden/pse/unsupported/pse_dsa_nopin.pse`
+(a DSA PSE that must be refused).
 
 Not supported: Windows DPAPI-protected LPS and `cred_v2` entries (host-bound), LPS records
-carrying a host or user restriction, EC and EdDSA own keys.
+carrying a host or user restriction, DSA and EdDSA own keys.
 
 ---
 

@@ -61,8 +61,9 @@ conn.close()
 
 ## Notes
 
-- `wshost` is the **only** activation switch for the WebSocket transport.  When it is set,
-  `ashost`/`saprouter`/`mshost` are ignored.
+- `wshost` is the **only** activation switch for the WebSocket transport. When it is set,
+  `ashost` is ignored, `saprouter` raises `ValueError`, and `mshost` should be left out: it is
+  still contacted to resolve the group before the WebSocket connection is opened.
 - `ws_tls_verify=False` disables TLS certificate verification — use only in development
   environments with self-signed or expired certificates.  Never use in production.
 - The SAP BTP ABAP Environment default path is `/sap/bc/rfc?sap-apc-stateful=true`.

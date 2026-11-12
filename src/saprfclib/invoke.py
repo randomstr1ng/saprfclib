@@ -111,8 +111,9 @@ _TAG_TABLE_CONTENT_LZ = (
     0x0305  # SAPCOMPRESS-compressed rows (golden fixture framing/multiframe_read_table.json)
 )
 _TAG_TABLE_END = 0x0306  # table-stream end marker. Accepted when reading; never
-# written on a request — see build_invoke_request. No capture in this repo shows it
-# in either direction, so the read-side handling is defensive, not evidence-backed.
+# written on a request — see build_invoke_request. Server replies carry it
+# (gfi_compressed_params_response.bin, ddif_fieldinfo_rfcsi_response.bin); no
+# request capture does.
 # Server-returned form of a table the CLIENT supplied as input. The table is
 # identified by the DM table ID the client assigned it in 0x0330 — NOT by name.
 #

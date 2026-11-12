@@ -179,8 +179,9 @@ def test_char_explicit_utf16_be_when_non_unicode():
 def test_string_roundtrip():
     f = _scalar_field(STRING)
     wire = encode(STRING, "Hello", f)
-    # STRING wire = UTF-8 bytes, no internal length prefix (GAP-B-06 closed)
-    assert wire == b"Hello"
+    # STRING wire = UTF-8 bytes and a terminating NUL, no length prefix
+    # (tests/golden/serialization/string_xstring.json)
+    assert wire == b"Hello\x00"
     assert decode(STRING, wire, f) == "Hello"
 
 

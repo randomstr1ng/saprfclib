@@ -1,8 +1,6 @@
 # SAP RFC Logon Handshake Protocol
 
-## Status
-
-**CONFIRMED — live capture 2026-06-26 (SAP NetWeaver 7.58, sysnr=00, port=3300).**
+**Evidence:** live capture 2026-06-26 (SAP NetWeaver 7.58, sysnr=00, port=3300).
 
 The full logon sequence is documented below, frame by frame, and replayed from golden
 fixtures in CI.
@@ -42,6 +40,9 @@ TCP SYN/SYN-ACK/ACK  [frames 1-3]
 
 ### Wire Format (68 bytes)
 
+Frame coordinates (byte 0 = first byte of the 4-byte NI length prefix); subtract 4 for the
+payload offsets `session.py` uses. Source: `ni_version_request.bin` / `ni_version_response.bin`.
+
 ```
 [0-3]   ni_length       4B  BE uint32 = 64
 [4-5]   msg_type        2B  0x0203 (NI version frame)
@@ -52,11 +53,11 @@ TCP SYN/SYN-ACK/ACK  [frames 1-3]
 [24-27] codepage        4B  ASCII codepage string (e.g. "1100" or "4103")
 [28-31] zeros           4B
 [32-33] version_flags   2B  0x0006 (client) / 0x000f (server)
-[34-43] hostname        10B space-padded ASCII (e.g. "host1     ")
-[44-53] program_padded  10B space-padded ASCII (e.g. "python3   ")
-[54-55] rfc_hint        2B  0x06cb (client) / 0x06fb (server)
-[56-57] unicode_capable 2B  0xffff
-[58-67] zeros           10B
+[34-41] hostname        8B  space-padded ASCII (e.g. "host1   ")
+[42-57] program_padded  16B space-padded ASCII (e.g. "python3" + 9 spaces)
+[58-59] rfc_hint        2B  0x06cb (client) / 0x06fb (server)
+[60-61] unicode_capable 2B  0xffff
+[62-67] zeros           6B
 ```
 
 ### Codepage Negotiation
@@ -93,49 +94,69 @@ single-byte encoding, but in practice every system tested enforces Unicode mode.
 
 All GW frames share the same 4-byte NI header followed by an 80-byte GW body (for the standard frames; GW_CONNECT_REQUEST from client is 457 bytes with routing info).
 
-### GW Frame Structure (80-byte body frames)
+### GW Frame Structure (84-byte frames: 4-byte NI prefix + 80-byte body)
+
+Frame coordinates; the payload offset (NI prefix stripped, as `session.py` and
+`connection.py` index it) is given in brackets. Source: `gw_connect_response.bin`,
+`gw_done_client.bin`, `gw_done_server.bin`.
 
 ```
-[0-3]   ni_length       4B  BE uint32 (= body length, excludes header)
-[4-5]   gw_msg_class    2B  e.g. 0x0601, 0x0605
-[6-7]   gw_protocol_ver 2B  0x0200 (version 2.0)
-[8-11]  gw_flags        4B  0xffff0000 + session state
-[12-31] gw_session_info 20B server session state [UNKNOWN layout]
-[32-39] connection_handle 8B  ASCII decimal, e.g. "75568442" — assigned by server in frame 9
-[40-71] padding/fields  32B  program area, zeros
-[72-75] codepage        4B  ASCII codepage "4103" (in server GW_DONE only; client leaves zeros)
-[76-79] tail            4B  0x00000001
+[0-3]   ni_length         4B  BE uint32 = 80 (body length, excludes the prefix)
+[4-5]   gw_msg_class      2B  e.g. 0x0601, 0x0605                          (payload 0-1)
+[6-7]   gw_protocol_ver   2B  0x0200                                       (payload 2-3)
+[8-11]  gw_flags          4B  0xffff0000                                   (payload 4-7)
+[12-43] gw_session_info   32B not decoded; saprfclib does not read it      (payload 8-39)
+[44-51] connection_handle 8B  ASCII decimal, e.g. "75568442"               (payload 40-47)
+[52-79] program area      28B GW_CONNECT reply: "NWRFC", host prefix, "sapdp00";
+                              server GW_DONE: "4103" at [73-76] (payload 69-72);
+                              client GW_DONE: zeros                        (payload 48-75)
+[80-83] tail              4B  0xffff or 0x0000, then the connection index  (payload 76-79)
 ```
+
+The tail's low half is the connection index the gateway assigns in its GW_CONNECT reply
+(`00 01` at frame [82-83] of `gw_connect_response.bin`); the client echoes `FF FF` + that
+index on every later frame (`ffff0001` in `gw_done_client.bin`). Source: `session.py`
+(`_GW_CONN_IDX_OFFSET`, payload 78) and golden fixture `snc/snc_frame_headers.json`
+("connection_index").
 
 ### Connection Handle
 
 The connection handle (`"75568442"` in this capture) is:
 - Assigned by the server in the GW_CONNECT_RESPONSE (frame 9)
-- Inserted at **offset 32** of every subsequent GW/RFC header
+- Carried at **frame offset 44 (payload 40)** of every subsequent GW/RFC header
 - An 8-byte ASCII decimal string (varies per session)
 
 ### Sequence
 
-1. Client sends GW_CONNECT_REQUEST (type 0x0601, 457 bytes) containing:
-   - RFC program name ("NWRFC"), server host prefix ("192.0.2."), program ID ("sapdp00")
-   - CPIC identifier string
-   - Client hostname ("randomstr1ng"), client IP ("192.0.2.15")
+1. Client sends GW_CONNECT_REQUEST (type 0x0601, 457 bytes) containing (payload
+   offsets, as `_build_gw_connect_request` writes them):
+   - partner LU name "NWRFC" at [48:56], the first 8 characters of the gateway host at
+     [56:64], "sapdp" + sysnr at [64:72]
+   - "CPIC" at [114:118] and a 32-character session identifier at [122:154]
+   - the gateway host (`gwhost`), NUL-terminated, at [185]; the client hostname,
+     NUL-terminated, at [329]; the "sapdp" + sysnr service, NUL-terminated, at [389]
 
 2. Server sends GW_CONNECT_RESPONSE (type 0x0601, 84 bytes) containing:
-   - **Assigned connection handle at offset 32** ("75568442")
-   - Program area echo
+   - **Assigned connection handle at frame offset 44** ("75568442")
+   - Program area echo, and the connection index at frame [82-83]
 
-3. Client sends GW_INFO (type 0x060F, 228 bytes):
-   - Additional network routing info [UNKNOWN layout]
-   - Connection handle at offset 32
+3. Client sends GW_INFO (type 0x060F, 228 bytes); the gateway does not answer it.
+   Payload offsets, source `gw_info_proxy.bin` (and `_build_gw_info`):
+   - [24:28] `00000090`, [28:32] `00000400`
+   - [40:48] connection handle
+   - [48:56] first 8 characters of the gateway host; [56:60] BE uint32 length of the host
+   - [76:80] `FF FF` + connection index
+   - [80:192] the gateway host, space-padded to 112 bytes — the field the gateway resolves
+     (see [socks5.md](socks5.md) "Gateway host vs. tunnel host")
+   - [192:224] zeros
 
 4. Client sends GW_DONE (type 0x0605, 84 bytes):
-   - Connection handle at offset 32
-   - Codepage field (offsets 72-75) is all zeros from client
+   - Connection handle at frame offset 44
+   - Program area (frame 52-79) all zeros
 
 5. Server sends GW_DONE (type 0x0605, 84 bytes):
-   - Connection handle confirmed
-   - **Codepage "4103" written at offset 72** — second confirmation of UTF-16LE mode
+   - Connection handle echoed
+   - **Codepage "4103" at frame offset 73 (payload 69)** — second confirmation of UTF-16LE mode
 
 ### Fixtures
 
@@ -153,20 +174,30 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 
 ### Wire Structure
 
+Frame coordinates, source `stfc_connection_handshake.bin` (341 bytes):
+
 ```
-[0-3]   ni_length       4B  BE uint32 = 337 (0x00000151)
-[4-79]  gw_header       76B  Same GW header structure as all RFC data frames
-[80-83] rfc_marker      4B  0xffff0001 (client request)
-[84-95] com_head        12B  D9C6C3F0F0F0F0F0F0F0F0F0 = EBCDIC "RFC000000000"
+[0-3]     ni_length     4B   BE uint32 = 337 (0x00000151)
+[4-79]    gw_header     76B  Same GW header structure as all RFC data frames;
+                             connection handle at [44-51]
+[80-83]   rfc_marker    4B   FF FF + the gateway-assigned connection index
+                             (ffff0001 in this capture)
+[84-95]   com_head      12B  D9C6C3F0F0F0F0F0F0F0F0F0 = EBCDIC "RFC000000000"
                              *** ONLY present in logon frame, NOT in subsequent calls ***
-[96-336] logon_tlv      241B  TLV records with credentials
+[96-330]  logon_tlv     235B TLV records with credentials, ending with the FFFF terminator
+[331-340] trailer       10B  ff ff 00 00 00 f9 00 00 85 00
 ```
+
+`_build_logon_frame` writes the marker as `FF FF` + the connection index from the GW_CONNECT
+reply (fallback `ffff0004`, or `ffff0009` over SNC, when no index is known).
+`_build_logon_request` appends a fixed 10-byte trailer of the same shape; that it is accepted
+is behavioural evidence only.
 
 ### Logon TLV Tags (frame 14)
 
 | Tag | Length | Value | Description |
 |-----|--------|-------|-------------|
-| 0x0101 | 8 | binary | Session flags / capability bits |
+| 0x0101 | 8 | binary | Encoding header (see "The `0x0101` encoding header" below); the client sends `0301010101010000` |
 | 0x0103 | 4 | binary | Protocol version bits |
 | 0x0106 | 11 | binary | Codepage negotiation data |
 | 0x0514 | 16 | binary | Session token (16 bytes) |
@@ -175,7 +206,7 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 | 0x0117 | 17 | binary | Scrambled password: `seed(4B) + scramble(pw, seed)` — see "Password scrambling" below |
 | 0x0115 | 1 | ASCII "E" | Logon language |
 | 0x0501 | 1 | 0x01 | `0x01` in every LOGON captured, and present in no other frame type. Meaning unknown; constant so far. |
-| 0x0007 | 9 | ASCII "127.0.1.1" | Client IP address |
+| 0x0007 | 9 | ASCII "127.0.1.1" | A loopback address, not the client's real one; saprfclib sends the fixed value `127.0.0.1` (`_LOGON_CLIENT_IP`) |
 | 0x0011 | 1 | ASCII "E" | Language (again) |
 | 0x0012 | 3 | ASCII "754" | RFC protocol version |
 | 0x0013 | 3 | ASCII "754" | Server RFC version |
@@ -228,10 +259,10 @@ first will hide the bug, because the walk returns before it can drift.
 | 0x0450 | 6 | "A4H" | SAP System ID (SID) |
 | 0x0451 | 20 | "DEMOSYSTEM" | System description |
 | 0x0452 | 4 | "00" | System number |
-| 0x0453 | 20 | "vhcala4hci" | Application server hostname |
+| 0x0453 | 20 | "sapdemo1xx" | Application server hostname |
 | 0x0012 | 8 | "758" | SAP release number |
 | 0x0013 | 8 | "793" | Kernel version |
-| 0x0008 | 34 | "vhcala4hci_A4H_00" | Server instance name |
+| 0x0008 | 34 | "sapdemo1xx_A4H_00" | Server instance name |
 | 0x0150 | 24 | "DEVELOPER" | Logged-in user (normalized to upper) |
 | 0x0151 | 6 | "001" | Client number |
 | 0x0152 | 2 | "E" | Language |
@@ -262,7 +293,7 @@ should read it from the authoritative source — `RFC_SYSTEM_INFO`'s `RFCSYSID` 
 `"NPL"` live, with `RFCDEST` equal to the `0x0008` instance name) — and treat it as a
 derived value from an explicit call, not a logon attribute.
 
-### The `0x0101` encoding header — CONFIRMED (live 7.52) + `[ASSUMED]` byte-order
+### The `0x0101` encoding header (live 7.52; byte order `[ASSUMED]`)
 
 The logon response carries an 8-byte **`0x0101`** element whose value negotiates the
 on-wire encoding. Live 7.52 capture (NPL):
@@ -276,7 +307,7 @@ on-wire encoding. Live 7.52 capture (NPL):
           └──────────────────── byte 0:    RFC protocol version (client rejects > 5)
 ```
 
-- **Confirmed by this capture:** byte 0 = protocol version; byte 3 = `5` = Unicode (agrees
+- **Shown by this capture:** byte 0 = protocol version; byte 3 = `5` = Unicode (agrees
   with the negotiated codepage 4103); bytes 4–7 = the codepage, one digit per byte with
   `byte + 0x30` giving the ASCII digit. `0x0016` separately echoes the client codepage
   ("1100") as UTF-16LE.
@@ -292,8 +323,8 @@ because they are distinct fields. The framing integers (TLV id/length) are a sep
 they are **always** big-endian on the wire regardless of this header (`_TLV_HEADER` is `>HH`).
 
 **What the library does today, and the gap.** `saprfclib` derives `unicode_mode` from the
-negotiated codepage string (`== "4103"`) and hardcodes little-endian scalars (CONFIRMED
-against x86-64 golden fixtures), and it **refuses any non-4103 codepage** at handshake. For
+negotiated codepage string (`== "4103"`) and hardcodes little-endian scalars (as every
+x86-64 golden fixture shows), and it **refuses any non-4103 codepage** at handshake. For
 every real 4103 / little-endian Unicode server — the only universe we can capture and
 validate — this is identical to reading `0x0101` bytes 1/2/3, so there is no miscode: a
 big-endian server negotiates codepage 4102 and is refused before any field is decoded, never
@@ -301,7 +332,7 @@ decoded wrongly. Full big-endian / non-4103 support (reading bytes 1/2/3 and swa
 per field-class) is deliberately **not** implemented, because it cannot be validated without
 a big-endian capture. Tracked as a gap, not shipped as an unvalidated path.
 
-### Authentication vs. RFCPING authorization — D-38 (CONFIRMED live, 752 + 793)
+### Authentication vs. RFCPING authorization — D-38 (live, 752 + 793)
 
 The logon TLV embeds `RFCPING`, so the logon response can report an error that belongs to
 that call rather than to authentication. Three outcomes must be told apart: logon succeeded,
@@ -320,7 +351,8 @@ Observed tag presence (live captures — `0420`=RETURN_CODE, `0417`=exception ma
 | logon outcome | 0x0402 | 0x0417 | **0x0420** | 0x0450 | source |
 |---|---|---|---|---|---|
 | success | · | · | **present** | · (752) / present (793) | live 752 (NPL); `wrfc_logon_accepted` (793) |
-| authenticated, RFCPING S_RFC-denied | present | present | **present** | · (752) / present (793) | `wrfc_logon_receive_error` (793, live) |
+| authenticated, RFCPING S_RFC-denied | present | present | **present** | · (752) / present (793) | live 793 (tag values below; no committed fixture) |
+| authenticated, embedded call failed (`CALL_FUNCTION_RECEIVE_ERROR`, wRFC) | present | present | absent | present | `wrfc_logon_receive_error` (793, live) |
 | authentication failed (bad password) | present | · | **absent** | · | live 752 (NPL) |
 | authentication failed (signon incomplete) | present | present | **absent** | · | `signon_incomplete_752_response` (752, live) |
 
@@ -355,24 +387,21 @@ The message text (`0x0402`) is UTF-16LE on a live kernel; decoding it as UTF-8 y
 NUL-interleaved string, so it is decoded width-aware like every other exception field.
 
 Deriving a SID from `0x0008` by splitting on `_` is **not** done: the three-part shape of
-`vhcala4hci_A4H_00` is a naming convention, not a protocol guarantee, and inventing a
+`sapdemo1_A4H_00` is a naming convention, not a protocol guarantee, and inventing a
 system identity from it would be an unsourced inference of exactly the kind this project
 does not ship.
-| 0xFFFF | 0 | — | TLV stream terminator |
 
 ### Fixture
 
-The logon request and response fixtures (frames 14 and 15) are stored in `tests/golden/framing/`:
-- `tests/golden/framing/logon_request.bin` + `.json`
-
-The response (frame 15) is not yet extracted as a standalone fixture — add as needed.
+The logon request (frame 14) is committed twice, byte-identical:
+`tests/golden/framing/logon_request.bin` and `tests/golden/handshake/stfc_connection_handshake.bin`,
+each with a `.json`. The classic-TCP success response (frame 15) is not committed; logon
+replies that are committed: `framing/signon_incomplete_752_response.bin`, and on wRFC `framing/wrfc_logon_accepted.bin` and
+`framing/wrfc_logon_receive_error.bin`.
 
 ---
 
 ## WebSocket RFC — the LOGON frame
-
-**Status: the shape below is what a working client sends. saprfclib does not yet
-send it, which is issue #14.**
 
 A reference SDK client (NW RFC 7.50 PL18) opening a wRFC session against A4H
 kernel 793 sends a **238-byte** LOGON frame containing nineteen records:
@@ -402,7 +431,9 @@ ffff  0                           terminator
 
 ### Three things the earlier LOGON builder had wrong
 
-All three are fixed (issue #14). The frame above is what the library now sends.
+All three are fixed (issue #14). `_build_ws_logon_message` sends the reference frame above
+with two differences: it omits `0x0514` (see "What is still not established" below), and
+`0x0130` carries its `prog_name` argument, default `"PYTHON"`, rather than `"startrfc"`.
 
 **There is no `0x5001` ngrfc record.** The function to run is named in `0x0102`
 and the record set ends. The earlier builder wrapped a `0x5001` record around an
@@ -441,8 +472,7 @@ LOGON is accepted, and its value in a reference trace has a stable 9-byte prefix
 so it is host-derived rather than random — a random one drew silence. The second
 `[ASSUMED]` label covers this.
 
-*Source: a reference-client trace against the authors' own system, decoded in
-`parse_sdk_trace.py`, then confirmed by capturing this library sending the same
+*Source: a reference-client trace against the authors' own system, then confirmed by capturing this library sending the same
 shape and the server accepting it — `tests/golden/framing/wrfc_logon_accepted.bin`.
 The password field is documented under "Password scrambling" below; on wRFC the
 scrambled body is single-byte, matching the rest of the request.*
@@ -523,8 +553,7 @@ by a live logon. Behaviour for non-ASCII passwords is untested — treat it as a
 | # | Question | Urgency | Notes |
 |---|----------|---------|-------|
 | OQ-C02 | Tag 0x0106 (11 bytes): codepage negotiation detail | MEDIUM | Present in both request and response; binary content not decoded |
-| OQ-C03 | Tag 0x0101 (8 bytes): capability flag bit layout | MEDIUM | Differs between client request and server response |
-| OQ-C04 | GW_INFO (type 0x060F) body layout | LOW | Frame 10 carries network routing info; not required for logon |
+| OQ-C03 | Tag 0x0101 (8 bytes): bytes 1–2 of the response, and the meaning of the client's value `0301010101010000` | MEDIUM | Response bytes 0, 3, 4–7 are decoded under "The `0x0101` encoding header"; bytes 1–2 need a big-endian capture |
 | OQ-C05 | Non-ASCII password codepage | LOW | Single-byte scrambling confirmed for ASCII only |
 
 ---
@@ -540,18 +569,20 @@ To implement the logon handshake in `saprfclib`:
 
 2. **Phase 2 — GW Connect:**
    - Send GW_CONNECT_REQUEST (type 0x0601) with program area, CPIC ID, client info
-   - Read server response; extract connection handle from offset 32
-   - Send GW_INFO (type 0x060F) with network info
+   - Read server response; extract connection handle from frame offset 44 (payload 40) and
+     the connection index from frame offset 82 (payload 78)
+   - Send GW_INFO (type 0x060F) with the gateway host
    - Send GW_DONE (type 0x0605)
    - Read server GW_DONE; verify codepage echo
 
 3. **Phase 3 — RFC Logon TLV:**
-   - Construct GW header with connection handle at offset 32
-   - Write RFC_MARKER = 0xffff0001
+   - Construct GW header with connection handle at frame offset 44 (payload 40)
+   - Write RFC_MARKER = `FF FF` + connection index
    - Write COM_HEAD = D9C6C3F0F0F0F0F0F0F0F0F0
    - Write logon TLV records (tags 0x0114, 0x0111, 0x0117, 0x0115, etc.)
    - End with RFCPING call (tags 0x0502, 0x000b, 0x0102)
-   - Read server response; check tag 0x0420 = 0 for success
+   - Read server response; no `0x0402`/`0x0417` error tag means success, and `0x0420`
+     decides whether a refused embedded RFCPING is salvageable (see D-38 above)
 
 ---
 

@@ -5,10 +5,11 @@
 
 
 A load-balanced connection asks the message server which application server to
-use, then connects to that server normally. `saprfclib` reaches the message
-server over its **HTTP interface**, which is line-oriented and confirmed against
-a live server. The binary protocol is also implemented but is **not** verified —
-see the warning below.
+use, then connects to that server normally. By default (`ms_use_http=True`)
+`saprfclib` reaches the message server over its **HTTP interface**, which is
+line-oriented (golden fixtures `tests/golden/router/ms_http_*.txt`). The binary
+protocol is used with `ms_use_http=False`; its exchange was reproduced against a
+live message server, see "Binary protocol" below.
 
 ---
 
@@ -41,11 +42,20 @@ different layout:
 - 9310 — the documented SCS default
 - 3601 — what the A4H test system actually uses
 
-`saprfclib` reads the instance from where SAP's own table points: the
-`sapms<SID>` entry in `/etc/services`. That table notes *"You can reassign
-service names to an arbitrary value after installation in `/etc/services`"*,
-which makes that file the client-side record rather than a convention. When it is
-absent, `msserv` must be supplied — a port, or the service name.
+SAP's table points at the `sapms<SID>` entry in `/etc/services` as the client-side
+record: *"You can reassign service names to an arbitrary value after installation
+in `/etc/services`"*.
+
+What `connect()` does today (`_ms_port_or_raise` in `connection.py`):
+
+- An explicit `msserv` (a port, or a service name looked up in `/etc/services`) is
+  used as the port as given. On the HTTP path (the default) it is used as the
+  **HTTP** port unless `ms_http_port` is given.
+- Otherwise the `sapms<SID>` entry is read and turned into an instance number,
+  `port − 3600`; only a result in 0–99 is accepted. The binary port is then
+  `3600 + instance` and the HTTP port `8100 + instance`. An entry outside
+  3600–3699 (such as the SCS default 9310) is treated as absent.
+- With neither, the connection is refused with an error asking for `msserv`.
 
 ### The other ports, and what confirms them
 
@@ -73,10 +83,12 @@ port 50113."* The application server is instance 00 and the ASCS, which hosts
 the message server, is instance 01. That is why the gateway is 3300 while the
 message server is 3601.
 
-## HTTP interface — CONFIRMED
-
-Present only when the profile sets `ms/server_port_0`. When it is absent the
-resolver says so explicitly rather than failing obscurely.
+## HTTP interface
+Present only when the profile enables the message server's HTTP port. When it is
+unreachable the resolver says so explicitly rather than failing obscurely; its error
+text names the parameter `ms/server_port_0`, while the ports table above lists
+`ms/http_port_<n>`. `[ASSUMED]` which of the two names applies — reading the test
+system's profile would settle it.
 
 ### `/msgserver/text/logon?version=1.2[&group=NAME]`
 
@@ -125,15 +137,14 @@ substitution cannot invalidate an offset or a length.
 
 ## Hostname vs address
 
-The logon endpoint reports the **hostname** SAP knows (`vhcala4hci`), not an
+The logon endpoint reports the **hostname** SAP knows (`sapdemo1` in `ms_http_logon_v12.txt`), not an
 address. `lglist` and `aslist` report the address. If the client cannot resolve
 the SAP-side hostname in DNS, a resolved connection fails at connect time even
 though resolution succeeded — pass `ashost` directly in that case.
 
 ---
 
-## Binary protocol — CONFIRMED end to end
-
+## Binary protocol
 Captured from SAP GUI performing a group logon (`tcpdump` on port 3601), then
 **reproduced against the live server by this library**, which answered
 `errorno 0` and returned the real server list. Golden fixtures:
@@ -151,16 +162,19 @@ C->S  110B   detach    operation 0x04
 
 ### Header — 110 bytes
 
+Payload offsets: the `.bin` fixtures include the 4-byte NI length prefix, so add 4 to
+read them there.
+
 | Offset | Size | Field |
 |--------|------|-------|
 | `0x00` | 12 | `**MESSAGE**\0` |
 | `0x0c` | 1 | version = 4 |
 | `0x0d` | 1 | errorno, **signed** |
-| `0x0e` | 40 | toname, space-padded |
-| `0x36` | 1 | msgtype (0 in every captured frame) |
-| `0x42` | 1 | speaker: `0x02` client, `0x03` server |
+| `0x0e` | 40 | toname. Space-padded in the attach frames; in `sapms_serverlist_request.bin` (SAP GUI) it is `MSG_SERVER` followed by NULs and leftover text. `saprfclib` space-pads. |
+| `0x36` | 1 | msgtype. 0 in the SAP GUI frames; `0x01` in the probe reply `sapms_attach_access_denied.bin`. `saprfclib` sends 0. |
+| `0x42` | 1 | speaker: `0x02` from the client. Server replies carry `0x02` (`sapms_attach_reply.bin`) or `0x03` (`sapms_serverlist_reply.bin`), so it does not identify the server. |
 | `0x43` | 1 | **operation**: `0x08` attach, `0x01` request, `0x04` detach |
-| `0x44` | 40 | fromname, space-padded |
+| `0x44` | 40 | fromname. Space-padded in the attach frames, NUL-padded in `sapms_serverlist_reply.bin`. `saprfclib` space-pads. |
 | `0x6c` | 2 | service number, network order |
 
 ### Request body — 52 bytes
@@ -246,8 +260,7 @@ code on the strength of one capture that happened to use the other opcode.
 
 ---
 
-## SAProuter route acknowledgement — CONFIRMED
-
+## SAProuter route acknowledgement
 Confirmed against a live SAProuter (version 40.4) on 2026-08-31.
 
 After the `NI_ROUTE` frame, the router answers **before** it begins forwarding:
@@ -270,7 +283,7 @@ gateway uses for its errors:
 
 ```
 NI_RTERR\0 … *ERR*\0 1\0
-saprouter: route permission denied (203.0.113.42 to 10.99.99.99, 3300)\0
+saprouter: route permission denied (<client address> to <target address>, 3300)\0
 -94\0 NI (network interface)\0 753\0 40\0 … SAProuter 40.4 on 'saprouter'\0 *ERR*\0
 ```
 
@@ -282,8 +295,7 @@ Observed while probing which targets the test router permits: `3300` and `3200`
 were accepted for the configured host and `22` was refused, so the permission
 table is per host **and** port.
 
-### NI_ROUTE layout — CONFIRMED (corrected 2026-11-08)
-
+### NI_ROUTE layout
 A route entry is **three NUL-terminated fields**: host, service, password. The frame
 lists every router and, last, the destination gateway, with **no per-entry length**:
 

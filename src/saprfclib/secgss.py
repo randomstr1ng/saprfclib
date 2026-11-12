@@ -84,7 +84,7 @@ _MECH_OID_TLV = b"\x06\x06\x2b\x24\x03\x01\x25\x01"
 
 # --- negotiated parameter set (all observed on the wire, 2026-11-08) -------
 # ClientHello parameter list ids, ServerHello v1.1 parameters. Source: golden
-# fixture secgss_handshake_q3 (ClientHello params, ServerHello params
+# fixture secgss_live_handshake (ClientHello params, ServerHello params
 # 01 01 0009 00004000).
 _VERSION_1_1 = (1, 1)
 _MAC_HMAC_SHA256 = 1
@@ -211,7 +211,7 @@ def _tlv_long2(tag: int, content: bytes) -> bytes:
     """TLV whose length is always written in the two-byte long form (``82 HH LL``).
 
     The reference implementation writes the outer token SEQUENCE and the message
-    container this way regardless of size (golden fixture secgss_handshake_q3).
+    container this way regardless of size (golden fixture secgss_live_handshake).
     """
     if len(content) > 0xFFFF:
         raise SncError("handshake token too large")
@@ -274,8 +274,9 @@ def _p_sha256(secret: bytes, seed: bytes, n: int) -> bytes:
     """``P_SHA256(secret, seed)`` truncated to ``n`` bytes (RFC 5246 §5).
 
     Label and seed parts are concatenated into ``seed`` by the caller. Source:
-    golden fixture secgss_session_q3 — master secret, both key blocks and both
-    Finished values recompute from the recorded inputs with this function.
+    golden fixture secgss_loopback_records — the Finished values and every record
+    replay byte for byte only with the keys this function derives from the recorded
+    inputs.
     """
     out = bytearray()
     a = seed
@@ -291,7 +292,7 @@ class _Direction:
     The MAC is *cumulative*: one HMAC-SHA256 object per direction is fed every MAC
     input since the keys were derived, and each record carries the digest of all
     of it so far (wrap and MIC records share the state). It is never reset. Source:
-    golden fixture secgss_session_q3 — every record of both directions, server
+    golden fixture secgss_loopback_records — every record of both directions, server
     records included, verifies only under this rule.
     """
 
@@ -313,7 +314,7 @@ class _Direction:
 
 def _record_header(seq: int, length: int, index: int) -> bytes:
     # BE64 seq || BE32 length || BE32 chunk index || version major || version minor.
-    # Source: golden fixture secgss_session_q3 (recomputed MAC inputs).
+    # Source: golden fixture secgss_loopback_records (recomputed MAC inputs).
     return struct.pack(">QII", seq, length, index) + bytes(_VERSION_1_1)
 
 
@@ -348,10 +349,13 @@ def _parse_token(token: bytes, flags: bytes) -> tuple[int, bytes]:
 # Names
 # ---------------------------------------------------------------------------
 
-# X.500 attribute abbreviations → OIDs (standard X.520 / RFC 4519 assignments).
+# X.500 attribute abbreviations → OIDs (X.520 / RFC 4519 assignments), with one SAP
+# difference: in an SNC name SN means serialNumber (2.5.4.5), not surname. That is how the
+# reference library encodes SN in the names it exports (probe partner names, 2026-11-08,
+# see snc._RDN_OID), so a partner name is matched against the certificate the same way.
 _ATTR_OIDS: dict[str, str] = {
     "CN": "2.5.4.3",
-    "SN": "2.5.4.4",
+    "SN": "2.5.4.5",
     "SERIALNUMBER": "2.5.4.5",
     "C": "2.5.4.6",
     "L": "2.5.4.7",
@@ -560,7 +564,7 @@ def _rsa_private(der: bytes) -> Python_RSAKey:
 def _rsa_public(cert: _x509.Certificate) -> Python_RSAKey:
     pki = cert.public_key
     if pki.algorithm != "rsa":
-        raise SncError("peer certificate key is not RSA; only RSA peers are supported")
+        raise SncError("certificate key is not RSA, but the signature to verify is an RSA one")
     pub = pki["public_key"].parsed
     return Python_RSAKey(pub["modulus"].native, pub["public_exponent"].native)
 
@@ -775,7 +779,7 @@ class _SecGssContext:
         body = bytearray()
         for i, chunk in enumerate(self._chunks(payload)):
             # Pad value is the pad length itself, 1..16 bytes; padding is inside the
-            # MAC (MAC-then-encrypt). Source: golden fixture secgss_session_q3.
+            # MAC (MAC-then-encrypt). Source: golden fixture secgss_loopback_records.
             padlen = _AES_BLOCK - ((len(chunk) + _MAC_LEN) % _AES_BLOCK)
             pad = bytes([padlen]) * padlen
             mac = d.mac(_record_header(d.seq, len(chunk) + padlen, i) + chunk + pad)

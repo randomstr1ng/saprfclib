@@ -334,3 +334,11 @@ def test_no_secret_in_error_messages():
     err = _final_step_error(partner="p:CN=SECRETNAME")
     assert "SECRETNAME" not in str(err)
     assert fx["ecdh_private_key"] not in repr(err)
+
+
+def test_sn_in_a_partner_name_is_serial_number() -> None:
+    # As the SNC extension header encodes it (snc._RDN_OID): SN is serialNumber, not
+    # surname, so the partner name and the certificate are compared the same way.
+    from saprfclib.secgss import parse_snc_name
+
+    assert dict(parse_snc_name("p:CN=x, SN=123"))["2.5.4.5"] == "123"
