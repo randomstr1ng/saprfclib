@@ -150,6 +150,10 @@ The live system answered `01 01 0009 00004000`: version 1.1, suite `0x0009`, chu
   00000606 00000506 00000206`. With an EC key the reference client, and the built-in
   client, sign with `00000606` (SHA-512) whatever the curve, as the first ECDSA id the
   server lists.
+- Live, 2026-11-12: an S/4HANA ABAP server sent the same twelve ids in the same order.
+  A client with a P-256 key signed with `00000606`, the server accepted the
+  AuthResponse, and the logon and RFC calls over the privacy-protected connection
+  succeeded.
 
 ### Key schedule
 
