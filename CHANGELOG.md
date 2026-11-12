@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **EC keys in the built-in X.509 SNC mechanism** (issue #64). PSEs with ECDSA keys on
+  P-256, P-384 or P-521 — what `sapgenpse -a ECDSA` and current SAP systems create — now
+  load and sign (`snc_pse=`, `snc_credential=`, `SECUDIR`), and servers with EC
+  certificates or EC-signed chains are verified. The signature algorithm ids were mapped
+  against SAP CommonCryptoLib as the acceptor; every combination of EC and RSA keys on
+  both sides completed a handshake and exchanged records with it, and the existing RSA
+  logon was rechecked against an S/4HANA system. Replayed byte for byte from
+  `tests/golden/snc/secgss_ec_loopback.json` and `secgss_ec_client_rsa_server.json`.
+  DSA and EdDSA keys are refused with a clear error.
+
+### Fixed
+
+- **Yes/no connection parameters are no longer read by truthiness** (issue #64).
+  `snc_sso="0"` counted as *on*, dropped the password and logged on with the SNC
+  identity. `snc_sso`, `snc_kerberos`, `ws_tls_verify`, `ms_use_http`, `strict_params`
+  and `allow_restricted_logon` accept `True`/`False`, `1`/`0` and the NW RFC SDK strings
+  `"1"`/`"0"`; anything else raises `TypeError` before a connection is opened.
+
 ## [0.2.0] - 2026-11-11
 
 SNC without any SAP library: the X.509 and Kerberos mechanisms are built in, Kerberos
