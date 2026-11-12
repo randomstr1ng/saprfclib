@@ -316,9 +316,12 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0305    | capture     | SAPCOMPRESS-compressed TABLE rows, fragments of one stream (gfi_compressed_params_response.bin) |
 | 0x0306    | capture     | Empty; table end (gfi_compressed_params_response.bin, ddif_fieldinfo_rfcsi_response.bin) |
 | 0x0310    | capture     | 4-byte BE uint32 used row width, 402 in gfi_compressed_params_response.bin |
-| 0x0331    | capture     | 4-byte BE uint32 near the start of a reply (values 1 and 2 in basxml_et_data_multirow_response.bin). Meaning not established |
+| 0x0331    | capture     | 4-byte BE DM table id: opens the reply's section for a table the client sent (see "Tables the client sent") |
+| 0x0332    | capture     | 12 bytes `[5, dm_table_id, row]`: delete that row (table_delta.json) |
+| 0x0333    | capture     | 12 bytes `[op, dm_table_id, row]`, followed by the row in `0x0334`: op 4 append, 6 insert at row, 7 change row (table_delta.json) |
+| 0x0334    | capture     | The row of a preceding `0x0333` edit (table_delta.json) |
 | 0x0335    | capture     | Returned form of a table the client sent: 12 bytes, three BE uint32 `[10, dm_table_id, row_count]`, followed by `0x0302` and `0x0304` rows (basxml_et_data_response.bin: `[10, 1, 4]`) |
-| 0x0336    | capture     | 4-byte BE uint32 closing a `0x0335` table (basxml_et_data_response.bin) |
+| 0x0336    | capture     | 4-byte BE DM table id: closes the section `0x0331` opened (basxml_et_data_response.bin, table_delta.json) |
 | 0x0337    | [ASSUMED]   | Marker / empty record                                                 |
 | 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
 | 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
@@ -922,6 +925,30 @@ Offset   Bytes                                            Field
 ```
 
 See `tests/golden/framing/stfc_connection_request.json` for full field-by-field annotation.
+
+### Tables the client sent
+
+A TABLES parameter the client sent rows for is identified in the reply by the DM table id
+the client gave it in `0x0330`, not by name. Each such table gets a section from `0x0331
+[dm]` to `0x0336 [dm]`, and inside it the server sends what happened to the table:
+
+| Inside the section | Meaning |
+|--------------------|---------|
+| nothing | unchanged: the table comes back as it was sent |
+| `0x0333 [4, dm, row]` + `0x0334` row | append; `row` is the new last row |
+| `0x0333 [6, dm, row]` + `0x0334` row | insert at `row` |
+| `0x0333 [7, dm, row]` + `0x0334` row | change `row` |
+| `0x0332 [5, dm, row]` | delete `row` |
+| `0x0335 [10, dm, count]` + `0x0302` + rows | the whole table again (after a sort or a clear) |
+
+Rows are numbered from 1, and the edits apply in the order sent: a change of row 1, a
+delete of row 3 and an append at row 3 turn A, B, C into MOD1, B, NEW1. Live capture
+2026-11-12: a purpose-built function module editing its TABLES parameter in each of these
+ways, called by the reference client (`tests/golden/serialization/table_delta.json`).
+saprfclib rebuilds the table from the rows it sent and these edits, and returns an untouched
+table as it was sent, as the reference client does (`invoke._apply_table_deltas`). A table
+the client did not send comes back under `0x0301` with its name, numbered on from the
+client's ids.
 
 ---
 

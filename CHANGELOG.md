@@ -58,6 +58,14 @@ that it is an assumption.
 - **DATN and TIMN fields in structures are no longer dropped.** The dictionary types
   were unknown, so a structure holding one lost the field from its layout; they travel
   exactly like DATS and TIMS (live).
+- **Tables the caller sends come back with the server's changes.** A TABLES parameter
+  the caller filled and the function module then edited was missing from the result:
+  the server answers with the edits (append, insert, change, delete), keyed by the
+  table's DM id, and those were not decoded. An untouched table was missing too. Both
+  now come back as the reference client returns them, e.g. `STFC_STRUCTURE`'s
+  `RFCTABLE`. Every kind of edit was captured from a purpose-built function module
+  (`tests/golden/serialization/table_delta.json`); an edit not in that set raises
+  instead of returning a table that differs from the server's.
 - **STRING values carry their terminating NUL.** A STRING travels as UTF-8 followed by
   one NUL byte (live capture, `tests/golden/serialization/string_xstring.json`); the
   library returned that NUL as part of the value (`"Hello\x00"`) and sent strings without
