@@ -152,9 +152,9 @@
       "offset": 260,
       "length": 11,
       "name": "tlv_0008_hostname",
-      "value": "746974616e",
+      "value": "686f737431",
       "type": "fixed",
-      "note": "tag=0x0008 len=5; client hostname: ASCII 'titan'"
+      "note": "tag=0x0008 len=5; client hostname: ASCII 'host1'"
     },
     {
       "offset": 271,
@@ -220,7 +220,7 @@
     "rfc_user": "Developer",
     "rfc_lang": "E",
     "rfc_version": "754",
-    "client_hostname": "titan",
+    "client_hostname": "host1",
     "initial_function": "RFCPING"
   }
 }

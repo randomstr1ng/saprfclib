@@ -99,6 +99,10 @@ that it is an assumption.
   synthetic `trfc_call_request` fixture, which the tRFC captures contradict, is removed.
   `tests/test_repo_hygiene.py` now also scans the fixtures and catches header line
   references.
+- **Fixtures and docs no longer carry private addresses or host names** of the development
+  lab. They are replaced with documentation addresses (198.51.100.x, 192.0.2.x) and
+  `host1`, byte length preserved in every binary capture, including the raw IPv4 forms
+  and 8-character prefixes some frames hold. A hygiene check keeps them out.
 
 ### Documentation
 
@@ -722,7 +726,7 @@ most of them out, and the last one reaches well past bgRFC.
   were wrong in a way that reinforced itself: bytes 135–137 were recorded as an "0xFFFF
   marker", 137–141 as a primary IPv4 and 141–145 as a duplicate. They are none of those —
   125–141 is a single IPv6 field, and every captured address is IPv4-mapped
-  (`::ffff:192.168.88.7`), so the `ffff` is the mapping prefix and the "primary IPv4" was
+  (`::ffff:198.51.100.7`), so the `ffff` is the mapping prefix and the "primary IPv4" was
   the embedded address. The "duplicate" is a separate `hostaddrv4` field holding the same
   value, which is exactly why the wrong one went unnoticed. The service name sat at
   104–124 rather than the recorded 80–124, which happened to contain it only because the

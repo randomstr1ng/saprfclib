@@ -119,7 +119,7 @@ def test_ni_rterr_snc_failure_is_reported() -> None:
 def test_build_ni_route_golden() -> None:
     """NI_ROUTE payload matches byte-exact golden fixture from live capture 2026-06-27.
 
-    Route: /H/saprouter.example.com/S/3299 → dest 192.168.88.7:3300
+    Route: /H/saprouter.example.com/S/3299 → dest 198.51.100.7:3300
     Fixture: tests/golden/router/ni_route_payload.bin (71 bytes)
     """
     from pathlib import Path
@@ -128,7 +128,7 @@ def test_build_ni_route_golden() -> None:
     expected = fixture.read_bytes()
 
     hops = parse_route_string("/H/saprouter.example.com/S/3299")
-    actual = build_ni_route(hops, "192.168.88.7", "3300")
+    actual = build_ni_route(hops, "198.51.100.7", "3300")
     assert actual == expected, (
         f"NI_ROUTE bytes mismatch\nexpected: {expected.hex()}\nactual:   {actual.hex()}"
     )
@@ -317,22 +317,22 @@ _MS_LOGIN_ACK = bytes.fromhex(
 
 
 # Test 1: parsing a valid SAPMS server-list golden frame returns the expected
-# per-server (host, port) entries (wire-confirmed: 192.168.88.7 on port 3200).
+# per-server (host, port) entries (wire-confirmed: 198.51.100.7 on port 3200).
 def test_parse_sapms_server_list_golden_frame() -> None:
     """parse_sapms_server_list returns 3 (host, port) entries from the golden
-    598-byte frame: entry0=(192.168.99.6,0), entry1=(192.168.88.7,3200),
+    598-byte frame: entry0=(198.51.100.6,0), entry1=(198.51.100.7,3200),
     entry2=(127.0.0.1,0). wire-captured: captures/phase03_msgserver_capture_output.txt."""
     frame = _golden_frame()
     entries = parse_sapms_server_list(frame)
     # There are 3 server entries in the golden frame.
     assert len(entries) == 3, f"expected 3 entries, got {len(entries)}"
-    # Entry 0: inactive server 192.168.99.6 port 0
+    # Entry 0: inactive server 198.51.100.6 port 0
     host0, port0 = entries[0]
-    assert host0 == "192.168.99.6", f"entry0 host: {host0!r}"
+    assert host0 == "198.51.100.6", f"entry0 host: {host0!r}"
     assert port0 == 0, f"entry0 port: {port0}"
-    # Entry 1: active server 192.168.88.7 port 3200 (the only non-zero port)
+    # Entry 1: active server 198.51.100.7 port 3200 (the only non-zero port)
     host1, port1 = entries[1]
-    assert host1 == "192.168.88.7", f"entry1 host: {host1!r}"
+    assert host1 == "198.51.100.7", f"entry1 host: {host1!r}"
     assert port1 == 3200, f"entry1 port: {port1}"
     # Entry 2: loopback 127.0.0.1 port 0
     host2, port2 = entries[2]
@@ -700,13 +700,13 @@ def test_route_entries_are_three_null_terminated_fields() -> None:
     captured = (SAPMS_DIR / "ni_route_password_payload.bin").read_bytes()
     ours = build_ni_route(
         parse_route_string("/H/saprouter.example.com/S/3299/P/s3cr3tp4s"),
-        "192.168.88.7",
+        "198.51.100.7",
         "3300",
     )
     assert ours == captured, "must match what SAP's own client sends"
     assert b"saprouter.example.com\x003299\x00s3cr3tp4s\x00" in ours
     # The destination carries an empty password: a bare trailing NUL.
-    assert ours.endswith(b"192.168.88.7\x003300\x00\x00")
+    assert ours.endswith(b"198.51.100.7\x003300\x00\x00")
 
 
 def test_the_unprotected_route_still_matches_its_fixture() -> None:
@@ -715,7 +715,7 @@ def test_the_unprotected_route_still_matches_its_fixture() -> None:
 
     captured = (SAPMS_DIR / "ni_route_payload.bin").read_bytes()
     ours = build_ni_route(
-        parse_route_string("/H/saprouter.example.com/S/3299"), "192.168.88.7", "3300"
+        parse_route_string("/H/saprouter.example.com/S/3299"), "198.51.100.7", "3300"
     )
     assert ours == captured
     assert b"saprouter.example.com\x003299\x00\x00" in ours
@@ -753,7 +753,7 @@ def test_the_entry_fields_sum_to_the_captured_entry_size() -> None:
 def test_the_address_is_read_from_the_dedicated_ipv4_field() -> None:
     """Not from the IPv4 embedded in the IPv6 above it.
 
-    Every captured address is IPv4-mapped -- ::ffff:192.168.88.7 -- so bytes
+    Every captured address is IPv4-mapped -- ::ffff:198.51.100.7 -- so bytes
     135-137 are the mapping prefix and 137-141 the embedded address. Reading
     there gives the right answer only while the address stays mapped; a server
     answering with a real IPv6 would yield four bytes from the middle of it,

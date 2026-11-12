@@ -294,7 +294,7 @@ _SAPMS_ENTRY_SIZE = 160  # wire-captured
 # An earlier reading of this had three fields wrong, and the errors reinforced
 # each other. Bytes 135-137 were recorded as an "0xFFFF marker" and 137-141 as a
 # primary IPv4 with 141-145 as a duplicate. They are neither: 125-141 is a single
-# IPv6 field, and every captured address is IPv4-mapped -- ::ffff:192.168.88.7 --
+# IPv6 field, and every captured address is IPv4-mapped -- ::ffff:198.51.100.7 --
 # so the ffff is the mapping prefix and the "primary IPv4" was the embedded
 # address. The "duplicate" is the separate hostaddrv4 field carrying the same
 # value. The service name was also placed at 80-124 rather than 104-124, which

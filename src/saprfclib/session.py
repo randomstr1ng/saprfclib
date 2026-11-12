@@ -252,7 +252,7 @@ class Session:
             b"1100"  # [20-23] propose codepage 1100
         )
         struct.pack_into(">H", body, 28, _NI_VERSION_FLAGS)  # [28-29] version_flags 0x0006
-        body[30:54] = b"titan   python3         "  # [30-53] hostname + program area
+        body[30:54] = b"host1   python3         "  # [30-53] hostname + program area
         struct.pack_into(">H", body, 54, _NI_RFC_HINT)  # [54-55] rfc_hint 0x06cb
         struct.pack_into(">H", body, 56, _NI_UNICODE_CAPABLE)  # [56-57] unicode_capable 0xffff
         return bytes(body)

@@ -1,6 +1,6 @@
 {
   "message_type": "NI_VERSION_REQUEST",
-  "capture_source": "live capture 2026-06-26 frame 4; SAP A4H sysnr=00 port=3300; client=10.20.30.65",
+  "capture_source": "live capture 2026-06-26 frame 4; SAP A4H sysnr=00 port=3300; client=192.0.2.65",
   "evidence": "NI version exchange — NI layer; independent confirmation pending",
   "ni_header_length": 4,
   "notes": [
@@ -33,7 +33,7 @@
       "name": "client_ip",
       "value": "",
       "type": "variable",
-      "note": "Client IPv4: machine-specific (10.20.30.65 in capture); payload offset 2 (= raw frame offset 6 − 4 NI header), variable because taken from getsockname()"
+      "note": "Client IPv4: machine-specific (192.0.2.65 in capture); payload offset 2 (= raw frame offset 6 − 4 NI header), variable because taken from getsockname()"
     },
     {
       "offset": 10,
@@ -87,9 +87,9 @@
       "offset": 34,
       "length": 10,
       "name": "hostname",
-      "value": "titan",
+      "value": "host1",
       "type": "fixed",
-      "note": "Client hostname space-padded to 10 bytes: 'titan'"
+      "note": "Client hostname space-padded to 10 bytes: 'host1'"
     },
     {
       "offset": 44,
@@ -127,9 +127,9 @@
   "expected_parse": {
     "msg_type": "0x0203",
     "ni_length": 64,
-    "client_ip": "10.20.30.65",
+    "client_ip": "192.0.2.65",
     "proposed_codepage": "1100",
     "program": "python3",
-    "hostname": "titan"
+    "hostname": "host1"
   }
 }

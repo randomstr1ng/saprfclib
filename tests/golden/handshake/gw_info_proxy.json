@@ -1,11 +1,11 @@
 {
   "message_type": "GW_INFO",
   "capture_source": "live capture 2026-10-02 (nohat-rfc-working.pcap) frame 5; SAP A4H sysnr=00 via SAP BTP Connectivity Proxy SOCKS5 + Cloud Connector",
-  "evidence": "CONFIRMED — the gateway accepted this 0x060f frame and the STFC_CONNECTION call round-tripped (ECHOTEXT returned). Proves the gateway-host field [80:192] must carry the SAP system's internal address (here the IPv4 literal 192.168.88.9), not the virtual tunnel host (s4-2025-raw), which an earlier capture showed the gateway rejects with 'hostname ... unknown' (issue #51).",
+  "evidence": "CONFIRMED — the gateway accepted this 0x060f frame and the STFC_CONNECTION call round-tripped (ECHOTEXT returned). Proves the gateway-host field [80:192] must carry the SAP system's internal address (here the IPv4 literal 198.51.100.9), not the virtual tunnel host (s4-2025-raw), which an earlier capture showed the gateway rejects with 'hostname ... unknown' (issue #51).",
   "ni_header_length": 4,
   "notes": [
     "GW_INFO (type 0x060f) — sent by the client after GW_CONNECT accept; the gateway sends no response to this frame.",
-    "The server-host block at offset 80 (112 bytes, space-padded) is the field the gateway resolves. gwhost here is the IPv4 literal 192.168.88.9, so no server-side DNS is needed.",
+    "The server-host block at offset 80 (112 bytes, space-padded) is the field the gateway resolves. gwhost here is the IPv4 literal 198.51.100.9, so no server-side DNS is needed.",
     "Connection handle '56334047' comes from the GW_CONNECT ACK (frame 4).",
     "No credentials appear in this frame (credentials are in the later 0x06cb logon frame, deliberately not captured here)."
   ],
@@ -54,9 +54,9 @@
       "offset": 52,
       "length": 8,
       "name": "gwhost_prefix",
-      "value": "3139322e3136382e",
+      "value": "3139382e35312e31",
       "type": "fixed",
-      "note": "ASCII '192.168.' — first 8 bytes of the gateway host (payload[48:56])"
+      "note": "ASCII '198.51.1' — first 8 bytes of the gateway host (payload[48:56])"
     },
     {
       "offset": 60,
@@ -64,7 +64,7 @@
       "name": "gwhost_length",
       "value": "0000000c",
       "type": "fixed",
-      "note": "BE uint32 = 12 = len('192.168.88.9') (payload[56:60])"
+      "note": "BE uint32 = 12 = len('198.51.100.9') (payload[56:60])"
     },
     {
       "offset": 64,
@@ -86,9 +86,9 @@
       "offset": 84,
       "length": 12,
       "name": "gwhost",
-      "value": "3139322e3136382e38382e39",
+      "value": "3139382e35312e3130302e39",
       "type": "variable",
-      "note": "ASCII '192.168.88.9' — the SAP system's internal address the gateway resolves (payload[80:92])"
+      "note": "ASCII '198.51.100.9' — the SAP system's internal address the gateway resolves (payload[80:92])"
     },
     {
       "offset": 96,
@@ -111,6 +111,6 @@
     "ni_length": 224,
     "gw_msg_type": "0x060f",
     "connection_handle": "56334047",
-    "gwhost": "192.168.88.9"
+    "gwhost": "198.51.100.9"
   }
 }
