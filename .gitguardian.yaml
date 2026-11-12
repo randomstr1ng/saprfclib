@@ -1,0 +1,14 @@
+# GitGuardian / ggshield configuration.
+#
+# tests/golden/ holds byte-exact protocol captures and test material: private keys of
+# throwaway test PSEs, recorded ephemeral key-exchange keys and encrypted SNC records
+# that let handshakes replay byte for byte. None of it is a credential for any real
+# system, and all of it is high-entropy by nature, so every new fixture would raise a
+# "Generic High Entropy Secret" alert. Real credentials never belong in the repository
+# (CLAUDE.md, "Never log secrets"; fixtures are sanitised).
+version: 2
+secret:
+  ignored_paths:
+    - "tests/golden/**"
+    # Loads those fixtures by name; its alerts were on fixture-name lines.
+    - "tests/test_secgss_ec.py"
