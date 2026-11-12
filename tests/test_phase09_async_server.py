@@ -30,9 +30,9 @@ _SKIP_SERVER = pytest.mark.skipif(
 from saprfclib.invoke import (  # noqa: E402
     build_bgrfc_request,
     build_invoke_request,
-    build_trfc_request,
 )
 from saprfclib.types import RFC_EXPORT, RFC_IMPORT, FieldDesc, FunctionDesc  # noqa: E402
+from tests._trfc_fixture import forged_inbound_trfc  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Module-level helpers
@@ -172,7 +172,7 @@ async def test_async_server_duplicate_tid() -> None:
         return {}
 
     tid = "ABCDEF1234567890ABCDEF12"  # 24 chars, valid RFC alphabet
-    frame = build_trfc_request(tid, "STFC_CONNECTION")
+    frame = forged_inbound_trfc(tid, "STFC_CONNECTION")
 
     # First dispatch: TID is new → handler runs once
     resp1 = await server._async_dispatch(frame)

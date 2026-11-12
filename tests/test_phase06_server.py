@@ -68,10 +68,10 @@ def test_duplicate_tid_short_circuits() -> None:
     server.set_tid_store(store)  # type: ignore[attr-defined]
 
     # Build a minimal synthetic ARFC_DEST_SHIP frame for dispatch_inbound.
-    # build_trfc_request(tid, func_name) — tid first, func_name second (Plan 06-03 API).
-    from saprfclib.invoke import build_trfc_request
+    # forged_inbound_trfc(tid, func_name) — tid first, func_name second (Plan 06-03 API).
+    from tests._trfc_fixture import forged_inbound_trfc
 
-    frame = build_trfc_request(_KNOWN_TID, "STFC_CONNECTION")
+    frame = forged_inbound_trfc(_KNOWN_TID, "STFC_CONNECTION")
 
     response = server.dispatch_inbound(frame)
 
@@ -111,10 +111,10 @@ def test_new_tid_persists_before_execute() -> None:
         persistence_seen_before_handler.append(store.is_executed(new_tid) or True)
         return {}
 
-    # build_trfc_request(tid, func_name) — Plan 06-03 API (tid first, func_name second).
-    from saprfclib.invoke import build_trfc_request
+    # forged_inbound_trfc(tid, func_name) — Plan 06-03 API (tid first, func_name second).
+    from tests._trfc_fixture import forged_inbound_trfc
 
-    frame = build_trfc_request(new_tid, "STFC_CONNECTION")
+    frame = forged_inbound_trfc(new_tid, "STFC_CONNECTION")
 
     server.dispatch_inbound(frame)  # type: ignore[attr-defined]
 

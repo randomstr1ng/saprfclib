@@ -34,7 +34,7 @@ def main() -> None:
                 REQUTEXT="tRFC example from saprfclib",
             )
             # Step 3: confirm the TID only after the submit succeeded.
-            # Confirmation removes the TID from SAP's dedup table (ARFCSSTATE).
+            # Confirmation removes the TID from SAP's dedup table (ARFCRSTATE).
             conn.confirm_tid(tid)
             print(f"tRFC TID {tid} submitted and confirmed.")
         except saprfclib.CommunicationError as exc:

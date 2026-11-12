@@ -31,7 +31,7 @@ try:
     )
 
     # Step 3: confirm the TID ONLY after verifying the submit succeeded.
-    # Confirmation removes the TID from the SAP dedup table (ARFCSSTATE).
+    # Confirmation removes the TID from the SAP dedup table (ARFCRSTATE).
     conn.confirm_tid(tid)
     print(f"TID {tid} confirmed — exactly-once delivery guaranteed")
 
@@ -46,8 +46,10 @@ finally:
 
 ## qRFC variant
 
-Pass a `queue` keyword argument to submit to a named inbound queue.  SAP processes queued
-calls in FIFO order within each queue name (transaction SMQ2).
+Pass a `queue` keyword argument to submit to a named inbound queue (1 to 24 characters).
+The call lands in the system's inbound queue (transaction SMQ2) and runs in FIFO order within
+that queue once the queue is processed; whether that happens automatically depends on the
+queue registration (transaction SMQR).
 
 ```python
 import saprfclib
@@ -91,3 +93,8 @@ finally:
 
 Do **not** confirm the TID if `call_transactional` raises `CommunicationError` — the same
 TID is safe to resubmit and SAP will deduplicate.
+
+The function module's parameters are passed as for `call()`: importing, changing and tables
+parameters, checked against the server's metadata. Nothing comes back — a tRFC call has no
+result — and success is the absence of an exception. The wire format is described in
+[tRFC / qRFC / bgRFC](../protocol/trfc.md).

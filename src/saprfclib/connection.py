@@ -62,12 +62,15 @@ from saprfclib.exceptions import (
     WebSocketError,
 )
 from saprfclib.invoke import (
+    _ARFC_DEST_SHIP,
+    TrfcOrigin,
     _decode_error_text,
     _extract_name_value_pairs,
     bgrfc_unit_id_bytes,
     bgrfc_unit_kind,
     build_bgrfc_request,
     build_invoke_request,
+    build_trfc_call,
     build_trfc_confirm_request,
     build_trfc_request,
     decompress_table_stream,
@@ -320,6 +323,45 @@ def _encode_logon_language(lang: str) -> bytes:
     saprfclib.language).
     """
     return normalize_logon_language(lang).encode("ascii")
+
+
+# Logon record 0x0007: the client address the logon reports (golden
+# logon_request.bin). The real address is not sent.
+_LOGON_CLIENT_IP = b"127.0.0.1"
+_LOGON_PROGRAM = b"python3"  # logon record 0x0130, the calling program
+
+
+def _logon_hostname() -> bytes:
+    """The host name the logon reports in record 0x0008."""
+    try:
+        return _socket_module.gethostname().encode("ascii", "replace")
+    except Exception:
+        return b"saprfclib"
+
+
+def _trfc_origin(session: Session) -> TrfcOrigin:
+    """The header of a tRFC call: this connection's logon and the server's reply.
+
+    See TrfcOrigin for which logon record feeds which header record.
+    """
+    tags = session.logon_reply_tags
+
+    def text(tag: int) -> str:
+        v = tags.get(tag, b"")
+        enc = "utf-16-le" if len(v) % 2 == 0 else "ascii"
+        return v.decode(enc, "replace").rstrip("\x00")
+
+    return TrfcOrigin(
+        session_token=session.logon_token,
+        client_ip=_LOGON_CLIENT_IP.decode("ascii"),
+        language=_encode_logon_language(session.logon_language or _DEFAULT_LANG).decode(),
+        client_release=_TLV_REL.decode("ascii"),
+        client_host=_logon_hostname().decode("ascii"),
+        program=_LOGON_PROGRAM.decode("ascii"),
+        partner_kernel=text(0x0013),
+        partner_ip=text(0x0018),
+        partner_host=text(0x0006),
+    )
 
 
 def _tlv_ext(tag: int, value: bytes) -> bytes:
@@ -1407,6 +1449,33 @@ def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
     return rows
 
 
+# Alignment of a field in a Unicode structure, by DDIC DATATYPE. A structure's width
+# is the end of its last field rounded up to the largest alignment among its fields:
+# the reference client sends ARFCRDATA rows 1918 bytes wide, though its last field
+# ends at 1917 (tRFC capture, tests/golden/trfc/trfc_submit_two_calls.json). The rule
+# was checked against X030L-TABLEN, the width the server itself reports, for 382
+# structures read from a live S/4HANA system on 2026-11-12: it held for all 357 flat
+# ones, 18 of them padded by one or two bytes. The alignments are each type's gcd of
+# field offsets in that sample. Types the sample did not contain are [ASSUMED]: LCHR
+# and ACCP like the character types, PREC like INT2, LRAW like RAW, and the 8-byte
+# types (INT8, decimal floats, UTCLONG, string references) at 8. A structure holding
+# one of those, read back from a live system, would settle it.
+_DATATYPE_ALIGNMENT: dict[str, int] = {
+    **dict.fromkeys(("CHAR", "CLNT", "LANG", "CUKY", "UNIT", "NUMC", "DATS", "TIMS"), 2),
+    "INT2": 2,
+    "INT4": 4,
+    "FLTP": 8,
+    **dict.fromkeys(("DEC", "CURR", "QUAN", "RAW", "INT1"), 1),
+    # [ASSUMED] -- not in the sample, see above.
+    **dict.fromkeys(("LCHR", "ACCP", "PREC"), 2),
+    "LRAW": 1,
+    **dict.fromkeys(
+        ("INT8", "D16D", "D16R", "D16N", "D34D", "D34R", "D34N", "UTCL", "STRG", "SSTR", "RSTR"),
+        8,
+    ),
+}
+
+
 def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -> TypeDesc:
     """Build a TypeDesc from DDIF_FIELDINFO_GET DFIES rows.
 
@@ -1435,7 +1504,9 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
     packed_nuc = 0
     packed_uc = 0
     max_end = 0
+    align = 1
     for fieldname, _position, offset, leng, intlen, decimals, datatype in rows:
+        align = max(align, _DATATYPE_ALIGNMENT.get(datatype, 1))
         rfctype = _DATATYPE_TO_RFCTYPE[datatype]
         doubled = datatype in _DOUBLED_DATATYPES
         nuc_len = leng if doubled else intlen
@@ -1464,7 +1535,8 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
         packed_uc += uc_len
         max_end = max(max_end, uc_off + uc_len)
 
-    uc_size = max_end if unicode_reply else packed_uc
+    # Trailing padding to the structure's alignment (see _DATATYPE_ALIGNMENT).
+    uc_size = -(-max_end // align) * align if unicode_reply else packed_uc
     return TypeDesc(name=tabname, fields=fields, nuc_size=packed_nuc, uc_size=uc_size)
 
 
@@ -2265,6 +2337,8 @@ class Connection:
                     ),
                 ]
             case SessionState.GW_CONNECTED:
+                self._session.logon_token = os.urandom(16)
+                self._session.logon_language = lang
                 tlv = self._build_logon_request(
                     client=client,
                     user=user,
@@ -2272,6 +2346,7 @@ class Connection:
                     local_ip=local_ip,
                     lang=lang,
                     snc_password_logon=self._snc_mode and not self._snc_sso,
+                    session_token=self._session.logon_token,
                 )
                 if self._snc_mode:
                     # SNC: encrypt only the RFC application data (COM_HEAD + TLV).
@@ -2520,9 +2595,10 @@ class Connection:
         passwd: str | None,
         seed: int | None = None,
         local_ip: str = "127.0.0.1",
-        program_name: bytes = b"python3",
+        program_name: bytes = _LOGON_PROGRAM,
         lang: str = _DEFAULT_LANG,
         snc_password_logon: bool = False,
+        session_token: bytes | None = None,
     ) -> bytes:
         """Build the RFC logon TLV body in extended wire format (tag+len+val+tag).
 
@@ -2538,12 +2614,9 @@ class Connection:
         logged (threat T-04-CRED / T-03-CRED2). ``seed`` is injectable so offline
         tests are deterministic; production uses a fresh per-call client nonce.
         """
-        try:
-            hn = _socket_module.gethostname().encode("ascii", "replace")
-        except Exception:
-            hn = b"saprfclib"
-
-        session_token = os.urandom(16)
+        hn = _logon_hostname()
+        if session_token is None:
+            session_token = os.urandom(16)
 
         parts = [
             _tlv_ext(0x0101, _TLV_CAPS),
@@ -2566,7 +2639,7 @@ class Connection:
             _tlv_ext(0x0115, _encode_logon_language(lang)),
             *([_tlv_ext(_TAG_SNC_PASSWORD_LOGON, b"")] if snc_password_logon else []),
             _tlv_ext(0x0501, b"\x01"),
-            _tlv_ext(0x0007, b"127.0.0.1"),
+            _tlv_ext(0x0007, _LOGON_CLIENT_IP),
             _tlv_ext(0x0011, _encode_logon_language(lang)),
             _tlv_ext(0x0012, _TLV_REL),
             _tlv_ext(0x0013, _TLV_REL),
@@ -3521,52 +3594,29 @@ class Connection:
         queue: str | None = None,
         **params: object,
     ) -> None:
-        """Submit a tRFC (or qRFC) call carrying the confirmed call-type marker.
+        """Submit ``func_name(**params)`` as a tRFC call, or a qRFC call into ``queue``.
 
-        Sends a synchronous RFC invoke of ``ARFC_DEST_SHIP`` with the TID encoded
-        as a CHAR parameter (UTF-16LE, 24 chars = 48 bytes — Pitfall 4).  The
-        function-name TLV (0x0102) carries ``ARFC_DEST_SHIP``, which IS the
-        call-type discriminator on the server side: no separate discriminator byte.
-        A4H runs such a call as ``ARFC_DEST_SHIP`` (live 2026-11-12: the error it returned
-        came from that function module; the submit itself is issue #36).
+        The call is serialized and sent inside ``ARFC_DEST_SHIP`` under ``tid``, as
+        the reference client sends it (docs/protocol/trfc.md). The server runs it
+        once per TID: a resubmit with the same TID after a lost reply is not run
+        again. Nothing comes back -- success is the absence of an exception.
 
-        For qRFC (``queue`` is not None): the queue name is included as an
-        additional parameter in the ARFCSSTATE table param, causing the server to
-        read a non-zero value at the queue-indicator offset 0xe58.
-
-        Returns None — tRFC has no return values by design (CONTEXT Claude's
-        discretion: ``call_transactional`` returns None rather than a dict because
-        the ARFC_DEST_SHIP response carries no EXPORTING parameters meaningful to
-        the caller; exactly-once delivery is signaled by absence of exception).
-
-        This method NEVER calls ``confirm_tid`` automatically (Pitfall 3 /
-        D-04): confirm is a SEPARATE lifecycle step (``conn.confirm_tid(tid)``).
-        Calling ``confirm_tid`` before verifying the submit landed removes backend
-        duplicate-execution protection.
+        Never confirms (Pitfall 3 / D-04): call ``confirm_tid(tid)`` once the
+        submit has returned, which lets the server forget the TID.
 
         Args:
-            func_name:  The wrapped ABAP function module name (e.g.
-                        ``"STFC_CONNECTION"``).  Stored as ARFCFNAM in
-                        ARFCSSTATE.
-            tid:        24-char TID from the RFC alphabet.
-                        Use ``create_tid()`` to generate one.
-            queue:      qRFC queue name.  When not None, this call becomes a
-                        queued RFC (TRFC-04).  Must be non-empty and bounded
-                        by the protocol maximum.
-            **params:   Additional keyword arguments (reserved for future
-                        ARFCSDATA payload encoding; currently unused).
+            func_name:  The function module to run, e.g. ``"STFC_CONNECTION"``.
+            tid:        24-character TID, e.g. from ``create_tid()``.
+            queue:      qRFC queue name (1-24 characters); None for tRFC.
+            **params:   The function module's importing, changing and tables
+                        parameters, as for ``call()``.
 
         Raises:
-            ValueError:          If ``tid`` is not a valid 24-char RFC TID.
-            CommunicationError:  Wraps ``OSError`` / ``EOFError`` from the
-                                 transport (CLIENT-06 pattern).
-
-        Security (T-06-C02): TID length and alphabet are validated inside
-        ``build_trfc_request`` before encoding.  CommunicationError does not
-        leak transport internals beyond ``str(exc)`` (T-06-C03).
-
-        Source: SDK type definitions–2165 (RfcCreateTransaction, RfcSubmitTransaction),
-                docs/protocol/trfc.md §"System FM Sequence".
+            ValueError:          ``tid`` or ``queue`` is malformed, or ``params``
+                                 names a parameter the module does not have.
+            NotImplementedError: over WebSocket RFC, which has no tRFC capture.
+            CommunicationError:  the transport failed.
+            AbapApplicationError / AbapSystemFailure: the server refused it.
         """
         # Classic TCP path: delegate to async core for retry behaviour (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3574,11 +3624,29 @@ class Connection:
                 self._async_conn.call_transactional(func_name, tid=tid, queue=queue, **params)
             )
             return
+        if self._is_ws():
+            raise NotImplementedError(
+                "tRFC over WebSocket RFC: no capture of a submit over a WebSocket "
+                "connection exists, so its framing is unknown (docs/protocol/trfc.md)"
+            )
         with self._lock:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
-                request_tlv = build_trfc_request(tid, func_name, queue=queue)
+                desc = get_function_desc(self, func_name, cache=self._cache)
+                ship = get_function_desc(self, _ARFC_DEST_SHIP, cache=self._cache)
+                call_params = _filter_call_params(
+                    func_name,
+                    desc,
+                    dict(params),
+                    strict=self._strict_params,
+                    seen=self._dropped_params_seen,
+                )
+                origin = _trfc_origin(self._session)
+                payload = build_trfc_call(func_name.upper(), desc, call_params, origin)
+                request_tlv = build_trfc_request(
+                    tid, [(func_name.upper(), payload)], ship, origin, queue=queue
+                )
                 handle = self._session.handle or b"        "
                 request = self._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
@@ -3588,41 +3656,26 @@ class Connection:
                     response = _join_response_frames(self._transport.recv_message, func_name)
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
-                # tRFC has no EXPORTING params, but the reply still carries the
-                # return code, and reading one frame and discarding it hid both
-                # halves of that: a refusal read as success, and any reply longer
-                # than one frame left its remainder in the socket for the next
-                # call to misparse.
                 raise_for_rfc_error(_strip_gw_header(response))
             finally:
-                self._session.mark_ready()
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     def confirm_tid(self, tid: str) -> None:
-        """Confirm a TID as a distinct lifecycle step (TRFC-02 / D-04).
+        """Confirm a TID after its submit returned (TRFC-02 / D-04).
 
-        Sends a synchronous RFC invoke of ``ARFC_DEST_CONFIRM``, which causes
-        the SAP backend to remove the TID from ARFCRSTATE and drop duplicate-
-        execution protection for this TID.
+        Sends ``API_CLEAR_TID``, as the reference client does
+        (docs/protocol/trfc.md). The server then forgets the TID, and with it the
+        protection against running the call a second time -- so confirm only a TID
+        whose ``call_transactional`` returned without an exception.
 
-        WARNING: After ``confirm_tid`` returns, the backend can no longer detect
-        duplicate calls using this TID.  Only call this method
-        after you have verified that the ``call_transactional`` submit landed
-        successfully (e.g. no ``CommunicationError`` was raised).
-
-        This method is intentionally separate from ``call_transactional`` (Pitfall
-        3 / D-04): bundling submit + confirm in one step breaks exactly-once
-        delivery in three-tier failure scenarios.
-
-        Args:
-            tid:  The same 24-char TID passed to ``call_transactional``.
+        Separate from ``call_transactional`` on purpose (Pitfall 3 / D-04):
+        bundling submit and confirm breaks exactly-once delivery when the reply to
+        the submit is lost.
 
         Raises:
-            ValueError:          If ``tid`` is not a valid 24-char RFC TID.
-            CommunicationError:  Wraps ``OSError`` / ``EOFError`` from the
-                                 transport.
-
-        ``ARFC_DEST_CONFIRM`` is a remote-enabled function module on A4H; its
-        parameters are those the server's metadata declares (docs/protocol/trfc.md).
+            ValueError:          ``tid`` is malformed.
+            CommunicationError:  the transport failed.
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3639,9 +3692,7 @@ class Connection:
                 )
                 try:
                     self._send_invoke_frame(request)
-                    response = _join_response_frames(
-                        self._transport.recv_message, "ARFC_DEST_CONFIRM"
-                    )
+                    response = _join_response_frames(self._transport.recv_message, "API_CLEAR_TID")
                 except (OSError, EOFError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc
                 raise_for_rfc_error(_strip_gw_header(response))
@@ -5069,12 +5120,15 @@ class AsyncConnection:
                             )
                         )
                     case SessionState.GW_CONNECTED:
+                        self._session.logon_token = os.urandom(16)
+                        self._session.logon_language = lang
                         tlv = Connection._build_logon_request(
                             client=client,
                             user=user,
                             passwd=passwd,
                             local_ip=local_ip,
                             lang=lang,
+                            session_token=self._session.logon_token,
                         )
                         await self._transport.send_message(
                             Connection._build_logon_frame(
@@ -5559,6 +5613,19 @@ class AsyncConnection:
         # Unreachable — loop always either returns or raises.  Satisfy type checker.
         raise AssertionError("unreachable")  # pragma: no cover
 
+    async def _desc_for(self, func_name: str) -> FunctionDesc:
+        """The server's metadata for ``func_name``: cache hit or bootstrap round trip."""
+        cache_key = self._metadata_cache_key
+        desc = self._cache.get(cache_key, func_name) if cache_key is not None else None
+        if desc is None:
+            try:
+                desc = await self._call_bootstrap(func_name)
+            except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
+                raise CommunicationError(str(exc), original_exception=exc) from exc
+            if cache_key is not None:
+                self._cache.put(cache_key, desc)
+        return desc
+
     async def call_transactional(
         self,
         func_name: str,
@@ -5585,7 +5652,20 @@ class AsyncConnection:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
-                request_tlv = build_trfc_request(tid, func_name, queue=queue)
+                desc = await self._desc_for(func_name)
+                ship = await self._desc_for(_ARFC_DEST_SHIP)
+                call_params = _filter_call_params(
+                    func_name,
+                    desc,
+                    dict(params),
+                    strict=self._strict_params,
+                    seen=self._dropped_params_seen,
+                )
+                origin = _trfc_origin(self._session)
+                payload = build_trfc_call(func_name.upper(), desc, call_params, origin)
+                request_tlv = build_trfc_request(
+                    tid, [(func_name.upper(), payload)], ship, origin, queue=queue
+                )
                 handle = self._session.handle or b"        "
                 request = Connection._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
@@ -5619,7 +5699,7 @@ class AsyncConnection:
     async def confirm_tid(self, tid: str) -> None:
         """Confirm a TID as a distinct lifecycle step (TRFC-02 / D-04 — async parity).
 
-        Async port of :meth:`Connection.confirm_tid`.  Sends ARFC_DEST_CONFIRM
+        Async port of :meth:`Connection.confirm_tid`.  Sends API_CLEAR_TID
         to the backend.  Should only be called after :meth:`call_transactional`
         succeeded without :class:`CommunicationError`.
 
@@ -5637,7 +5717,7 @@ class AsyncConnection:
                 try:
                     await self._send_request(request)
                     response = await _join_response_frames_async(
-                        self._transport.recv_message, "ARFC_DEST_CONFIRM"
+                        self._transport.recv_message, "API_CLEAR_TID"
                     )
                 except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                     raise CommunicationError(str(exc), original_exception=exc) from exc

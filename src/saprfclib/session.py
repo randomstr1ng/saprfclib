@@ -167,6 +167,14 @@ class Session:
         # low-privilege user -- returns a usable session instead of raising. See
         # _handle_logon_response and issue #38.
         self._allow_restricted_logon = allow_restricted_logon
+        # What the logon carried, kept for the header of a tRFC call (each serialized
+        # call repeats them; tRFC captures, tests/golden/trfc/). Set by the
+        # connection when it builds the logon (token, language) and here from the
+        # reply (raw tags). Never holds a credential: the reply carries none, and the
+        # token is the 0x0514 session identifier, not a secret of the user.
+        self.logon_token: bytes = b""
+        self.logon_language: str = ""
+        self.logon_reply_tags: dict[int, bytes] = {}
 
     # ----------------------------------------------------------------- #
     # Public read-only surface
@@ -387,6 +395,7 @@ class Session:
         # decoded the UTF-16 attribute strings as ASCII ('A\x004\x00H').
         live_reply = is_live or self.gw_header_stripped
         dec = _decode_utf16le if (live_reply and unicode_mode) else _decode_ascii
+        self.logon_reply_tags = dict(tags)
         self._attributes = ConnectionAttributes(
             sys_id=dec(tags.get(_TAG_SYS_ID)),
             sys_number=dec(tags.get(_TAG_SYS_NUMBER)),
