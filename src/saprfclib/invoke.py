@@ -431,9 +431,8 @@ def build_invoke_request(
                 row_slice = all_row_bytes[i * row_size : (i + 1) * row_size]
                 parts.append(tlv_record(_TAG_TABLE_CONTENT, row_slice))
             # NO end tag. A client-written table is terminated by the next record,
-            # not by 0x0306 — the SDK's table serializer emits name, DM id, info and
-            # rows and nothing else, and neither golden capture contains 0x0306 in a
-            # request. Emitting one makes the server tear down the gateway
+            # not by 0x0306 — no request the reference client sends contains one
+            # (every request capture, golden fixtures and tests/golden/trfc/). Emitting one makes the server tear down the gateway
             # conversation: the call returns an 80-byte header-only frame and every
             # subsequent call on that connection fails with
             # "Conversation NNN not found" (verified live on kernel 793 — removing
@@ -737,10 +736,10 @@ def build_trfc_confirm_request(tid: str, *, version: bytes = _RFC_VERSION) -> by
 # What would settle it: a live round trip on a configured backend where the unit is
 # visible in the state tables independently of get_unit_state().
 #
-# Security (T-06-U02): UnitID length is enforced to exactly RFC_UNITID_LN=32 hex chars
+# Security (T-06-U02): UnitID length is enforced to exactly 32 hex chars
 # before encoding. queue_names are bounded.
 
-_UNITID_LN = 32  # RFC_UNITID_LN from SDK type definitions
+_UNITID_LN = 32  # 16 bytes as hex: BGRFC_GET_UNIT_ID returns 16 (live, docs/protocol/trfc.md)
 _UNITID_CHARSET: frozenset[str] = frozenset("0123456789ABCDEF")
 
 # bgRFC system function modules: remote-enabled on A4H (TFDIR, 2026-11-12); a live

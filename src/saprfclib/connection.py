@@ -198,8 +198,8 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 #
 # The length field is 32 bits, not 16. Every capture has a zero high half because
 # every captured body is small, so [0:2]=0x0000 reads equally well as "reserved"
-# — but packing it as uint16 raises struct.error above 64 KB, and the C SDK sends
-# bodies far larger than that (a multi-megabyte ABAP program through
+# — but packing it as uint16 raises struct.error above 64 KB, and the reference client
+# sends bodies far larger than that (a multi-megabyte ABAP program through
 # /SAPDS/RFC_ABAP_INSTALL_RUN, for one). Verified across all nine request
 # fixtures: the BE uint32 at [0:4] equals len(tlv_body) exactly in each.
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
@@ -257,8 +257,10 @@ _WS_TLV_CAPS = bytes.fromhex("0301010101010000")  # 0x0101: wRFC caps
 _WS_TLV_CP = bytes.fromhex("04010003000a0200000023")  # 0x0106: wRFC codepage
 
 
-# Password-scramble key table (64 bytes). Confirmed identical across two
-# independent client versions, and verified end-to-end by a live logon.
+# Password-scramble key table (64 bytes). Verified two ways: a live logon with it
+# reaches READY, and it turns the 0x0117 record of seven reference-client logons
+# (pyrfc on the NW RFC SDK 7.50, 2026-11-12, each with its own seed) back into the
+# known password.
 # See docs/protocol/handshake.md §"Password scrambling".
 _AB_SCRAMBLE_KT = bytes.fromhex(
     "f0ed53b83244f1f876c67959fd4f13a2"
@@ -2606,8 +2608,9 @@ class Connection:
         snc/snc_logon_tlvs.json). An SNC-identity logon (``snc_sso``) passes
         ``passwd=None`` and leaves the flag off, which omits 0x0117 and 0x0675.
 
-        Emits the scrambled password record (tag 0x0117) per the RE-confirmed
-        derivation (Plan 04-01: ``seed(4B) + scramble(password, seed)``). The
+        Emits the scrambled password record (tag 0x0117), ``seed(4B) +
+        scramble(password, seed)``, verified against reference-client logons (see
+        _AB_SCRAMBLE_KT). The
         plaintext ``passwd`` is scrambled, never emitted plaintext and never
         logged (threat T-04-CRED / T-03-CRED2). ``seed`` is injectable so offline
         tests are deterministic; production uses a fresh per-call client nonce.
@@ -3738,8 +3741,8 @@ class Connection:
                 # On clean exit → BGRFC_DEST_SHIP frame submitted atomically.
                 # On exception → unit abandoned, no submit.
 
-        Source: SDK type definitions (RfcCreateUnit), 2272 (RfcInvokeInUnit),
-                2303 (RfcSubmitUnit), D-05 context-manager API.
+        Mirrors the NW RFC SDK's public unit API (RfcCreateUnit, RfcInvokeInUnit,
+        RfcSubmitUnit) as a context manager, D-05.
         """
         if uid is None:
             uid = uuid.uuid4().hex.upper()
@@ -3852,7 +3855,7 @@ class Connection:
             ValueError:          If ``unit_id`` is not a valid 32-char hex UnitID.
             CommunicationError:  Wraps OSError/EOFError from the transport.
 
-        Source: SDK type definitions (RfcDestroyUnit / rollback path); D-05.
+        Mirrors the NW RFC SDK's public RfcDestroyUnit; D-05.
         """
         # Classic TCP path: delegate to async core (D-07).
         if self._async_conn is not None and self._loop_thread is not None:
@@ -3873,7 +3876,7 @@ class Connection:
         """Query the current state of a bgRFC unit on the backend (TRFC-06).
 
         Sends BGRFC_CHECK_UNIT_STATE_SERVER and maps the response to a
-        ``UnitState`` enum value (SDK type definitions-332).
+        ``UnitState`` enum value.
 
         ``RFC_UNIT_NOT_FOUND`` after a confirmed unit is treated as success
         (state is already ``CONFIRMED`` — do not resend, T-06-U04).
@@ -3930,7 +3933,7 @@ class Connection:
         """Parse a BGRFC_CHECK_UNIT_STATE_SERVER response into a UnitState enum.
 
         The backend returns the state as a CHAR parameter (BGRFC_STATE) in the
-        response TLV.  Map the string value to UnitState (SDK type definitions-332).
+        response TLV.  Map the string value to UnitState.
         When no recognisable state is found (offline or unknown value), return
         UnitState.NOT_FOUND (safe default — caller can treat as not yet committed).
 
@@ -4088,8 +4091,8 @@ class _UnitHandle:
         internal buffer.  Execution occurs atomically when the with-block exits
         cleanly (``__exit__`` with no exception) by ``_submit_unit``.
 
-        Returns None always (Pitfall 6: ``RfcInvokeInUnit`` buffers, does not
-        execute; there is no result to return here — SDK type definitions).
+        Returns None always (Pitfall 6: the call is buffered, not executed; there
+        is no result to return here).
 
         Args:
             func_name: The ABAP function module name to call.
@@ -4117,7 +4120,7 @@ class _UnitHandle:
         On exception: the unit is abandoned.  No submit frame is sent.
         ``exc_type is not None`` → do NOT suppress the exception (return False).
 
-        Source: SDK type definitions (RfcSubmitUnit).
+        Mirrors the NW RFC SDK's public RfcSubmitUnit.
         """
         if exc_type is not None:
             # Exception inside with-block: abandon unit, do not submit.
@@ -5635,8 +5638,8 @@ class AsyncConnection:
         """Submit a tRFC (or qRFC) call with CommunicationError auto-retry (D-01).
 
         Async port of :meth:`Connection.call_transactional` — same exactly-once
-        semantics via the SAME ``tid`` resent on every retry (backend returns
-        ``RFC_EXECUTED`` for known TIDs — SDK type definitions).  Routes through
+        semantics via the SAME ``tid`` resent on every retry (a resubmit of a
+        known TID is accepted and not run again — live, docs/protocol/trfc.md).  Routes through
         :meth:`_submit_with_retry` so transient failures are retried up to
         ``self._max_retries`` times before parking and raising
         :class:`RetryExhausted`.
@@ -5878,8 +5881,8 @@ class AsyncConnection:
 
         Does NOT re-marshal the original parameters — re-uses the exact bytes
         from the store (D-03b: no re-marshaling).  The same TID is reused so
-        exactly-once delivery is preserved (backend returns RFC_EXECUTED for
-        known TIDs — SDK type definitions).
+        exactly-once delivery is preserved (a resubmit of a known TID is accepted
+        and not run again — live, docs/protocol/trfc.md).
 
         Raises:
             TransactionalError: if no parked call exists for ``tid`` (unknown TID

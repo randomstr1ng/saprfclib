@@ -104,10 +104,13 @@ _TAG_ERROR_MESSAGE = 0x0402  # error message text (server-direction; from fixtur
 
 _logger = logging.getLogger(__name__)
 
-# Return codes (SDK type definitions RFC_RC). 0 = OK; non-zero = failure on the response.
+# Return codes in the reply's 0x0420 record. 0 = OK is seen in every successful reply.
+# 3 (failure) and 16 (TID already executed) are [ASSUMED]: no capture of a SAP system
+# receiving a failed or duplicate inbound call from a registered server exists. Such a
+# capture would settle both.
 _RC_OK = 0
-_RC_SYSTEM_FAILURE = 3  # RFC_SYS_EXCEPTION family (non-zero signals failure)
-_RC_EXECUTED = 16  # RFC_EXECUTED — TID already executed
+_RC_SYSTEM_FAILURE = 3  # [ASSUMED], see above
+_RC_EXECUTED = 16  # [ASSUMED], see above — TID already executed
 
 # System FM names that trigger transactional dispatch.
 # ARFC_DEST_SHIP is the tRFC/qRFC call-type discriminator (function name IS the marker).
@@ -557,7 +560,8 @@ class RfcServer:
         # TID store (TRFC-03 / D-03): default InMemoryTidStore so a bare server works.
         # Replace with a custom durable store via set_tid_store().
         self._tid_store: TidStore = InMemoryTidStore()
-        # Transaction lifecycle callbacks (SDK type definitions-732 — RfcInstallTransactionHandlers).
+        # Transaction lifecycle callbacks, as in the NW RFC SDK's public API
+        # (RfcInstallTransactionHandlers).
         # When set, invoked at the corresponding check→commit/rollback→confirm sequence points.
         # Unset (None) means the store-only default behaviour applies (Task 1 dispatch).
         self._on_check_transaction: Callable[[str], int] | None = None
@@ -567,7 +571,8 @@ class RfcServer:
         # bgRFC Unit store (TRFC-07 / D-03): default InMemoryUnitStore so a bare server works.
         # Replace with a custom durable store via set_unit_store().
         self._unit_store: UnitStore = InMemoryUnitStore()
-        # bgRFC unit lifecycle callbacks (SDK type definitions-741 — RfcInstallBgRfcHandlers).
+        # bgRFC unit lifecycle callbacks, as in the NW RFC SDK's public API
+        # (RfcInstallBgRfcHandlers).
         # Unset (None) means store-only default behaviour applies.
         self._on_check_unit: Callable[..., int] | None = None
         self._on_commit_unit: Callable[..., None] | None = None
@@ -673,7 +678,7 @@ class RfcServer:
     ) -> None:
         """Register the four tRFC transaction lifecycle callbacks (TRFC-03).
 
-        Maps the ``RfcInstallTransactionHandlers`` API (SDK type definitions-732):
+        Mirrors the NW RFC SDK's public ``RfcInstallTransactionHandlers``:
 
         - ``on_check(tid) -> int``: called first; return 0 (RFC_OK) for a new TID
           or 16 (RFC_EXECUTED) if already executed. When set, this callback REPLACES
@@ -686,8 +691,7 @@ class RfcServer:
           maps to ``TidStore.confirm``.
 
         When unset (None), the corresponding store method is used directly. Setting
-        the callbacks enables the full ``RFC_ON_CHECK/COMMIT/ROLLBACK/CONFIRM_TRANSACTION``
-        contract from SDK type definitions.
+        the callbacks enables the full check/commit/rollback/confirm contract.
 
         Example::
 
@@ -736,7 +740,7 @@ class RfcServer:
     ) -> None:
         """Register the five bgRFC unit lifecycle callbacks (TRFC-07).
 
-        Maps ``RfcInstallBgRfcHandlers`` (SDK type definitions-741):
+        Mirrors the NW RFC SDK's public ``RfcInstallBgRfcHandlers``:
 
         - ``check(unit_id, unit_type) -> int``: called first; return 0 (RFC_OK) for a
           new unit or 16 (RFC_EXECUTED) if already known.
@@ -854,7 +858,7 @@ class RfcServer:
         """Transactional (tRFC/qRFC) inbound dispatch — TRFC-03 exactly-once gate.
 
         Implements the server-side dedup state machine from RESEARCH Pattern 2
-        (docs/protocol/trfc.md §"Server-Side Dispatch") and SDK type definitions-732:
+        (docs/protocol/trfc.md §"Server-Side Dispatch"):
 
           1. Extract TID from the ARFCTID param; validate (V5 — reject non-24-char
              TIDs before any store call, T-06-D02).
@@ -958,7 +962,7 @@ class RfcServer:
         """bgRFC unit inbound dispatch — TRFC-07 unit callback state machine.
 
         Implements the server-side unit processing sequence from
-        docs/protocol/trfc.md §"Server-Side Dispatch" and SDK type definitions-2500:
+        docs/protocol/trfc.md §"Server-Side Dispatch":
 
           1. Extract + validate UnitID (exactly 32 uppercase hex chars, V5 / T-06-U02).
           2. Extract unit_type ('T' or 'Q') from frame params.
@@ -1375,7 +1379,7 @@ class RfcServer:
         return ""
 
     def _build_rfc_executed_response(self) -> bytes:
-        """Build the RFC_EXECUTED wire response (SDK type definitions, value 0x10 = 16).
+        """Build the RFC_EXECUTED reply: return code 16 [ASSUMED, see _RC_EXECUTED].
 
         The response return code is _RC_EXECUTED (16).  SAP's client interprets
         this as "TID already executed" and does NOT raise an error; it is a

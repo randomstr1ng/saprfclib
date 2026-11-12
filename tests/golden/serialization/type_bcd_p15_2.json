@@ -80,5 +80,5 @@
   },
   "capture_source": "live capture 2026-06-26 — BAPI_FLIGHT_GETLIST FLIGHT_LIST.PRICE (BAPISFLIGHT.PRICE, P15.2); SAP A4H sysnr=00; port 3300, reassembled TCP stream offset 0x44D; pattern repeats ~8x across flight rows (same price). Only the BCD payload bytes are recorded — no credentials or logon frame captured (T-02-01 mitigation)",
   "evidence": "RFCTYPE_BCD serialization [ASSUMED pending independent confirmation]; wire bytes independently confirmed by live capture",
-  "gap_status": "confirmed — live capture 2026-06-26; packed-BCD encoding (2 digits/byte, sign in low nibble of last byte, 0x0C=positive) confirmed from real SAP wire bytes 00 00 00 08 00 00 05 0C = 800000.50. Negative sign (0x0D) SDK type definitions-confirmed only; no live negative value reachable in SFLIGHT (positive prices)"
+  "gap_status": "confirmed — live capture 2026-06-26; packed-BCD encoding (2 digits/byte, sign in low nibble of last byte, 0x0C=positive) confirmed from real SAP wire bytes 00 00 00 08 00 00 05 0C = 800000.50. Negative sign (0x0D): live capture 2026-11-12, bcd_sign.json; no live negative value reachable in SFLIGHT (positive prices)"
 }

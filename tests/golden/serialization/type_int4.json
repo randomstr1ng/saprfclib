@@ -18,6 +18,6 @@
     "value": 65536
   },
   "capture_source": "live capture 2026-06-26 — STFC_STRUCTURE IMPORTSTRUCT offset 24; SAP A4H sysnr=00; RFCINT4=65536",
-  "evidence": "RFCTYPE_INT serialization (protocol analysis confirmed LE path)",
+  "evidence": "RFCTYPE_INT serialization, little-endian (live; settled by arithmetic in the STFC_CHANGING pair)",
   "gap_status": "closed — LE byte order confirmed from live wire capture; wire bytes 00 00 01 00 = 65536"
 }

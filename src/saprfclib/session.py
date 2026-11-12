@@ -65,7 +65,7 @@ _GW_DONE_CODEPAGE_OFFSET = 69  # server codepage echo in GW_DONE (payload offset
 
 _CODEPAGE_UTF16LE = "4103"  # Unicode-mode codepage (handshake.md line 64)
 
-# Logon-response TLV tags (live RE from SAP NW 7.x wire captures).
+# Logon-response TLV tags (SAP NW 7.x wire captures).
 _TAG_SYS_ID = 0x0450
 _TAG_SYS_NUMBER = 0x0452
 _TAG_PARTNER_HOST = 0x0453

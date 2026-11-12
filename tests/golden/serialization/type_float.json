@@ -20,6 +20,6 @@
     "ieee754_be_hex": "400921f9f01b866e"
   },
   "capture_source": "live capture 2026-06-26 — STFC_STRUCTURE IMPORTSTRUCT offset 0; SAP A4H sysnr=00; RFCFLOAT=3.14159",
-  "evidence": "RFCTYPE_FLOAT serialization (protocol analysis confirmed LE path)",
+  "evidence": "RFCTYPE_FLOAT serialization, little-endian IEEE 754 double (live STFC_STRUCTURE capture)",
   "gap_status": "closed — IEEE 754 double LE confirmed from live wire capture; wire bytes 6e 86 1b f0 f9 21 09 40 = 3.14159"
 }

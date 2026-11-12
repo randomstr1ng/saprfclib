@@ -555,8 +555,8 @@ def test_golden_request_scalar_widths_are_the_oracle() -> None:
 def test_no_end_tag_after_table_rows() -> None:
     """A request must not carry 0x0306. Verified live on kernel 793.
 
-    The SDK's table serializer writes name, DM id, info and rows and nothing else,
-    and neither golden capture contains 0x0306 in a request. Sending one makes the
+    No request the reference client sends contains 0x0306 (every request capture,
+    including tests/golden/trfc/). Sending one makes the
     server abort: the call comes back as an 80-byte header-only frame and every later
     call on that connection fails with "Conversation NNN not found". Dropping the tag
     is the single change that turns the same call into a success.

@@ -158,7 +158,7 @@ def test_close_is_idempotent_and_safe() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 0x0117 password scramble (Plan 04-01 Task 2; RE: docs/protocol/handshake.md)
+# 0x0117 password scramble (Plan 04-01 Task 2; docs/protocol/handshake.md)
 # --------------------------------------------------------------------------- #
 def _parse_tlv_stream(frame: bytes) -> dict[int, bytes]:
     """Parse TLV stream (simple or extended format with repeated-tag suffix)."""
@@ -178,7 +178,7 @@ def _parse_tlv_stream(frame: bytes) -> dict[int, bytes]:
 
 def test_ab_scramble_is_its_own_inverse() -> None:
     """the password-scramble cipher applied twice with the same seed is the identity (symmetric
-    XOR stream — RE: unscramblePassword recovers plaintext with the same seed)."""
+    XOR stream: applying it again with the same seed recovers the plaintext)."""
     original = bytearray(b"hunter2-passw0rd")
     work = bytearray(original)
     _ab_scramble(work, seed=0x1234ABCD)

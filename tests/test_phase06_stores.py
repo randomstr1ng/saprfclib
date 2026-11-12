@@ -40,7 +40,7 @@ InMemoryUnitStore = stores.InMemoryUnitStore
 
 
 # --------------------------------------------------------------------------- #
-# UnitState enum shape (TRFC-08, SDK type definitions-332)
+# UnitState enum shape (TRFC-08)
 # --------------------------------------------------------------------------- #
 
 
@@ -139,7 +139,7 @@ def test_inmemory_tid_store_confirm_removes_or_clears() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# InMemoryTidStore: thread safety (TRFC-08 + SDK type definitions SERVER-06 lineage)
+# InMemoryTidStore: thread safety (TRFC-08, SERVER-06)
 # --------------------------------------------------------------------------- #
 
 
@@ -180,9 +180,7 @@ def test_inmemory_unit_store_unknown_unit_returns_not_found() -> None:
     """get_unit_state for an unknown UnitID must return UnitState.NOT_FOUND."""
     store = InMemoryUnitStore()
     state = store.get_unit_state("A" * 32, "T")
-    assert state is UnitState.NOT_FOUND, (
-        f"Unknown UnitID must return NOT_FOUND (h:327); got {state!r}"
-    )
+    assert state is UnitState.NOT_FOUND, f"Unknown UnitID must return NOT_FOUND; got {state!r}"
 
 
 def test_inmemory_unit_store_persist_sets_in_process() -> None:

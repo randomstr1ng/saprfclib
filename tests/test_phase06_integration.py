@@ -396,7 +396,7 @@ def test_live_bgrfc_unit_lifecycle() -> None:
 
             assert len(unit_id) == 32, (
                 f"create_unit() produced a UnitID of length {len(unit_id)}, "
-                "expected 32 (RFC_UNITID_LN=32, SDK type definitions)"
+                "expected 32 (16 bytes as hex)"
             )
             assert unit_type == "Q", (
                 f"unit_type should be 'Q' when queues are given, got {unit_type!r}"

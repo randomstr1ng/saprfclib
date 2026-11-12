@@ -9,8 +9,7 @@
 # fills them from live DDIC metadata.
 #
 # Sizing note: nuc_size/uc_size are the total non-Unicode / Unicode byte
-# lengths of a structure layout (map to RfcSetTypeLength(nucByteLength,
-# ucByteLength) in the C SDK). The unicode_mode flag on FieldDesc selects the
+# lengths of a structure layout. The unicode_mode flag on FieldDesc selects the
 # nuc_* vs uc_* offsets/lengths at decode time (D-09); Phase 2 wire mode is
 # UTF-16-LE, so unicode_mode defaults to True.
 from __future__ import annotations
@@ -27,7 +26,10 @@ __all__ = [
     "RFC_TABLES",
 ]
 
-# RFC_DIRECTION constants (SDK type definitions lines 644-650).
+# Parameter direction constants: the library's own numbering of the PARAMCLASS codes
+# the metadata carries ('I', 'E', 'C', 'T'; live, see metadata._PARAMCLASS_TO_DIRECTION).
+# The values match the NW RFC SDK's public RFC_DIRECTION, so code ported from it reads
+# the same.
 # These reflect the **caller's perspective**: RFC_IMPORT means the caller sends the
 # value (ABAP IMPORTING param); RFC_EXPORT means the caller receives it back.
 RFC_IMPORT: int = 0x01  # caller sends  (ABAP IMPORTING, PARAMCLASS 'I')

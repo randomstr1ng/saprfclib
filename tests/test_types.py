@@ -105,8 +105,8 @@ def test_fielddesc_direction_defaults() -> None:
     assert f.direction == RFC_IMPORT
 
 
-def test_rfc_direction_constants_match_sapnwrfc_h() -> None:
-    """RFC_DIRECTION constants mirror SDK type definitions lines 644-650:
+def test_rfc_direction_constants_keep_their_values() -> None:
+    """The direction constants keep the values of the SDK's public RFC_DIRECTION:
     RFC_IMPORT=0x01, RFC_EXPORT=0x02, RFC_CHANGING=0x03, RFC_TABLES=0x07."""
     from saprfclib.types import RFC_CHANGING, RFC_EXPORT, RFC_IMPORT, RFC_TABLES
 

@@ -1,7 +1,7 @@
 {
   "message_type": "STFC_CONNECTION_REQUEST",
   "capture_source": "live capture 2026-06-26 via Wireshark on enp111s0; SAP A4H sysnr=00 port=3300",
-  "evidence": "NI write path (4B NI header confirmed); GW header structure pending protocol analysis",
+  "evidence": "live capture; 4-byte NI length prefix; GW header fields: docs/protocol/framing.md",
   "ni_header_length": 4,
   "notes": [
     "Connection to port 3300 (SAP Gateway, 3300+sysnr), NOT port 3200 (dispatcher)",
@@ -18,7 +18,7 @@
       "name": "ni_payload_length",
       "value": "",
       "type": "fixed",
-      "note": "BE uint32 = 736; confirmed NiIWrite protocol analysis"
+      "note": "BE uint32 = 736, the NI length prefix (big-endian in every capture)"
     },
     {
       "offset": 4,
@@ -26,7 +26,7 @@
       "name": "gw_msg_type",
       "value": "",
       "type": "fixed",
-      "note": "SAP Gateway message type: 0x06=data, 0xCB=RFC_DATA, 0x0200=protocol version [ASSUMED, protocol analysis pending]"
+      "note": "SAP Gateway message type: 0x06CB on every RFC data frame, then 0x0200 [ASSUMED meaning: protocol version]"
     },
     {
       "offset": 8,
@@ -66,7 +66,7 @@
       "name": "rfc_stream_marker",
       "value": "",
       "type": "fixed",
-      "note": "Pre-TLV marker: ffff0001=client request, 00000001=server response [ASSUMED; function TBD via protocol analysis]"
+      "note": "Pre-TLV marker: ffff0001 in this client request, 00000001 in the server response (stfc_connection_response); meaning [ASSUMED]"
     },
     {
       "offset": 80,

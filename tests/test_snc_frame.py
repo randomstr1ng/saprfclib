@@ -8,7 +8,7 @@
 #   - Hypothesis round-trip over frame_type/ctx_id/qop and arbitrary token/data.
 #   - header inspection: version byte == 6, hdrlen field == 0x18 (D-02).
 #   - parse rejects a non-0x18 hdrlen with NotImplementedError (D-23: extension
-#     headers not reverse-engineered).
+#     headers not captured).
 #   - parse rejects an oversized token_len+data_len with ValueError BEFORE
 #     slicing (DoS guard, threat T-07-FRAME-DOS / T-03-DOS parity).
 #   - SncError carries only GSS major/minor; str() leaks no token/credential.

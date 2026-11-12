@@ -5,8 +5,8 @@
   "ni_header_length": 4,
   "notes": [
     "Registration request = the SAME 0x0601 GW_CONNECT header frame the client emits; program_id-independent on the wire.",
-    "STIRegTp args: arg1=tpname(PROGRAM_ID, <=64 chars, no '*'), arg2=gwhost(<=2048), arg3=gwserv(non-empty). GwIConnect kind=0xb, proposes codepage '1100'.",
-    "PROGRAM_ID is NOT present in this frame in any encoding. 'NWRFC' at payload[48:56] is the fixed partner LU name (UtilCpyUcToNet, STIInit). tpname is conveyed by the follow-up SAP_CMACCPTP3 accept exchange (Wave 2).",
+    "Registration parameters: PROGRAM_ID, gateway host and service. PROGRAM_ID limits (64 characters, no '*') are [ASSUMED], see docs/protocol/framing.md. The frame proposes codepage '1100'.",
+    "PROGRAM_ID is NOT present in this frame in any encoding. 'NWRFC' at payload[48:56] is in this capture. The program ID travels in the follow-up accept exchange.",
     "RFC marker direction: request payload[78:80]=0xffff; ACK flips to 0x0004 and fills the handle.",
     "Variable session-specific bytes (skipped by compare_bytes): connection handle, local IP / NI hostname / service block, OS user, and the time() ASCII-hex blob at payload[122:138].",
     "Offsets below are FILE offsets (NI 4-byte header included): file_offset = payload_offset + 4."
@@ -23,7 +23,7 @@
       "name": "ni_payload_length",
       "value": "",
       "type": "fixed",
-      "note": "BE uint32 = 453; NiIWrite protocol analysis bswap"
+      "note": "BE uint32 = 453, the NI length prefix (big-endian in every capture)"
     },
     {
       "offset": 4,
@@ -31,7 +31,7 @@
       "name": "gw_type",
       "value": "0x0601",
       "type": "fixed",
-      "note": "GW_CONNECT; STIInit *(p+0x51)=1"
+      "note": "GW_CONNECT"
     },
     {
       "offset": 6,
@@ -71,7 +71,7 @@
       "name": "gw_b10",
       "value": "0x0100",
       "type": "fixed",
-      "note": "STIInit [10]=1 (payload offset 10 = file 14)"
+      "note": "0x01 in this capture (payload offset 10 = file 14)"
     },
     {
       "offset": 14,
@@ -87,7 +87,7 @@
       "name": "gw_b16",
       "value": "0xc0",
       "type": "fixed",
-      "note": "STIInit [16]|=0x80 + CONV_PROTO 0x40"
+      "note": "0xC0 in this capture"
     },
     {
       "offset": 21,
@@ -103,7 +103,7 @@
       "name": "gw_b21",
       "value": "0x04",
       "type": "fixed",
-      "note": "STIInit [21]|=4 (standard client); ACK echoes 0x06"
+      "note": "0x04 in the request; the gateway's ACK carries 0x06"
     },
     {
       "offset": 26,
@@ -119,7 +119,7 @@
       "name": "gw_connection_handle",
       "value": "spaces (request) / ASCII handle (ACK)",
       "type": "variable",
-      "note": "STIInit strncpy 8 spaces on request; gateway assigns on ACK"
+      "note": "8 spaces in the request; the gateway's ACK carries the assigned handle"
     },
     {
       "offset": 52,
@@ -127,7 +127,7 @@
       "name": "gw_lu_partner_name",
       "value": "NWRFC",
       "type": "fixed",
-      "note": "UtilCpyUcToNet partner LU name (payload[48:56]='NWRFC '); first 4 bytes 'NWRF' deterministic"
+      "note": "Partner LU name (payload[48:56]='NWRFC '); first 4 bytes 'NWRF' deterministic"
     },
     {
       "offset": 56,
@@ -151,7 +151,7 @@
       "name": "gw_b73",
       "value": "",
       "type": "fixed",
-      "note": "payload[73]=0x01 STIInit; trailing zeros"
+      "note": "payload[73]=0x01 in this capture; trailing zeros"
     },
     {
       "offset": 80,
