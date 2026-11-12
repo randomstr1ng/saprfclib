@@ -291,10 +291,10 @@ STFC_CHANGING, STFC_STRUCTURE.
 | Tag (hex) | Evidence    | Role                                                                  |
 |-----------|-------------|-----------------------------------------------------------------------|
 | 0x000b    | capture     | RFC version string (e.g. "754" UTF-16LE)                             |
-| 0x0101    | analysis          | Session info (version, codepage)                                      |
+| 0x0101    | capture     | Session info, 8 bytes (logon_request.bin; tRFC call header)          |
 | 0x0102    | capture     | Function name (UTF-16LE, e.g. "STFC_CONNECTION")                     |
-| 0x0103    | analysis          | Connection flags (4B BE uint32)                                       |
-| 0x0106    | analysis          | Protocol version                                                      |
+| 0x0103    | capture     | 4 bytes: `00000e0b` in a logon, `00000e09` in a tRFC call header     |
+| 0x0106    | capture     | 11 bytes, codepage descriptor (logon_request.bin)                    |
 | 0x0130    | capture     | Program name (UTF-16LE, e.g. "SAPLSTFC", padded to 80 bytes)        |
 | 0x0131    | analysis          | EPP (Extended Performance Profile)                                    |
 | 0x0160    | analysis          | Int16 field                                                           |
@@ -318,11 +318,11 @@ STFC_CHANGING, STFC_STRUCTURE.
 | 0x0420    | capture     | RFC return code (4B BE uint32; 0=success)                            |
 | 0x0421    | analysis          | Auth / call context                                                   |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
+| 0x0504    | capture     | Empty; first record of an ARFC_DEST_SHIP (tRFC submit) request       |
+| 0x0513    | capture     | Empty; first record of an API_CLEAR_TID (tRFC confirm) request       |
 | 0x0502    | capture+analysis  | Call-start marker (empty on call frames)                             |
 | 0x0503    | capture     | Success marker (empty record) — present iff 0x0417 is absent         |
-| 0x0504    | analysis          | Function call begin (type A)                                         |
 | 0x0512    | capture+analysis  | Parameter section start / end of RFC exchange                        |
-| 0x0513    | analysis          | Function call begin (type B)                                         |
 | 0x0514    | capture+analysis  | Session token / connection ID (16B binary, random per session)       |
 | 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
@@ -1118,6 +1118,28 @@ where a char field's `INTLEN` is `2 × LENG` — `_build_type_desc_from_ddif` ta
     branch just derives widths from `LENG` (char → `2 × LENG`, else `INTLEN`) and packs them —
     enough for a descriptor that is never used to slice real bytes, while the Unicode branch is
     exact for every real system. Type always comes from `DATATYPE`.
+
+##### Row width: the structure's padded width — CONFIRMED (2026-11-12, live)
+
+A structure's width is the end of its last field **rounded up to the largest alignment among
+its fields** — not the end of the last field. The reference client sends `ARFCRDATA` rows 1918
+bytes wide, though the last field ends at 1917 (tRFC capture,
+`tests/golden/trfc/trfc_reference.json`). The rule was checked against `X030L-TABLEN`, the
+width the server itself reports, for 382 structures read from a live S/4HANA system: it held
+for all 357 flat ones, 18 of which carry one or two bytes of trailing padding.
+
+| Alignment | DDIC data types (sample: each type's gcd of field offsets) |
+|-----------|-----------------------------------------------------------|
+| 1 | `DEC`, `CURR`, `QUAN`, `RAW`, `INT1` |
+| 2 | `CHAR`, `CLNT`, `LANG`, `CUKY`, `UNIT`, `NUMC`, `DATS`, `TIMS`, `INT2` |
+| 4 | `INT4` |
+| 8 | `FLTP` |
+
+**[ASSUMED]** for types the sample did not contain: `LCHR`, `ACCP` and `PREC` at 2, `LRAW` at
+1, and `INT8`, the decimal floats, `UTCL` and the string references at 8. A structure holding
+one of them, read back from a live system, settles it. The width matters when a row is
+**sent**: a TABLE's `0x0302` declares it and each `0x0303` row is that long. Replies are read
+with the width the server declares.
 
 Golden fixtures: `tests/golden/framing/ddif_fieldinfo_rfcsi_response.bin` (Unicode-unit reply),
 `ddif_fieldinfo_bapilogond_response.bin` (NUC-unit reply), and

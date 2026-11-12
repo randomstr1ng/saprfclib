@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.1] - 2026-11-12
 
-EC keys for the built-in SNC, stricter yes/no parameters, and every source cited in the
-code and docs now points at an observation — or says plainly that it is an assumption.
+tRFC and qRFC submits work, EC keys for the built-in SNC, stricter yes/no parameters, and
+every source cited in the code and docs now points at an observation — or says plainly
+that it is an assumption.
 
 ### Added
 
@@ -29,6 +30,24 @@ code and docs now points at an observation — or says plainly that it is an ass
 
 ### Fixed
 
+- **tRFC and qRFC submits reach the server and run** (issue #36). `call_transactional()`
+  sent the TID, function and queue as parameters `ARFC_DEST_SHIP` does not have, and every
+  submit was refused with "Field TID did not have a value". It now sends what the
+  reference client sends, byte for byte: the call serialized into the `DATA` table and
+  the TID, function and queue in a `STATE` row, with both row layouts taken from the
+  server's metadata. The function module's parameters (`**params`) are now sent; before,
+  they were dropped. `confirm_tid()` sends `API_CLEAR_TID`, as the reference client does.
+  Checked against an S/4HANA system: the server records each call as executed, writes a
+  qRFC call into its inbound queue, ignores a resubmit of the same TID and forgets the
+  TID on confirm; over plain TCP and over SNC. Replayed from
+  `tests/golden/trfc/trfc_reference.json`.
+- **Table rows are sent at the structure's padded width.** A row was as wide as the end
+  of its last field; a structure whose width the ABAP runtime pads to its alignment (an
+  odd-length tail before a 2-byte aligned type, for instance) was sent one or more bytes
+  short per row. The width now matches what the server reports (`X030L-TABLEN`) for all
+  357 flat structures of a 382-structure live sample, 18 of them padded.
+- **qRFC queue names are limited to 24 characters**, the width of the server's queue
+  column. A longer name was accepted by the server and silently cut.
 - **Yes/no connection parameters are no longer read by truthiness** (issue #64).
   `snc_sso="0"` counted as *on*, dropped the password and logged on with the SNC
   identity. `snc_sso`, `snc_kerberos`, `ws_tls_verify`, `ms_use_http`, `strict_params`
@@ -46,8 +65,9 @@ code and docs now points at an observation — or says plainly that it is an ass
     remote-enabled function module on A4H uses the others.
   - **SAP LZ4 wRFC frames**: no compressed wRFC response has been captured.
   - **The inbound `0x5001` parameter block** a registered server decodes: not captured.
-  - **The TID character set** beyond uppercase hex: every live TID is hex, and a probe is
-    blocked by issue #36.
+  - **The TID character set** beyond uppercase hex: every live TID is hex; a server
+    accepts the uppercase hex TIDs `create_tid()` makes, the other characters were not
+    probed.
   - **The PROGRAM_ID limits** (64 characters, no `*`): a live probe could not read the
     registration result back.
 
@@ -56,8 +76,10 @@ code and docs now points at an observation — or says plainly that it is an ass
 
 ### Documentation
 
-- `docs/protocol/trfc.md`: the TID section describes what live TIDs look like (24
-  uppercase hex characters in four fields) instead of an unverified encoding.
+- `docs/protocol/trfc.md`: the tRFC/qRFC submit and confirm as captured — the `STATE` and
+  `DATA` rows, the serialized call and its header, the queue name — and what live TIDs
+  look like (24 uppercase hex characters in four fields).
+- `docs/protocol/framing.md`: the row-width rule and the alignment of each DDIC type.
 - `docs/protocol/framing.md`: GW frame fields read off the committed captures, including
   bytes 78:80, which carry the gateway-assigned connection index.
 

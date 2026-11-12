@@ -26,13 +26,15 @@ from __future__ import annotations
 
 import string
 
+from tests._trfc_fixture import use_fixture_metadata
+
 # --------------------------------------------------------------------------- #
 # TRFC-02: TID character-set validation (offline — no production symbol needed)
 # --------------------------------------------------------------------------- #
 
-#: Valid TID alphabet per (ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-)
+#: The accepted TID set ([ASSUMED] beyond uppercase hex, see invoke._TID_ALPHABET)
 _TID_ALPHABET: frozenset[str] = frozenset(string.ascii_uppercase + string.digits + "/_=@-")
-_TID_LN = 24  # RFC_TID_LN from SDK type definitions
+_TID_LN = 24  # every TID seen live (docs/protocol/trfc.md)
 
 
 def _is_valid_tid(tid: object) -> bool:
@@ -45,7 +47,6 @@ def test_tid_alphabet_subset_accepts_uuid_hex() -> None:
     """UUID hex (A-Z0-9) is a subset of the TID alphabet — offline, always passes.
 
     Validates the alphabet constant itself. Does NOT require saprfclib symbols.
-    Source: TID generation (41-char alphabet).
     """
     import uuid
 
@@ -99,20 +100,19 @@ def _make_ready_connection(extra_responses: list[bytes] | None = None):
 # --------------------------------------------------------------------------- #
 
 
-def test_call_transactional_frame() -> None:
-    """call_transactional() emits an invoke frame for ARFC_DEST_SHIP with TID.
+def test_call_transactional_frame(monkeypatch) -> None:
+    """call_transactional() sends ARFC_DEST_SHIP carrying the TID in its STATE rows.
 
-    GREEN: Plan 06-03 — call_transactional wraps build_trfc_request().
-    Assertion: the outbound byte stream contains 'ARFC_DEST_SHIP' (UTF-16LE)
-    in the function-name TLV 0x0102 and the 48-byte TID value in an ARFCSSTATE
-    param (docs/protocol/trfc.md §"Call-Type Discriminator").
+    The full byte layout is checked against the reference client in
+    tests/test_trfc_submit.py; this checks the wiring from the public method.
     """
     conn = _make_ready_connection()
+    use_fixture_metadata(monkeypatch)
 
     tid = "A" * _TID_LN  # valid TID — all-A is alphabet-conformant
 
     try:
-        conn.call_transactional("STFC_CONNECTION", tid=tid)
+        conn.call_transactional("STFC_CONNECTION", tid=tid, REQUTEXT="x")
     except Exception:
         pass  # Transport will raise EOFError; we only care the frame was built
 
@@ -126,7 +126,7 @@ def test_call_transactional_frame() -> None:
         "(the server dispatch — function name IS the discriminator)"
     )
 
-    # TID must appear in the frame (24 chars → 48 bytes UTF-16LE, Pitfall 4)
+    # The TID is the first 24 characters of each STATE row, UTF-16LE.
     tid_utf16 = tid.encode("utf-16-le")
     assert tid_utf16 in frame, (
         "TID value (UTF-16LE) not found in outbound frame "
@@ -153,14 +153,14 @@ def test_tid_roundtrip() -> None:
         f"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@- alphabet; got {tid!r}"
     )
 
-    # confirm_tid: issues ARFC_DEST_CONFIRM to backend (connection not live — EOFError OK)
+    # confirm_tid: issues API_CLEAR_TID to backend (connection not live — EOFError OK)
     try:
         conn.confirm_tid(tid)
     except Exception:
         # Transport exhausted (EOFError) — acceptable; API must exist and have sent a frame.
         pass
 
-    # At least one frame was sent (the ARFC_DEST_CONFIRM call)
+    # At least one frame was sent (the API_CLEAR_TID call)
     assert conn._transport.sent, "confirm_tid must send at least one frame"  # type: ignore[attr-defined]
 
 
@@ -169,14 +169,14 @@ def test_tid_roundtrip() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_qrfc_queue_name() -> None:
+def test_qrfc_queue_name(monkeypatch) -> None:
     """call_transactional(..., queue='TESTQUEUE') includes queue-name in frame.
 
-    GREEN: Plan 06-03.
-    Assertion: outbound frame contains 'TESTQUEUE' (UTF-16LE) in the ARFCSSTATE
-    table param: r13_1[0xe58].b != 0 → qRFC branch.
+    The queue name travels in ARFCRESERV of the STATE row, after "I"
+    (tests/test_trfc_submit.py).
     """
     conn = _make_ready_connection()
+    use_fixture_metadata(monkeypatch)
 
     tid = "A" * _TID_LN
     queue_name = "TESTQUEUE"
@@ -189,10 +189,7 @@ def test_qrfc_queue_name() -> None:
     assert conn._transport.sent, "qRFC call must produce a frame"  # type: ignore[attr-defined]
     frame = conn._transport.sent[0]  # type: ignore[attr-defined]
 
-    assert queue_name.encode("utf-16-le") in frame, (
-        f"Queue name '{queue_name}' (UTF-16LE) must appear in qRFC frame "
-        f"(the server dispatch — 0xe58 byte is qRFC indicator)"
-    )
+    assert ("I" + queue_name).encode("utf-16-le") in frame
 
 
 # --------------------------------------------------------------------------- #

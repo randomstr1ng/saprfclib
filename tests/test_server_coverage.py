@@ -14,7 +14,7 @@ import struct
 
 import pytest
 
-from saprfclib.invoke import _parse_tlv_stream, build_trfc_request
+from saprfclib.invoke import _parse_tlv_stream
 from saprfclib.server import (
     _TAG_RETURN_CODE,
     RfcServer,
@@ -22,6 +22,7 @@ from saprfclib.server import (
     _gwserv_port,
     _scan_5001_char_values,
 )
+from tests._trfc_fixture import forged_inbound_trfc
 
 
 def _server() -> RfcServer:
@@ -148,14 +149,12 @@ def test_scanner_skips_past_a_match_so_values_do_not_nest() -> None:
 def _forge_trfc(tid: str) -> bytes:
     """Build an ARFC_DEST_SHIP frame carrying an arbitrary TID.
 
-    build_trfc_request validates the TID and refuses to construct a bad one,
-    which is correct for a client — and exactly why it cannot be used here. The
-    server must not depend on the peer having used our builder: a hostile or
+    The server must not depend on the peer sending a valid TID: a hostile or
     simply broken system sends whatever it likes. So the value is patched in
     after the fact.
     """
     valid = "A" * 24
-    frame = build_trfc_request(valid, "Z_FUNC")
+    frame = forged_inbound_trfc(valid, "Z_FUNC")
     return frame.replace(valid.encode("utf-16-le"), tid.encode("utf-16-le"), 1)
 
 
@@ -163,7 +162,7 @@ def test_a_trfc_frame_without_a_tid_is_refused() -> None:
     """No TID means no deduplication key, so the unit cannot be exactly-once."""
     server = _server()
     server.install_transaction_handlers()
-    frame = build_trfc_request("A" * 24, "Z_FUNC")
+    frame = forged_inbound_trfc("A" * 24, "Z_FUNC")
     # Blank the TID characters, leaving the frame otherwise intact.
     blanked = frame.replace(("A" * 24).encode("utf-16-le"), (" " * 24).encode("utf-16-le"), 1)
     assert _rc(server.dispatch_inbound(blanked)) != 0

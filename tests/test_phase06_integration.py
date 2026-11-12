@@ -213,86 +213,74 @@ def test_live_trfc_delivery() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _live_conn():
+    return saprfclib.connect(
+        ashost=os.environ["SAPRFC_ASHOST"],
+        sysnr=os.environ.get("SAPRFC_SYSNR", "00"),
+        client=os.environ.get("SAPRFC_CLIENT", "001"),
+        user=os.environ["SAPRFC_USER"],
+        # Password sourced from env only -- never logged, printed, or asserted.
+        passwd=os.environ["SAPRFC_PASSWD"],
+    )
+
+
+def _read(conn, table: str, where: str, fields: list[str]) -> list[list[str]]:
+    r = conn.call(
+        "RFC_READ_TABLE",
+        QUERY_TABLE=table,
+        DELIMITER="|",
+        OPTIONS=[{"TEXT": where}],
+        FIELDS=[{"FIELDNAME": f} for f in fields],
+    )
+    return [[c.strip() for c in row["WA"].split("|")] for row in r["DATA"]]
+
+
+def _tid_state(conn, tid: str) -> list[str]:
+    where = f"ARFCIPID = '{tid[:8]}' AND ARFCPID = '{tid[8:12]}' AND ARFCTIME = '{tid[12:20]}'"
+    return [row[0] for row in _read(conn, "ARFCRSTATE", where, ["ARFCSTATE"])]
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(not os.environ.get("SAPRFC_ASHOST"), reason=_LIVE_SKIP_REASON)
-@pytest.mark.xfail(
-    reason=(
-        "tRFC/qRFC submit does not work (#36): build_trfc_request sends ARFCTID, "
-        "ARFCFNAM and ARFCQUEUE as named parameters and ARFC_DEST_SHIP declares "
-        "none of them, so the server answers 'Field TID did not have a value'. "
-        "Not strict: if a release accepts this frame, that is worth knowing rather "
-        "than turning into a failure."
-    ),
-    strict=False,
-)
-def test_live_qrfc_queued_call() -> None:
-    """Client issues a qRFC call with a queue name; backend accepts it without error.
+def test_live_trfc_submit_runs_once_and_confirm_clears() -> None:
+    """tRFC (issue #36): the server runs the call, keeps the TID until the confirm.
 
-    D-08 gate: Proves TRFC-04 against live SAP:
-    - conn.call_transactional(func, tid=tid, queue="SAPRFC_Q1") emits a qRFC frame
-      (ARFC_DEST_SHIP with ARFCQUEUE param)
-    - The SAP backend accepts the call (no exception raised), routes the invocation
-      into the named queue (visible in SMQS / SM58 on the SAP side)
-    - conn.confirm_tid(tid) completes the lifecycle without error
-
-    SM59 setup (manual, one-time):
-      An SM59 *type-T* (TCP/IP) destination pointing at an application server
-      (or the Python server via gateway) is NOT required for the client-side
-      qRFC test. The client sends to the SAP backend; SAP queues the wrapped FM
-      locally (TRFCQIN table). The FM is executed by the SAP system itself — the
-      Python server is not involved as a receiver here.
-
-    What you need on the SAP side:
-      - A valid RFC destination (RFC_DEST, SM59 type-R) for the target system,
-        OR use 'NONE' / 'BACK' as the destination if testing same-system qRFC.
-      - Observe SMQS for the 'SAPRFC_Q1' queue appearing after this test runs.
-
-    NOTE: Because this is a pure client-side test, the Python code sends the
-    qRFC frame and receives a server acknowledgment. If the FM or destination
-    does not exist the backend may return ABAP_EXCEPTION — the test asserts
-    only that no transport-level error occurs (the qRFC frame was accepted by
-    SAP's tRFC/qRFC infrastructure). The 'STFC_CONNECTION' FM is used as a
-    safe test FM known to exist on all standard SAP systems.
-
-    SAPRFC_PASSWD is read from the environment only; never logged, printed,
-    or asserted in plaintext (T-06-E01 / T-04-CRED).
+    Reads the server's own tRFC state table (ARFCRSTATE) with RFC_READ_TABLE rather
+    than trusting the absence of an exception: a submit the server ignored would
+    leave no row.
     """
-    ashost = os.environ["SAPRFC_ASHOST"]
-    sysnr = os.environ.get("SAPRFC_SYSNR", "00")
-    client = os.environ.get("SAPRFC_CLIENT", "001")
-    user = os.environ["SAPRFC_USER"]
-    # Password sourced from env only — never logged, printed, or asserted.
-    passwd = os.environ["SAPRFC_PASSWD"]
-
-    conn = saprfclib.connect(
-        ashost=ashost,
-        sysnr=sysnr,
-        client=client,
-        user=user,
-        passwd=passwd,
-    )
+    conn = _live_conn()
     try:
         tid = conn.create_tid()
-
-        # Verify the TID format: must be 24 chars, RFC alphabet subset.
-        assert len(tid) == 24, f"create_tid() returned a TID of length {len(tid)}, expected 24"
-        assert tid.isalnum() or all(
-            c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-" for c in tid
-        ), f"create_tid() returned TID {tid!r} with unexpected characters"
-
-        # Submit the qRFC call. No exception means the backend accepted the
-        # qRFC frame and queued the call (TRFC-04).
-        # Use STFC_CONNECTION (safe, exists on all SAP systems) as the wrapped FM.
-        conn.call_transactional(
-            "STFC_CONNECTION",
-            tid=tid,
-            queue="SAPRFC_Q1",
-        )
-
-        # Confirm the TID as a separate lifecycle step (Pitfall 3 / D-04).
-        # After confirm the backend drops dup-protection for this TID.
+        conn.call_transactional("STFC_CONNECTION", tid=tid, REQUTEXT="saprfclib tRFC")
+        assert _tid_state(conn, tid) == ["FINISHED"]
+        # The same TID again, as after a lost reply: accepted, not a second entry.
+        conn.call_transactional("STFC_CONNECTION", tid=tid, REQUTEXT="saprfclib tRFC")
+        assert _tid_state(conn, tid) == ["FINISHED"]
         conn.confirm_tid(tid)
+        assert _tid_state(conn, tid) == []
+    finally:
+        conn.close()
 
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.environ.get("SAPRFC_ASHOST"), reason=_LIVE_SKIP_REASON)
+def test_live_qrfc_submit_lands_in_the_inbound_queue() -> None:
+    """qRFC (issue #36): the call is written to the named inbound queue (TRFCQIN).
+
+    Whether the queue is then processed depends on the system's queue registration
+    (SMQR); the entry itself shows the server routed the call into the queue.
+    """
+    queue = "SAPRFCLIB_IT_Q1"
+    conn = _live_conn()
+    try:
+        before = len(_read(conn, "TRFCQIN", f"QNAME = '{queue}'", ["QNAME"]))
+        tid = conn.create_tid()
+        conn.call_transactional("STFC_CONNECTION", tid=tid, queue=queue, REQUTEXT="saprfclib qRFC")
+        after = len(_read(conn, "TRFCQIN", f"QNAME = '{queue}'", ["QNAME"]))
+        assert after == before + 1
+        conn.confirm_tid(tid)
+        assert _tid_state(conn, tid) == []
     finally:
         conn.close()
 

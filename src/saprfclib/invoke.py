@@ -36,6 +36,7 @@ import logging
 import re
 import struct
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 from saprfclib.codec import decode, encode
@@ -64,6 +65,8 @@ __all__ = [
     "tlv_record",
     "build_invoke_request",
     "parse_invoke_response",
+    "TrfcOrigin",
+    "build_trfc_call",
     "build_trfc_request",
     "build_trfc_confirm_request",
     "build_bgrfc_request",
@@ -310,8 +313,14 @@ def build_invoke_request(
     params: dict[str, Any],
     *,
     version: bytes = _RFC_VERSION,
+    transactional: bool = False,
 ) -> bytes:
     """Build the RFC invoke TLV payload (from offset 80 onward, NOT the GW header).
+
+    ``transactional=True`` builds a call as it travels inside a tRFC submit's DATA
+    table: no 0x0512, no 0x0205 declarations (nothing comes back) and no 0x0330 DM
+    table ids.
+    Source: tRFC captures of the reference client, tests/golden/trfc/.
 
     TLV order (framing.md §"RFC Function Call Sequence"; live capture, golden fixture
     framing/stfc_connection_request.bin):
@@ -352,12 +361,15 @@ def build_invoke_request(
         tlv_record(_TAG_CALL_START),
         tlv_record(_TAG_RFC_VERSION, version_bytes),
         tlv_record(_TAG_FUNC_NAME, func_name.encode("utf-16-le")),
-        tlv_record(_TAG_PARAM_SECTION),
     ]
+    if not transactional:
+        parts.append(tlv_record(_TAG_PARAM_SECTION))
 
     # Emit 0x0205 decls for params the server should return (EXPORT, CHANGING, TABLES).
     # Direction bit 1 set (0x02, 0x03, 0x07) means the server returns the parameter.
     for field in desc.parameters:
+        if transactional:
+            break
         if field.direction in (RFC_EXPORT, RFC_CHANGING, RFC_TABLES):
             parts.append(tlv_record(_TAG_EXPORT_DECL, field.name.encode("utf-16-le")))
 
@@ -403,19 +415,17 @@ def build_invoke_request(
                     f"complete."
                 )
             all_row_bytes = encode(_RFCTYPE_TABLE, rows, field)
-            # [ASSUMED] The outbound width is the sum of the field widths, packed.
-            # Self-consistent -- the same number sets the stride and is written into
-            # 0x0302, so what we declare is what we send -- and no server has been
-            # observed rejecting it. It is nonetheless the padded-vs-packed question
-            # from the other side: a server that expected 4-byte-aligned rows would
-            # read these as misaligned, the mirror of the decode bug fixed by taking
-            # the width from 0x0302 rather than from here. Untested. Sending a table
-            # whose row type carries INT4 members to a live system, and reading back
-            # what it stored, would settle it.
+            # The outbound width is the structure width: the end of the last field
+            # rounded up to the structure's alignment, as the server reports it in
+            # X030L-TABLEN and as the reference client sends it (the ARFCRDATA rows
+            # of a tRFC submit are 1918 bytes; the last field ends at 1917). The
+            # layout comes from DDIF_FIELDINFO_GET, see _DATATYPE_ALIGNMENT in
+            # connection.py.
             row_size = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
             row_count = len(rows)
             parts.append(tlv_record(_TAG_TABLE_NAME, field.name.encode("utf-16-le")))
-            parts.append(tlv_record(_TAG_DM_TABLE_ID, struct.pack(">I", _dm_ids[field.name])))
+            if not transactional:
+                parts.append(tlv_record(_TAG_DM_TABLE_ID, struct.pack(">I", _dm_ids[field.name])))
             parts.append(tlv_record(_TAG_TABLE_INFO, struct.pack(">II", row_size, row_count)))
             for i in range(row_count):
                 row_slice = all_row_bytes[i * row_size : (i + 1) * row_size]
@@ -444,51 +454,105 @@ def build_invoke_request(
 # tRFC / qRFC request builders (TRFC-01, TRFC-02, TRFC-04)
 # --------------------------------------------------------------------------- #
 #
-# CONFIRMED (Plan 06-01): tRFC and qRFC are ordinary synchronous RFC calls
-# to the SAP system function module ARFC_DEST_SHIP.  There are NO new TLV tags
-# for the call-type discriminator — the function name in TLV 0x0102 IS the
-# discriminator.  The TID is carried as a CHAR
-# parameter (ARFCTID) within the ARFCSSTATE table, encoded UTF-16LE exactly
-# like any other CHAR param.  The queue name is carried similarly for qRFC.
+# What the reference client sends, from captures against an S/4HANA system on
+# 2026-11-12 (tests/golden/trfc/, provenance in the JSON):
 #
-# OG-06-01 CONFIRMED (2026-08-05): test_live_qrfc_queued_call passed — named-param
-# encoding (ARFCTID/ARFCFNAM/ARFCQUEUE as CHAR params) confirmed correct by live qRFC
-# gate.  No raw ARFCSSTATE struct decomposition (ARFCIPID/ARFCPID/ARFCTIME/ARFCTIDCNT)
-# needed — server reads only the named params.
+#   submit   0x0504, then an ordinary call of ARFC_DEST_SHIP declaring and carrying
+#            two TABLES: STATE (ARFCRSTATE), one row per call in the LUW, and DATA
+#            (ARFCRDATA), the serialized calls. The TID is the first four STATE
+#            columns (ARFCIPID, ARFCPID, ARFCTIME, ARFCTIDCNT); for qRFC the queue
+#            name sits in ARFCRESERV.
+#   confirm  0x0513, then a call of API_CLEAR_TID with the TID as parameter TID.
 #
-# Anti-pattern avoided: this module does NOT define a second TLV writer.  Both
-# functions use the existing `tlv_record()` primitive only.
+# Each serialized call is a header (who sent it, from the logon) followed by the
+# call itself as build_invoke_request(transactional=True) writes it, and ends with
+# the stream terminator FF FF 00 00 FF FF. The bytes are cut into consecutive
+# pieces the width of ARFCRDATA's data columns, one DATA row per piece, numbered
+# from 1 in ARFCBLCNT; the last piece is zero-padded.
 #
-# Security (T-06-C02): TID length is enforced to exactly RFC_TID_LN=24 chars
-# before encoding.  Queue name is bounded to the protocol max (256 chars).
+# Column layouts are not hardcoded: they come from the server's own metadata for
+# ARFC_DEST_SHIP. The column names are the protocol (they are what the server reads).
 
 _TID_LN = 24  # every TID seen live has 24 characters (docs/protocol/trfc.md)
-_MAX_QUEUE_NAME = 256  # conservative upper bound (SDK type definitions §RFC_MAX_QUEUE_NAME_LENGTH)
+# qRFC queue name: ARFCRESERV holds "I" at character 44 and the name from 45. 24
+# characters is the longest a live server accepted (probe 2026-11-12, trfc.md).
+_MAX_QUEUE_NAME = 24
 
 # TID character set [ASSUMED]. Every TID seen live was uppercase hex, a subset of this
-# set; whether the server accepts the other characters could not be probed, because a
-# tRFC submit currently fails before the TID is checked (issue #36).
+# set; a 24-character uppercase hex TID made by create_tid() is accepted by a live
+# server (2026-11-12). The other characters were not probed.
 _TID_ALPHABET: frozenset[str] = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-")
 
-# tRFC system function modules, both remote-enabled on A4H (TFDIR, 2026-11-12). A
-# live call naming ARFC_DEST_SHIP is run as that function module (2026-11-12).
+# tRFC system function modules (live captures above).
 _ARFC_DEST_SHIP = "ARFC_DEST_SHIP"
-_ARFC_DEST_CONFIRM = "ARFC_DEST_CONFIRM"
+_API_CLEAR_TID = "API_CLEAR_TID"
+_TAG_TRFC_SUBMIT = 0x0504  # empty, first record of an ARFC_DEST_SHIP request
+_TAG_TRFC_CONFIRM = 0x0513  # empty, first record of an API_CLEAR_TID request
+
+# Values the reference client writes into every STATE row (captures above).
+_TRFC_DEST = "EXTERNAL"  # ARFCDEST
+_TRFC_QUEUE_FLAG = "I"  # ARFCRESERV[44] of a qRFC call, followed by the queue name
+_TRFC_QUEUE_AT = 44  # character offset in ARFCRESERV
+_TRFC_STATE_TID = ("ARFCIPID", "ARFCPID", "ARFCTIME", "ARFCTIDCNT")
+
+# Header records of a serialized call (captures above). 0x0101/0x0103/0x0106 carry
+# these values in every capture; the rest comes from the connection's logon.
+_TRFC_HDR_CAPS = bytes.fromhex("0301010504010003")  # 0x0101
+_TRFC_HDR_VERSION = bytes.fromhex("00000e09")  # 0x0103
+_TRFC_HDR_CODEPAGE = bytes.fromhex("04010003000a0200000023")  # 0x0106
+
+
+@dataclass(frozen=True)
+class TrfcOrigin:
+    """Who sends a tRFC call: the header of every serialized call in DATA.
+
+    Each value mirrors the logon (tRFC captures, tests/golden/trfc/): the
+    client's own logon values (0x0007 address, 0x0011 language, 0x0012 release,
+    0x0008 host, 0x0130 program) and from the server's logon reply its 0x0013
+    kernel release followed by its 0x0018 address (one record, 0x0013) and its
+    0x0006 host. Strings travel as UTF-16LE.
+    """
+
+    session_token: bytes
+    client_ip: str
+    language: str
+    client_release: str
+    client_host: str
+    program: str
+    partner_kernel: str
+    partner_ip: str
+    partner_host: str
+
+    def header(self) -> bytes:
+        def u(s: str) -> bytes:
+            return s.encode("utf-16-le")
+
+        return b"".join(
+            [
+                tlv_record(0x0101, _TRFC_HDR_CAPS),
+                tlv_record(0x0103, _TRFC_HDR_VERSION),
+                tlv_record(0x0106, _TRFC_HDR_CODEPAGE),
+                tlv_record(0x0514, self.session_token),
+                tlv_record(0x0007, u(self.client_ip)),
+                tlv_record(0x0011, u(self.language)),
+                tlv_record(0x0012, u(self.client_release)),
+                tlv_record(0x0013, u(self.partner_kernel + self.partner_ip)),
+                tlv_record(0x0008, u(self.client_host)),
+                tlv_record(0x0006, u(self.partner_host)),
+                tlv_record(0x0130, u(self.program)),
+            ]
+        )
 
 
 def _validate_tid(tid: str) -> None:
-    """Raise ValueError if tid is not a valid 24-char TID (T-06-C02 / V5).
+    """Raise ValueError if tid is not 24 characters from the accepted TID set.
 
-    TID must be exactly RFC_TID_LN (24) characters from the confirmed alphabet
-    ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-.  A UUID-hex TID (uppercase, digits
-    only) is a valid subset and accepted.
-
-    Source: SDK type definitions (RFC_TID_LN=24) (alphabet).
+    24 characters: every TID seen live. The set: see _TID_ALPHABET.
     """
     if not isinstance(tid, str):
         raise ValueError(f"TID must be a str, got {type(tid).__name__!r}")
     if len(tid) != _TID_LN:
-        raise ValueError(f"TID must be exactly {_TID_LN} characters (RFC_TID_LN); got {len(tid)}")
+        raise ValueError(f"TID must be exactly {_TID_LN} characters; got {len(tid)}")
     bad = [c for c in tid if c not in _TID_ALPHABET]
     if bad:
         raise ValueError(
@@ -498,124 +562,155 @@ def _validate_tid(tid: str) -> None:
 
 
 def _validate_queue_name(queue: str) -> None:
-    """Raise ValueError if queue name is empty or exceeds the protocol maximum."""
+    """Raise ValueError if queue name is empty or longer than a server accepts."""
     if not queue:
         raise ValueError("queue name must not be empty")
     if len(queue) > _MAX_QUEUE_NAME:
         raise ValueError(f"queue name too long ({len(queue)} chars; max {_MAX_QUEUE_NAME})")
 
 
+def build_trfc_call(
+    func_name: str, desc: FunctionDesc, params: dict[str, Any], origin: TrfcOrigin
+) -> bytes:
+    """One serialized call of a tRFC LUW: the origin header, then the call itself."""
+    return origin.header() + build_invoke_request(func_name, desc, params, transactional=True)
+
+
+def _table_param(desc: FunctionDesc, name: str) -> FieldDesc:
+    for f in desc.parameters:
+        if f.name == name and f.rfctype == _RFCTYPE_TABLE and f.type_desc is not None:
+            return f
+    raise IncompleteDescriptorError(
+        f"{desc.name}: no resolved TABLES parameter {name!r} in the server's metadata"
+    )
+
+
+def _column(field: FieldDesc, name: str) -> FieldDesc:
+    assert field.type_desc is not None
+    for f in field.type_desc.fields:
+        if f.name == name:
+            return f
+    raise IncompleteDescriptorError(f"{field.type_desc.name}: no column {name!r}")
+
+
 def build_trfc_request(
     tid: str,
-    func_name: str,
+    calls: list[tuple[str, bytes]],
+    ship_desc: FunctionDesc,
+    origin: TrfcOrigin,
     *,
     queue: str | None = None,
     version: bytes = _RFC_VERSION,
 ) -> bytes:
-    """Build the RFC invoke TLV payload for an ARFC_DEST_SHIP (tRFC/qRFC) call.
+    """Build the ARFC_DEST_SHIP request that submits a tRFC (or qRFC) LUW.
 
-    This is a standard invoke frame with function name ARFC_DEST_SHIP in TLV
-    0x0102 (the call-type discriminator per).  The TID and the
-    wrapped function name are encoded as named CHAR parameters (UTF-16LE).
-
-    For qRFC (queue is not None): the queue name is included as an additional
-    CHAR parameter (ARFCQUEUE) so the server can read the queue indicator at
-    ARFCSSTATE offset 0xe58.
-
-    Security: validates TID length and alphabet, queue name length before encoding
-    (T-06-C02 / RESEARCH V5).
-
-    OG-06-01 NOT CONFIRMED. This block claimed the named-param encoding was
-    confirmed by a live qRFC gate on 2026-08-05. It was not: that gate discarded
-    the server's reply, so a refusal was indistinguishable from success. With the
-    reply read, the same call answers
-
-        Field TID did not have a value when ARFC_DEST_SHIP was called
-
-    and the dictionary says why. ARFC_DEST_SHIP takes sender_id,
-    supportability_info and unit_id -- all OPTIONAL -- plus two TABLES, data
-    (ARFCRDATA) and state (ARFCRSTATE). There is no ARFCTID parameter, no
-    ARFCFNAM and no ARFCQUEUE; the TID lives in the state table's rows, split
-    across ARFCIPID, ARFCPID, ARFCTIME and ARFCTIDCNT.
-
-    So this frame cannot work, and the parameters below are named after fields of
-    a structure rather than after anything the module declares. Kept sending
-    rather than raising, because the server's refusal names the missing field
-    precisely and that is more useful than a local error -- but it is a refusal
-    every time. Tracked as its own issue; the shape of the fix is the same as the
-    bgRFC submit's, and needs the same evidence.
-
-    Args:
-        tid:       24-char TID from the RFC TID alphabet.
-        func_name: The wrapped ABAP function module name (informational; stored as
-                   ARFCFNAM in ARFCSSTATE — included as ARFCFNAM param for now).
-        queue:     qRFC queue name; when not None, the call is qRFC.
-        version:   RFC version string bytes (default b"754").
-
-    Returns:
-        Raw TLV payload bytes (not the full GW frame — pass to
-        ``Connection._build_invoke_frame``).
+    ``calls`` is the LUW in order: (function name, build_trfc_call bytes) each.
+    ``ship_desc`` is the server's metadata for ARFC_DEST_SHIP; the STATE and DATA
+    row layouts come from it. Layout of the request: see the section comment.
     """
     _validate_tid(tid)
     if queue is not None:
         _validate_queue_name(queue)
+    if not calls:
+        raise ValueError("a tRFC LUW needs at least one call")
+    state = _table_param(ship_desc, "STATE")
+    data = _table_param(ship_desc, "DATA")
+    assert state.type_desc is not None and data.type_desc is not None
 
-    version_bytes: bytes
-    if isinstance(version, str):
-        version_bytes = version.encode("utf-16-le")
-    else:
-        version_bytes = version.decode("ascii").encode("utf-16-le")
+    # The TID, split over the four TID columns by their character lengths.
+    tid_cols: dict[str, str] = {}
+    pos = 0
+    for name in _TRFC_STATE_TID:
+        n = _column(state, name).nuc_length
+        tid_cols[name] = tid[pos : pos + n]
+        pos += n
+    if pos != _TID_LN:
+        raise IncompleteDescriptorError(
+            f"ARFCRSTATE TID columns hold {pos} characters, not {_TID_LN}"
+        )
 
-    parts: list[bytes] = [
+    reserve = origin.program.ljust(_TRFC_QUEUE_AT)[:_TRFC_QUEUE_AT]
+    if queue is not None:
+        reserve += _TRFC_QUEUE_FLAG + queue
+    host_len = _column(state, "ARFCRHOST").nuc_length
+
+    # Data columns: ARFCDATA01, ARFCDATA02, ... in layout order.
+    data_cols = [f for f in data.type_desc.fields if f.name.startswith("ARFCDATA")]
+    if not data_cols:
+        raise IncompleteDescriptorError("ARFCRDATA has no ARFCDATAnn columns")
+    piece = sum(f.uc_length for f in data_cols)
+
+    state_rows: list[dict[str, Any]] = []
+    data_rows: list[dict[str, Any]] = []
+    for luw, (func_name, payload) in enumerate(calls, 1):
+        key = {**tid_cols, "ARFCDEST": _TRFC_DEST, "ARFCLUWCNT": f"{luw:08d}"}
+        state_rows.append(
+            {
+                **key,
+                "ARFCFNAM": func_name,
+                "ARFCUZEIT": "000000",
+                "ARFCDATUM": "00000000",
+                "ARFCRETRYS": " " * _column(state, "ARFCRETRYS").nuc_length,
+                "ARFCRHOST": origin.client_host[:host_len],
+                "ARFCRESERV": reserve,
+            }
+        )
+        for block, at in enumerate(range(0, len(payload), piece), 1):
+            chunk = payload[at : at + piece].ljust(piece, b"\x00")
+            row: dict[str, Any] = {**key, "ARFCBLCNT": block.to_bytes(4, "big")}
+            off = 0
+            for col in data_cols:
+                row[col.name] = chunk[off : off + col.uc_length]
+                off += col.uc_length
+            data_rows.append(row)
+
+    version_bytes = (
+        version.encode("utf-16-le")
+        if isinstance(version, str)
+        else version.decode("ascii").encode("utf-16-le")
+    )
+    parts = [
+        tlv_record(_TAG_TRFC_SUBMIT),
         tlv_record(_TAG_CALL_START),
         tlv_record(_TAG_RFC_VERSION, version_bytes),
         tlv_record(_TAG_FUNC_NAME, _ARFC_DEST_SHIP.encode("utf-16-le")),
         tlv_record(_TAG_PARAM_SECTION),
-        # TID parameter — 24 chars → 48 bytes UTF-16LE (Pitfall 4)
-        tlv_record(_TAG_PARAM_NAME, "ARFCTID".encode("utf-16-le")),
-        tlv_record(_TAG_PARAM_VALUE, tid.encode("utf-16-le")),
-        # Wrapped FM name — informational (part of ARFCSSTATE.ARFCFNAM)
-        tlv_record(_TAG_PARAM_NAME, "ARFCFNAM".encode("utf-16-le")),
-        tlv_record(_TAG_PARAM_VALUE, func_name.encode("utf-16-le")),
+        tlv_record(_TAG_EXPORT_DECL, "STATE".encode("utf-16-le")),
+        tlv_record(_TAG_EXPORT_DECL, "DATA".encode("utf-16-le")),
     ]
-    if queue is not None:
-        # qRFC: include queue name so server sees non-zero at ARFCSSTATE+0xe58.
-        parts.append(tlv_record(_TAG_PARAM_NAME, "ARFCQUEUE".encode("utf-16-le")))
-        parts.append(tlv_record(_TAG_PARAM_VALUE, queue.encode("utf-16-le")))
+    for dm_id, (field, rows) in enumerate(((state, state_rows), (data, data_rows)), 1):
+        assert field.type_desc is not None
+        width = field.type_desc.uc_size
+        raw = encode(_RFCTYPE_TABLE, rows, field)
+        parts.append(tlv_record(_TAG_TABLE_NAME, field.name.encode("utf-16-le")))
+        parts.append(tlv_record(_TAG_DM_TABLE_ID, struct.pack(">I", dm_id)))
+        parts.append(tlv_record(_TAG_TABLE_INFO, struct.pack(">II", width, len(rows))))
+        for i in range(len(rows)):
+            parts.append(tlv_record(_TAG_TABLE_CONTENT, raw[i * width : (i + 1) * width]))
     parts.append(tlv_record(_TAG_TERMINATOR))
     return b"".join(parts)
 
 
-def build_trfc_confirm_request(
-    tid: str,
-    *,
-    version: bytes = _RFC_VERSION,
-) -> bytes:
-    """Build the RFC invoke TLV payload for an ARFC_DEST_CONFIRM call.
+def build_trfc_confirm_request(tid: str, *, version: bytes = _RFC_VERSION) -> bytes:
+    """Build the API_CLEAR_TID request that confirms a tRFC TID (captures above).
 
-    Confirms the TID on the backend, allowing the server to remove it from
-    ARFCRSTATE.  After this call the backend loses duplicate-execution protection
-    for this TID (SDK type definitions — never call before verifying the submit landed).
-
-    Security: validates TID before encoding (T-06-C02).
-
-    Confirmed: the ARFC_DEST_CONFIRM branch of the server dispatch.
+    After it the server drops the TID and with it the protection against a second
+    execution, so it is sent only after the submit succeeded.
     """
     _validate_tid(tid)
-
-    version_bytes: bytes
-    if isinstance(version, str):
-        version_bytes = version.encode("utf-16-le")
-    else:
-        version_bytes = version.decode("ascii").encode("utf-16-le")
-
+    version_bytes = (
+        version.encode("utf-16-le")
+        if isinstance(version, str)
+        else version.decode("ascii").encode("utf-16-le")
+    )
     return b"".join(
         [
+            tlv_record(_TAG_TRFC_CONFIRM),
             tlv_record(_TAG_CALL_START),
             tlv_record(_TAG_RFC_VERSION, version_bytes),
-            tlv_record(_TAG_FUNC_NAME, _ARFC_DEST_CONFIRM.encode("utf-16-le")),
+            tlv_record(_TAG_FUNC_NAME, _API_CLEAR_TID.encode("utf-16-le")),
             tlv_record(_TAG_PARAM_SECTION),
-            tlv_record(_TAG_PARAM_NAME, "ARFCTID".encode("utf-16-le")),
+            tlv_record(_TAG_PARAM_NAME, "TID".encode("utf-16-le")),
             tlv_record(_TAG_PARAM_VALUE, tid.encode("utf-16-le")),
             tlv_record(_TAG_TERMINATOR),
         ]

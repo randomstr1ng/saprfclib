@@ -34,6 +34,7 @@ from saprfclib.exceptions import (  # noqa: E402
 from saprfclib.session import SessionState  # noqa: E402
 from saprfclib.stores import InMemoryTidStore  # noqa: E402
 from tests._mocks import AsyncMockTransport  # noqa: E402
+from tests._trfc_fixture import use_fixture_metadata  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Module-level helper: _FailNThenOkTransport
@@ -126,7 +127,7 @@ async def test_trfc_retries_on_communication_error() -> None:
     assert call_count == 3
 
 
-async def test_trfc_tid_reused_across_retries() -> None:
+async def test_trfc_tid_reused_across_retries(monkeypatch) -> None:
     """TRFC-02: the same 24-char TID is reused for every retry attempt.
 
     The tRFC exactly-once guarantee relies on the backend deduping by TID.
@@ -139,10 +140,11 @@ async def test_trfc_tid_reused_across_retries() -> None:
     """
     transport = _FailNThenOkTransport(n_fails=2, ok_bytes=b"")
     conn = AsyncConnection(transport, max_retries=2, retry_delay=0.0)
+    use_fixture_metadata(monkeypatch, conn)
     # Force session to READY so call_transactional can proceed
     conn._session._state = SessionState.READY
     tid = "ABCDEF1234567890ABCDEF12"  # 24 chars, RFC alphabet
-    await conn.call_transactional("STFC_CONNECTION", tid=tid)
+    await conn.call_transactional("STFC_CONNECTION", tid=tid, REQUTEXT="x")
     # call_transactional sends request each retry attempt; recv_message fails first 2
     assert len(transport.sent) == 3
     assert tid.encode("utf-16-le") in transport.sent[0]
@@ -154,7 +156,7 @@ async def test_trfc_tid_reused_across_retries() -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_qrfc_retry_with_queue() -> None:
+async def test_qrfc_retry_with_queue(monkeypatch) -> None:
     """TRFC-04: call_transactional with queue= retries on CommunicationError.
 
     qRFC frames carry the ARFCQUEUE param alongside the TID. Retry must
@@ -167,10 +169,11 @@ async def test_qrfc_retry_with_queue() -> None:
     """
     transport = _FailNThenOkTransport(n_fails=1, ok_bytes=b"")
     conn = AsyncConnection(transport, max_retries=1, retry_delay=0.0)
+    use_fixture_metadata(monkeypatch, conn)
     conn._session._state = SessionState.READY
     tid = "ABCDEF1234567890ABCDEF12"
     queue = "TESTQUEUE"
-    await conn.call_transactional("STFC_CONNECTION", tid=tid, queue=queue)
+    await conn.call_transactional("STFC_CONNECTION", tid=tid, queue=queue, REQUTEXT="x")
     assert len(transport.sent) == 2
     assert queue.encode("utf-16-le") in transport.sent[0]
     assert transport.sent[0] == transport.sent[1]
