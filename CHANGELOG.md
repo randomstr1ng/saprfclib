@@ -82,7 +82,6 @@ that it is an assumption.
     probed.
   - **The PROGRAM_ID limits** (64 characters, no `*`): a live probe could not read the
     registration result back.
-
   - **The RFC server's return codes** 3 (failure) and 16 (TID already executed): no
     capture of a SAP system receiving either from a registered server.
 
@@ -110,6 +109,9 @@ that it is an assumption.
   `DATA` rows, the serialized call and its header, the queue name — and what live TIDs
   look like (24 uppercase hex characters in four fields).
 - `docs/protocol/framing.md`: the row-width rule and the alignment of each DDIC type.
+- `docs/protocol/serialization.md`: INT8, UTCLONG and the packed-decimal sign as captured;
+  why types 33–40 cannot be captured on kernel 793.
+- `docs/protocol/handshake.md`: the password scramble's evidence.
 - `docs/protocol/framing.md`: GW frame fields read off the committed captures, including
   bytes 78:80, which carry the gateway-assigned connection index.
 
