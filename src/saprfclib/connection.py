@@ -1628,6 +1628,26 @@ def _pad_call_name(func_name: str, width: int) -> str:
     return func_name + "=" * (width - len(func_name)) + "FT"
 
 
+def _flag(name: str, value: object) -> bool:
+    """A yes/no connection parameter as a bool.
+
+    ``True``/``False``, ``1``/``0`` and the NW RFC SDK's string forms ``"1"``/``"0"``
+    (what pyrfc callers pass) are accepted. Anything else is refused: a truthiness
+    test would read ``"0"`` or ``"false"`` as *on*, which for ``snc_sso`` silently
+    drops the password and logs on with the SNC identity instead (issue #64).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip() in ("0", "1"):
+        return value.strip() == "1"
+    raise TypeError(
+        f"{name} must be True or False (or '1'/'0' as in the NW RFC SDK), "
+        f"not a {type(value).__name__} with another value"
+    )
+
+
 def _validate_sysnr(sysnr: str | int) -> int:
     """Return the system number as an int, or explain why it is not one.
 
@@ -4463,6 +4483,15 @@ def connect(
     ``snc_partnername`` and ``snc_myname`` are never logged or echoed into any log
     message or exception string (threats T-03-CRED2 / T-07-CRED / T-07-PROXY-CRED).
     """
+    # Yes/no parameters: refuse values a truthiness test would misread (issue #64).
+    strict_params = _flag("strict_params", strict_params)
+    allow_restricted_logon = _flag("allow_restricted_logon", allow_restricted_logon)
+    ws_tls_verify = _flag("ws_tls_verify", ws_tls_verify)
+    if snc_sso is not None:
+        snc_sso = _flag("snc_sso", snc_sso)
+    if isinstance(snc_kerberos, (bool, int, str)):  # a KerberosLogin passes as is
+        snc_kerberos = _flag("snc_kerberos", snc_kerberos)
+    ms_use_http = _flag("ms_use_http", ms_use_http)
     # Imported lazily so the direct-TCP facade carries no hard dependency on the
     # alternate-transport layer (router.py, plan 03-03 Task 2).
     from saprfclib.router import (
@@ -6091,6 +6120,14 @@ async def connect_async(
     saprfclib.connect(): False (default) drops undeclared keyword arguments with a
     warning, True raises.
     """
+    # Yes/no parameters: refuse values a truthiness test would misread (issue #64).
+    strict_params = _flag("strict_params", strict_params)
+    allow_restricted_logon = _flag("allow_restricted_logon", allow_restricted_logon)
+    ws_tls_verify = _flag("ws_tls_verify", ws_tls_verify)
+    if snc_sso is not None:
+        snc_sso = _flag("snc_sso", snc_sso)
+    if isinstance(snc_kerberos, (bool, int, str)):  # a KerberosLogin passes as is
+        snc_kerberos = _flag("snc_kerberos", snc_kerberos)
     snc_enabled = (
         snc_lib is not None
         or snc_pse is not None
