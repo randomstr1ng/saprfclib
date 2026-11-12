@@ -286,6 +286,9 @@ hatch run lint:type                   # mypy strict over src/
 - mypy runs in strict mode over `src/`. Public APIs require full annotations.
 - Do not weaken a test to make a change pass. Do not add `# type: ignore` without a
   comment saying why.
+- `tests/test_repo_hygiene.py` fails on internal SAP function, symbol or constant names,
+  and on "protocol analysis" cited as a source. Cite the capture, fixture or probe instead,
+  or label the fact `[ASSUMED]`.
 
 ---
 
@@ -314,5 +317,6 @@ hatch run lint:type                   # mypy strict over src/
 - When a capture contradicts this document, the capture wins — and update this document.
 - Propose changes as PRs; don't push directly to `main`.
 - For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, Kerberos suite `0x0008`,
-  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`),
+  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`, RFC types 31–40, SAP LZ4 frames, the
+  inbound `0x5001` parameter block, the TID character set),
   check the GitHub issues before starting — a capture requirement may be blocking.

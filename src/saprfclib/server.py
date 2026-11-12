@@ -270,25 +270,25 @@ def _wrap_in_0608(rfc_data: bytes, gw_handle: bytes) -> bytes:
 
 
 def _extract_5001_params(data: bytes) -> dict[str, str]:
-    """Parse tag 0x5001 NgRfc compact param block → IMPORTING CHAR param values.
+    """Parse tag 0x5001 compact param block → IMPORTING CHAR param values.
 
-    verified format (the NgRfc receive stream + NgRfcDeserializer, 2026-07-02):
-      [0:14]  NgRfc stream header: '$' magic (0x24) + 'H' (0x48) + 12 bytes flags
-      [14..]  Entry stream from getNextParameter:
+    [ASSUMED] format — no committed capture contains a 0x5001 block; a capture of SAP
+    calling a registered server with IMPORTING CHAR parameters would settle it:
+      [0:14]  stream header: '$' magic (0x24) + 'H' (0x48) + 12 bytes flags
+      [14..]  Entry stream:
               0x54 [name_len 1B] [name_ascii] = type-spec (EXPORTING from server)
               0x51 [name_len 1B] [name_ascii] = IMPORTING param (value follows)
-              0x44 = DDic type descriptor compMode (readMetadata/readColumnMetadata
-                     consumes a variable-length DDic block from the stream — ~51B in
-                     the STFC_CONNECTION capture; this is NOT a declaration entry)
+              0x44 = DDic type descriptor (a variable-length block; not a
+                     declaration entry)
               0x45 = end marker
       After 0x44 DDic block: value compMode 0x43 'C' for CHAR type:
               0x43 [len_lo 1B] [0x80] [len bytes ASCII value]
               LE int16 = (0x80<<8)|len_lo = 0x8000|len → high bit = compressed flag,
               N = LE int16 & 0x7FFF bytes of ASCII content.
 
-    Only CHAR-type params are decoded (compMode 0x43 pattern); non-CHAR types
-    (INT, FLOAT, DATE, STRING, TABLE etc.) are deferred to Phase 6 protocol analysis.
-    See docs/protocol/framing.md §"Phase 5 protocol analysis" for full analysis.
+    Only CHAR-type params are decoded (compMode 0x43 pattern); other types (INT, FLOAT,
+    DATE, STRING, TABLE, ...) are not decoded from this block. The request's
+    0x0201/0x0203 pairs, when present, are decoded first (``_decode_request``).
     """
     params: dict[str, str] = {}
     pos = 14  # skip 14-byte header
@@ -794,8 +794,11 @@ class RfcServer:
         """
         tlv = _strip_gw_header(frame)
 
-        # Phase-6 Pitfall 6 seam: function name IS the call-type discriminator
-        # (protocol analysis — no separate byte needed).
+        # Phase-6 Pitfall 6 seam: the function name is the call-type discriminator.
+        # [ASSUMED] for inbound calls: SAP is expected to send a tRFC to a registered
+        # server as a call of ARFC_DEST_SHIP, as a client sends it (A4H runs a client's
+        # ARFC_DEST_SHIP call as that function module, live 2026-11-12). No capture of SAP
+        # sending a tRFC to a registered server exists yet.
         fname = self._read_func_name(tlv)
 
         if fname == _ARFC_DEST_SHIP:
@@ -1332,8 +1335,8 @@ class RfcServer:
         """Extract the ARFCTID parameter value from an ARFC_DEST_SHIP frame.
 
         Tries 0x0201/0x0203 pairs first (offline fixtures / Python-built frames),
-        then falls back to the 0x5001 compact block (live SAP inbound tRFC frames
-        use NgRfc format — same encoding as Phase 5 registered-server inbound).
+        then falls back to the 0x5001 compact block ([ASSUMED] to be how SAP sends an
+        inbound tRFC to a registered server — see ``_extract_5001_params``).
 
         Returns the TID string (stripped of padding), or ``""`` if absent.
         """

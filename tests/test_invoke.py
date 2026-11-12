@@ -493,8 +493,8 @@ def _options_table_desc() -> FunctionDesc:
 def test_build_invoke_request_table_with_rows_uses_0x0301_protocol():
     """Non-empty TABLE param emits 0x0301(name)+0x0330(dm_id)+0x0302(info)+0x0303(rows).
 
-    CONFIRMED: the parameter layer::the serializer (writeRfcString tag=0x301) +
-    RfcTable::the serializer (0x0330 DM ID + writeRfcTableInfo 0x302 + row data 0x303).
+    Order as in live requests with TABLE parameters (docs/protocol/framing.md): 0x0301
+    name, 0x0330 DM ID, 0x0302 table info, 0x0303 row data.
 
     Note what the sequence does NOT contain: an 0x0306 end tag. The serializer writes
     name, DM id, info and rows and stops; neither golden capture carries 0x0306 in a
@@ -615,9 +615,9 @@ def test_extract_name_value_pairs_new_table_format():
 
 
 def test_build_invoke_request_changing_gets_0x0205_decl():
-    """RFC_CHANGING params emit 0x0205 decl (rfcSupplyOutParam, bit 1 of direction).
+    """RFC_CHANGING params emit a 0x0205 declaration (bit 1 of direction is set).
 
-    RFC_CHANGING = 0x03; bit 1 set (0x03 & 0x02 == 0x02) → rfcSupplyOutParam called.
+    RFC_CHANGING = 0x03; bit 1 set (0x03 & 0x02 == 0x02) → the server returns it.
     """
     from saprfclib.invoke import build_invoke_request
 

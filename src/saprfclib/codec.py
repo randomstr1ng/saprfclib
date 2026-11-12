@@ -43,8 +43,10 @@ __all__ = ["encode", "decode"]
 
 
 # --------------------------------------------------------------------------- #
-# RFCTYPE integer constants (SDK type definitions lines 91-125; values 31-40 confirmed
-# from both header auto-increment and dispatch cases 0x1f-0x28).
+# RFCTYPE integer constants. 0-30: the type codes the server reports in function
+# metadata (live captures under tests/golden/). 31-40 continue the sequence; only 31
+# (INT8, 8 bytes) has been seen live — A4H's metadata for GET_TASK_INFO.E_DISPATCHED_TASKS,
+# 2026-11-12. 32-40 are [ASSUMED]; see docs/protocol/serialization.md [A1].
 # --------------------------------------------------------------------------- #
 RFCTYPE_CHAR = 0
 RFCTYPE_DATE = 1
@@ -79,9 +81,12 @@ RFCTYPE_CDAY = 40
 # struct format chars for the fixed-width integer / float types. All multi-byte
 # scalars are little-endian on the confirmed x86-64 wire (DATE/TIME excepted —
 # those are SAP_UC text, not integers). FLOAT is an IEEE 754 double "<d".
-# INT8/UTCLONG/UTCSECOND/UTCMINUTE share the INT8 8-byte group in the serializer
-# (dispatch cases 7/0x1f-0x22); DTDAY-TSECOND share INT4 group (0x23-0x26);
-# TMINUTE/CDAY share INT2 group (0x27-0x28). All confirmed LE by grouping.
+# INT8 and types 32-40: [ASSUMED] little-endian integers of 8 (INT8, UTCLONG, UTCSECOND,
+# UTCMINUTE), 4 (DTDAY, DTWEEK, DTMONTH, TSECOND) or 2 (TMINUTE, CDAY) bytes, by analogy
+# with the confirmed INT/INT2 below. INT8's width (8) was seen in live metadata, but its
+# only live value was 0, which does not show the byte order; no standard remote-enabled
+# function module on A4H uses the other types. A capture of a function module with
+# parameters of these types (non-zero values) would settle all of them.
 # INT4 little-endian is CONFIRMED, not inferred: the STFC_CHANGING golden pair
 # settles it by arithmetic. The request carries START_VALUE=0a000000 and
 # COUNTER=01000000; the response carries RESULT=0b000000 and COUNTER=02000000. The
@@ -93,16 +98,16 @@ RFCTYPE_CDAY = 40
 _INT_FORMATS: dict[int, str] = {
     RFCTYPE_INT: "<i",  # signed 32-bit
     RFCTYPE_INT2: "<h",  # signed 16-bit
-    RFCTYPE_INT8: "<q",  # signed 64-bit (protocol analysis, same group as FLOAT=7)
-    RFCTYPE_UTCLONG: "<q",  # 8-byte (protocol analysis
-    RFCTYPE_UTCSECOND: "<q",  # protocol analysis
-    RFCTYPE_UTCMINUTE: "<q",  # protocol analysis
-    RFCTYPE_DTDAY: "<i",  # 4-byte (protocol analysis
-    RFCTYPE_DTWEEK: "<i",  # protocol analysis
-    RFCTYPE_DTMONTH: "<i",  # protocol analysis
-    RFCTYPE_TSECOND: "<i",  # protocol analysis
-    RFCTYPE_TMINUTE: "<h",  # 2-byte (protocol analysis
-    RFCTYPE_CDAY: "<h",  # protocol analysis
+    RFCTYPE_INT8: "<q",  # signed 64-bit [ASSUMED LE, see above]
+    RFCTYPE_UTCLONG: "<q",  # [ASSUMED]
+    RFCTYPE_UTCSECOND: "<q",  # [ASSUMED]
+    RFCTYPE_UTCMINUTE: "<q",  # [ASSUMED]
+    RFCTYPE_DTDAY: "<i",  # [ASSUMED]
+    RFCTYPE_DTWEEK: "<i",  # [ASSUMED]
+    RFCTYPE_DTMONTH: "<i",  # [ASSUMED]
+    RFCTYPE_TSECOND: "<i",  # [ASSUMED]
+    RFCTYPE_TMINUTE: "<h",  # [ASSUMED]
+    RFCTYPE_CDAY: "<h",  # [ASSUMED]
 }
 
 # GAP-B-01 (DecFloat16/34) is CLOSED. Source: golden fixture

@@ -6,7 +6,7 @@
 # tests/golden/framing/server_registration_request.bin byte-for-byte (modulo the
 # session-variable fields annotated in the .json sidecar).
 #
-# RE source of every reproduced byte: docs/protocol/framing.md (protocol analysis + capture).
+# Source of every reproduced byte: the golden capture above and docs/protocol/framing.md.
 # ZERO sockets — the registration frame is built by the pure state machine.
 #
 # Plan 03 also extends this file with the dispatch/serialize/auth tests; this plan

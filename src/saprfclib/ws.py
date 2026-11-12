@@ -264,8 +264,8 @@ def _build_upgrade_request(
 
     The SAP-required WebSocket subprotocol (Sec-WebSocket-Protocol: rfc.sap.com)
     is negotiated via wsproto's subprotocols parameter so it appears in the
-    standard RFC 6455 position (verified: WebsocketDriver::rfcWSProtocolHeader
-    = "Sec-WebSocket-Protocol", rfcWSProtocolValue = "rfc.sap.com").
+    standard RFC 6455 position (used in every live wRFC session against A4H; golden
+    fixtures framing/wrfc_*.json).
     """
     client = WSConnection(ConnectionType.CLIENT)
     request_bytes = client.send(
@@ -302,11 +302,12 @@ def _ws_upgrade(
     Security (T-07-CRED): ``passwd`` is used only to build the Basic auth token
     and is NEVER logged or embedded in a raised exception.
     """
-    # SAP ICM headers required to activate the wRFC ICM handler (verified from
-    # WebsocketDriver::addProprietaryHeaderFields in the reference client):
-    #   rfcWSProtocolHeader/Value → Sec-WebSocket-Protocol: rfc.sap.com  (via subprotocols)
-    #   rfcOptionsHeader/rfcOptionsDeltaOff → sap-rfc-options: rfc-delta=off
-    #   sap-client, sap-language, sap-rfc-subtype: sync (always sent)
+    # Headers sent with the WebSocket upgrade, as in every live wRFC session against A4H
+    # (golden fixtures framing/wrfc_*.json); which of them the ICM strictly requires was
+    # not tested:
+    #   Sec-WebSocket-Protocol: rfc.sap.com  (via subprotocols)
+    #   sap-rfc-options: rfc-delta=off
+    #   sap-client, sap-language, sap-rfc-subtype: sync
     extra_headers: list[tuple[bytes, bytes]] = [
         (b"sap-rfc-options", b"rfc-delta=off"),
         (b"sap-rfc-subtype", b"sync"),

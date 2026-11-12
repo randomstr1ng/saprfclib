@@ -17,7 +17,7 @@
 #
 # Frame layout (D-02, confirmed):
 #     offset  size  field
-#     0x00    8B    eye-catcher = "SNCFRAME" (D-22 resolved — protocol analysis 2026-07-21)
+#     0x00    8B    eye-catcher = "SNCFRAME" (D-22; golden fixture snc/snc_frame_headers.json)
 #     0x08    1B    frame_type: 2=FR_INIT, 4=FR_ACCEPT, 7=plain, 8=integrity, 9=privacy
 #     0x09    1B    protocol version = 6
 #     0x0a    2B    BE uint16: total header length (0x18 + extension header size)
@@ -1197,8 +1197,8 @@ class SncTransport:
             # type is chosen by the sender, so this is where a downgrade is refused.
             raise SncError("SNC frame protected below the required minimum")
         if frame_type == int(SncFrameType.PRIVACY):
-            # PRIVACY: encrypted data is in gss_token (token_len field),
-            # data_len=0 — confirmed by proxy capture and the SNC output path protocol analysis.
+            # PRIVACY: encrypted data is in gss_token (token_len field), data_len=0.
+            # Source: golden fixture snc/snc_frame_headers.json (type-9 data frames).
             return self._gss.unwrap(gss_token)
         if frame_type == int(SncFrameType.INTEGRITY):
             self._gss.verify_mic(app_data, gss_token)

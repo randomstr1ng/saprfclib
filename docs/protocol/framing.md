@@ -554,10 +554,15 @@ The exception NUMBER is the ABAP MESSAGE number (3-digit "000" when no explicit 
 Confirmed from live capture — golden fixture
 `tests/golden/framing/server_registration_request.bin` (457 bytes including the NI header).
 
-Parameter validation applied before the frame is built: PROGRAM_ID must be non-empty, at most
-64 characters, and must not contain `*`; the gateway host string is capped at 2048 characters;
-the gateway service must be non-empty. `saprfclib` enforces the same limits in
-`server_session.py` so an invalid registration fails locally rather than at the gateway.
+Parameter checks `saprfclib` applies before the frame is built (`server_session.py`):
+PROGRAM_ID must be non-empty, at most 64 characters, and must not contain `*`; the gateway
+host string is capped at 2048 characters; the gateway service must be non-empty. The 64-character
+and `*` limits are **[ASSUMED]**. A probe against A4H (2026-11-12) did not settle them: with
+program IDs of 13, 64 and 65 characters the registration socket stayed open and waiting, and
+with a `*` in the ID it ended at once without an error, but whether the gateway registered each
+one could not be read back (the gateway monitor function modules are not authorised for the
+test user). A registration check from SMGW, or calling the program through the gateway, would
+settle both limits.
 
 **Registration request (server → gateway)** — the same `0x0601` GW_CONNECT frame a client
 emits, and independent of the PROGRAM_ID on the wire:
@@ -566,7 +571,7 @@ emits, and independent of the PROGRAM_ID on the wire:
 NI header (4B) + GW header (0x0601 GW_CONNECT)
   [0]      0x06            GW frame
   [1]      0x01            GW_CONNECT type
-  [10]     0x01 / [16] 0xC0 / [21] 0x04 / [22] 0x00   STIInit constants
+  [10]     0x01 / [16] 0xC0 / [21] 0x04 / [22] 0x00   as captured (server_registration_request.bin; the gateway's replies carry 0x06 at [21])
   [40:48]  8 spaces        no GW handle yet on outbound connect
   [48:56]  "NWRFC   "      remote RFC partner LU name (NOT the PROGRAM_ID)
   [76:80]  ffff ffff       request marker (ACK flips [78:80] → 0004)
