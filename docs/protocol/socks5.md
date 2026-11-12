@@ -127,11 +127,11 @@ to itself. `gwhost` defaults to `ashost`, so a direct connection is unchanged.
 conn = saprfclib.connect(
     ashost="s4-2025-raw", sysnr="00", client="001", user="Developer", passwd="...",
     proxy_type="socks5", proxy_host="connectivity-proxy...", proxy_port=20004,
-    gwhost="192.168.88.9",   # the SAP system's internal address (an IP needs no server-side DNS)
+    gwhost="198.51.100.9",   # the SAP system's internal address (an IP needs no server-side DNS)
 )
 ```
 
-**CONFIRMED (2026-10-02, `nohat-rfc-working.pcap`):** with `gwhost="192.168.88.9"`
+**CONFIRMED (2026-10-02, `nohat-rfc-working.pcap`):** with `gwhost="198.51.100.9"`
 (the SAP system's internal IPv4) the gateway accepted the `0x060f` frame and the
 `STFC_CONNECTION` call returned its `ECHOTEXT`. The exact accepted frame is committed
 as `tests/golden/handshake/gw_info_proxy.bin`, and

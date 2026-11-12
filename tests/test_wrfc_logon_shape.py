@@ -35,7 +35,7 @@ from saprfclib.connection import _build_ws_logon_message, _scramble_password_ws
 # containing an environment-derived field measures the build host, not the
 # fields. It passed on a developer machine whose hostname is five characters and
 # failed in CI on a runner whose name is eight longer.
-_PINNED_HOSTNAME = "titan"
+_PINNED_HOSTNAME = "host1"
 
 
 @pytest.fixture(autouse=True)

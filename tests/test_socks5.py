@@ -668,11 +668,11 @@ def test_gw_info_matches_live_accepted_proxy_frame() -> None:
     # Golden: the exact 0x060f frame a live SAP gateway accepted over a SOCKS5 +
     # Cloud Connector path (nohat-rfc-working.pcap frame 5), after which the
     # STFC_CONNECTION call round-tripped. Confirms gwhost must be the SAP system's
-    # internal address (192.168.88.9), and that our builder reproduces it exactly.
+    # internal address (198.51.100.9), and that our builder reproduces it exactly.
     from pathlib import Path
 
     from tests.conftest import load_fixture
 
     fix = load_fixture(Path("tests/golden/handshake"), "gw_info_proxy")
-    built = Connection._build_gw_info(b"56334047", "192.168.88.9")
+    built = Connection._build_gw_info(b"56334047", "198.51.100.9")
     assert built == fix.payload_bytes

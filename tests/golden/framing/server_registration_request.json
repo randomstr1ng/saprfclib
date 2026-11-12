@@ -1,6 +1,6 @@
 {
   "message_type": "SERVER_REGISTRATION_REQUEST",
-  "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 192.168.88.7:3300 (sapgw00); SM59 type-T dest SAPRFC_TEST; pyrfc/NWRFC oracle registering a PROGRAM_ID",
+  "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 198.51.100.7:3300 (sapgw00); SM59 type-T dest SAPRFC_TEST; pyrfc/NWRFC oracle registering a PROGRAM_ID",
   "evidence": "server registration path",
   "ni_header_length": 4,
   "notes": [
@@ -141,7 +141,7 @@
       "offset": 60,
       "length": 17,
       "name": "gw_session_info",
-      "value": "192.168.. sapdp00 I",
+      "value": "198.51.1. sapdp00 I",
       "type": "variable",
       "note": "local IP / NI hostname / service block — session-specific"
     },

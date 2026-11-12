@@ -40,6 +40,7 @@ BANNED = {
         r"\b(?:NiI(?:Write|Read)|STI[A-Z]\w+|GwI[A-Z]\w+|UtilCpy\w+|sec1_\w+)"
     ),
     "SDK header cited as a source": re.compile(r"SDK type definitions|\bh:\d{2,4}\b"),
+    "address of the development lab": re.compile(r"\b(?:192\.168\.88|10\.20\.30)\.\d"),
     "SAP-internal versioned class name": re.compile(r"\b[A-Z][A-Z_]+_v\d{1,3}(?:_\d+)?\b"),
     "SAP-internal component name": re.compile(r"\b(?:NgRfc\w*|WebsocketDriver)\b"),
 }
@@ -91,3 +92,22 @@ def test_no_internal_references_cited_as_sources() -> None:
 )
 def test_patterns_catch_what_they_are_for(line: str) -> None:
     assert any(p.search(line) for p in BANNED.values())
+
+
+# Binary fixtures are sanitised with length-preserving substitutions (CLAUDE.md); the lab
+# network must not survive in any encoding a capture can carry it in.
+_LAB_BYTES = [
+    form
+    for text in ("192.168.88.", "10.20.30.")
+    for form in (text.encode("ascii"), text.encode("utf-16-le"))
+] + [bytes([192, 168, 88]), bytes([10, 20, 30])]
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted((ROOT / "tests" / "golden").rglob("*.bin")),
+    ids=lambda p: p.relative_to(ROOT).as_posix(),
+)
+def test_binary_fixtures_carry_no_lab_address(path: pathlib.Path) -> None:
+    data = path.read_bytes()
+    assert not [f for f in _LAB_BYTES if f in data]

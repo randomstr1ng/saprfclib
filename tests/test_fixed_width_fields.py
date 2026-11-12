@@ -91,7 +91,7 @@ def test_ni_init_long_program_id_matches_sdk_capture() -> None:
     capture = (
         Path(__file__).parent / "golden" / "framing" / "server_ni_init_client_long_progid.bin"
     ).read_bytes()[4:]
-    built = _build_ni_init(capture[2:6], "titan", "ZFTNT_SIGTEST")
+    built = _build_ni_init(capture[2:6], "host1", "ZFTNT_SIGTEST")
     assert built == capture
 
 
@@ -108,7 +108,7 @@ def test_ni_init_body_matches_the_client_capture() -> None:
     capture = (
         Path(__file__).parent / "golden" / "framing" / "client_ni_init_request.bin"
     ).read_bytes()[4:]
-    built = _build_ni_init(capture[2:6], "titan", "python3")
+    built = _build_ni_init(capture[2:6], "host1", "python3")
     assert capture[0:2] == b"\x02\x03"
     assert built[0:2] == b"\x02\x0b"
     assert built[2:] == capture[2:]

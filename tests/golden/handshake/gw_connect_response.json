@@ -1,6 +1,6 @@
 {
   "message_type": "GW_CONNECT_RESPONSE",
-  "capture_source": "live capture 2026-06-26 frame 9; SAP A4H sysnr=00; server=10.20.30.15:3300",
+  "capture_source": "live capture 2026-06-26 frame 9; SAP A4H sysnr=00; server=192.0.2.15:3300",
   "evidence": "GW_CONNECT response — GW layer below RFC; independent confirmation pending",
   "ni_header_length": 4,
   "notes": [
@@ -57,7 +57,7 @@
       "name": "program_area",
       "value": "variable",
       "type": "variable",
-      "note": "Program area: 'NWRFC 10.20.30sapdp00 ' padded + flags; GW routing info [UNKNOWN layout]"
+      "note": "Program area: 'NWRFC 192.0.2.sapdp00 ' padded + flags; GW routing info [UNKNOWN layout]"
     },
     {
       "offset": 80,

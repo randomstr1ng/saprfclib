@@ -148,7 +148,7 @@
     "ip_addr_primary": {
       "offset_in_entry": 137,
       "length": 4,
-      "_note": "4-byte BE IPv4 address. wire-captured: entry0=c0a86306, entry1=c0a85807, entry2=7f000001."
+      "_note": "4-byte BE IPv4 address. wire-captured: entry0=c6336406, entry1=c6336407, entry2=7f000001."
     },
     "ip_addr_secondary": {
       "offset_in_entry": 141,
@@ -171,9 +171,9 @@
       "index": 0,
       "absolute_offset": 118,
       "instance_name": "-",
-      "hostname_string": "192.168.99.6",
-      "ip_addr": "192.168.99.6",
-      "ip_hex": "c0a86306",
+      "hostname_string": "198.51.100.6",
+      "ip_addr": "198.51.100.6",
+      "ip_hex": "c6336406",
       "port": 0,
       "status": "inactive",
       "_note": "wire-captured: port 0 = not participating in group logon."
@@ -183,8 +183,8 @@
       "absolute_offset": 278,
       "instance_name": "vhcala4hci_A4H_00",
       "hostname_string": "vhcala4hci",
-      "ip_addr": "192.168.88.7",
-      "ip_hex": "c0a85807",
+      "ip_addr": "198.51.100.7",
+      "ip_hex": "c6336407",
       "port": 3200,
       "load_byte_hex": "bb",
       "load_value": 187,
@@ -204,9 +204,9 @@
     }
   ],
   "selection_rule": {
-    "_note": "Select first entry with port > 0 (active). For Phase 4 MVP, this selects entry index 1 (192.168.88.7:3200, sysnr=0). Pool selection deferred to Phase 5.",
+    "_note": "Select first entry with port > 0 (active). For Phase 4 MVP, this selects entry index 1 (198.51.100.7:3200, sysnr=0). Pool selection deferred to Phase 5.",
     "selected_index": 1,
-    "selected_host": "192.168.88.7",
+    "selected_host": "198.51.100.7",
     "selected_port": 3200,
     "sysnr_formula": "sysnr = (port - 3200) // 100",
     "sysnr": 0

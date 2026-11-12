@@ -1,6 +1,6 @@
 {
   "message_type": "SERVER_INBOUND_CALL_REQUEST",
-  "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 192.168.88.7:3300 pushing the post-registration inbound exchange to the registered server",
+  "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 198.51.100.7:3300 pushing the post-registration inbound exchange to the registered server",
   "evidence": "inbound server receive path (same codepath as the client response read)",
   "ni_header_length": 4,
   "notes": [

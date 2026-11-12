@@ -45,14 +45,14 @@ TCP SYN/SYN-ACK/ACK  [frames 1-3]
 ```
 [0-3]   ni_length       4B  BE uint32 = 64
 [4-5]   msg_type        2B  0x0203 (NI version frame)
-[6-9]   client_ip       4B  IPv4 of client (10.20.30.65 = 0x0a141e41)
+[6-9]   client_ip       4B  IPv4 of client (192.0.2.65 = 0xc0000241)
 [10-13] zeros           4B
 [14-21] program_name    8B  NUL-terminated ASCII (e.g. "python3\x00")
 [22-23] zeros           2B
 [24-27] codepage        4B  ASCII codepage string (e.g. "1100" or "4103")
 [28-31] zeros           4B
 [32-33] version_flags   2B  0x0006 (client) / 0x000f (server)
-[34-43] hostname        10B space-padded ASCII (e.g. "titan     ")
+[34-43] hostname        10B space-padded ASCII (e.g. "host1     ")
 [44-53] program_padded  10B space-padded ASCII (e.g. "python3   ")
 [54-55] rfc_hint        2B  0x06cb (client) / 0x06fb (server)
 [56-57] unicode_capable 2B  0xffff
@@ -117,9 +117,9 @@ The connection handle (`"75568442"` in this capture) is:
 ### Sequence
 
 1. Client sends GW_CONNECT_REQUEST (type 0x0601, 457 bytes) containing:
-   - RFC program name ("NWRFC"), server host prefix ("10.20.30"), program ID ("sapdp00")
+   - RFC program name ("NWRFC"), server host prefix ("192.0.2."), program ID ("sapdp00")
    - CPIC identifier string
-   - Client hostname ("randomstr1ng"), client IP ("10.20.30.15")
+   - Client hostname ("randomstr1ng"), client IP ("192.0.2.15")
 
 2. Server sends GW_CONNECT_RESPONSE (type 0x0601, 84 bytes) containing:
    - **Assigned connection handle at offset 32** ("75568442")
@@ -179,7 +179,7 @@ After the GW handshake completes, the client sends the RFC-layer logon frame (ty
 | 0x0011 | 1 | ASCII "E" | Language (again) |
 | 0x0012 | 3 | ASCII "754" | RFC protocol version |
 | 0x0013 | 3 | ASCII "754" | Server RFC version |
-| 0x0008 | 5 | ASCII "titan" | Client hostname |
+| 0x0008 | 5 | ASCII "host1" | Client hostname |
 | 0x0006 | 9 | ASCII "\<unknown\>" | Client program/transaction |
 | 0x0130 | 7 | ASCII "python3" | Client program name |
 | 0x0502 | 0 | — | Call-start marker |
@@ -391,7 +391,7 @@ kernel 793 sends a **238-byte** LOGON frame containing nineteen records:
 0011  1   "E"
 0012  3   "754"                   own release
 0013  3   "754"
-0008  5   "titan"                 client hostname
+0008  5   "host1"                 client hostname
 0006  9   "<unknown>"
 0130  8   "startrfc"              CLIENT PROGRAM NAME
 0502  0                           request marker

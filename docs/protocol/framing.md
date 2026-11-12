@@ -978,7 +978,7 @@ Entry  Size  Field              Notes
  80     40   field3             [ASSUMED] secondary name / "tick-port" string. wire-captured.
 120     15   unknown_zeros      Leading space(s) then zero bytes. wire-captured.
 135      2   ffff_marker        0xFFFF. Confirmed in all 3 entries. wire-captured.
-137      4   ip_addr_primary    4-byte BE IPv4 (e.g. 0xC0A85807 = 192.168.88.7). wire-captured.
+137      4   ip_addr_primary    4-byte BE IPv4 (e.g. 0xC6336407 = 198.51.100.7). wire-captured.
 141      4   ip_addr_secondary  Duplicate of primary. [ASSUMED]. wire-captured.
 145      2   port               BE uint16; 0 = inactive, 0x0C80 = 3200. wire-captured.
 147     13   trailing_flags     [ASSUMED] flags/load score. wire-captured values vary.

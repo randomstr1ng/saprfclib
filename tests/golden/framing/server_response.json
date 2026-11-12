@@ -1,6 +1,6 @@
 {
   "message_type": "SERVER_RESPONSE",
-  "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 192.168.88.7:3300 reply on the registered server channel (this capture is a logon-error reply: the post-registration client logon used a wrong password)",
+  "capture_source": "live capture 2026-06-29 via Wireshark; SAP A4H gateway 198.51.100.7:3300 reply on the registered server channel (this capture is a logon-error reply: the post-registration client logon used a wrong password)",
   "evidence": "server-direction serializer (mirror of the client-direction serializer)",
   "ni_header_length": 4,
   "notes": [

@@ -7,7 +7,7 @@
     "First frame a gateway-started program sends to the gateway: connect kind 0203, conversation ID at payload [46:54].",
     "All five connections: [46:54] (32155195, 32156209, 32157218, 32158227, 32159235) equals the [40:48] conversation ID the gateway then uses in every 06xx frame of that connection, and the gateway echoes it in its 64B reply.",
     "Contrast: a registration (020b, server_ni_init_client_long_progid.bin) sends 8 blanks there; non-blank is refused with 'REGISTER_TP conv id not initialized' (probe, issue #58).",
-    "Sanitised length-preserving: local hostname[:8] replaced by 'titan   '. [2:6] is 127.0.0.1 as captured.",
+    "Sanitised length-preserving: local hostname[:8] replaced by 'host1   '. [2:6] is 127.0.0.1 as captured.",
     "Offsets are FILE offsets (NI 4-byte header included)."
   ],
   "expected_parse": {

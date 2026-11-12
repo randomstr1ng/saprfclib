@@ -1,13 +1,13 @@
 {
   "message_type": "CLIENT_NI_INIT_REQUEST",
-  "capture_source": "live capture 2026-06-29, pyrfc client (program 'python3') against SAP A4H gateway 192.168.88.7:3300 (sapgw00). Originally committed as server_ni_init_client/server_ni_init_gateway.",
+  "capture_source": "live capture 2026-06-29, pyrfc client (program 'python3') against SAP A4H gateway 198.51.100.7:3300 (sapgw00). Originally committed as server_ni_init_client/server_ni_init_gateway.",
   "evidence": "client NI init; issue #58 probe",
   "ni_header_length": 4,
   "notes": [
     "Client-connection NI init, not a registration: [0:2]=0203. Every client capture (NW RFC SDK client, saprfclib client) opens with 0203; the registered-server capture opens with 020b (server_ni_init_client_long_progid.bin).",
     "Behavioural probe 2026-10-27: a registration sequence opened with 0203 is answered '*ERR* wrong appc header version (111) from client' - the gateway parses the following 512B TPNAME frame as a client APPC header. Opened with 020b, the same sequence registers.",
     "Body layout is shared with the registration frame: NUL-padded process name at payload [10:20], program name[:8] + blanks at [38:54].",
-    "Sanitised length-preserving: local hostname 'titan', local IP 192.168.196.170.",
+    "Sanitised length-preserving: local hostname 'host1', local IP 192.168.196.170.",
     "Offsets are FILE offsets (NI 4-byte header included)."
   ],
   "expected_parse": {
