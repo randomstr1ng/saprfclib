@@ -127,6 +127,27 @@ _TAG_TABLE_END = 0x0306  # table-stream end marker. Accepted when reading; never
 # back under 0x0301 carrying their names, with server-assigned 0x0330 ids.
 _TAG_TABLE_DELTA = 0x0335
 _TAG_TABLE_DELTA_END = 0x0336
+
+# Row-level changes to a table the client sent (live, kernel 793, a purpose-built
+# function module editing its TABLES parameter in every way; tests/golden/
+# serialization/table_delta.json). The server does not send the table back; it sends
+# the edits, in the order they apply, each naming the client's DM table id and a
+# 1-based row number:
+#   0x0331  [dm]                    a delta section for that table opens
+#   0x0333  [op, dm, row] + 0x0334  op 4 append (row = new last row), 6 insert at row,
+#                                   7 change row; 0x0334 carries the row
+#   0x0332  [5, dm, row]            delete row
+#   0x0336  [dm]                    the section closes
+# A table with no edits gets an empty section: it comes back as it was sent. A table
+# replaced as a whole (sorted, cleared) comes back under 0x0335 instead (above).
+_TAG_DELTA_OPEN = 0x0331
+_TAG_DELTA_DELETE = 0x0332
+_TAG_DELTA_ROW_OP = 0x0333
+_TAG_DELTA_ROW = 0x0334
+_DELTA_APPEND = 4
+_DELTA_DELETE = 5
+_DELTA_INSERT = 6
+_DELTA_MODIFY = 7
 _DELTA_OPCODE = 10  # first uint32 of the 0x0335 header; only value observed
 _logger = logging.getLogger(__name__)
 
@@ -1229,7 +1250,10 @@ def raise_for_rfc_error(resp: bytes, *, _tags: dict[int, bytes] | None = None) -
 
 
 def parse_invoke_response(
-    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str] | None = None
+    resp: bytes,
+    desc: FunctionDesc,
+    dm_table_names: dict[int, str] | None = None,
+    sent_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse a RFC invoke response TLV stream and return a native-typed dict.
 
@@ -1247,6 +1271,11 @@ def parse_invoke_response(
     sent as input; the server returns those under tag 0x0335 keyed by ID rather than
     by name. Pass ``dm_table_ids(desc, params)`` for the same call, or such
     parameters are absent from the result.
+
+    ``sent_params`` are the parameters the call sent. A table the caller sent that the
+    server edited row by row (0x0331 … 0x0336) is rebuilt from the rows sent plus
+    the edits, and one it did not touch is returned as it was sent — as the reference
+    client does.
     """
     try:
         tags = _parse_tlv_stream(resp)
@@ -1312,6 +1341,17 @@ def parse_invoke_response(
             match_field.rfctype, value, match_field, row_counts.get(name)
         )
 
+    if dm_table_names and sent_params is not None:
+        for name, rows in _apply_table_deltas(resp, desc, dm_table_names, sent_params).items():
+            if name in result:
+                continue  # replaced as a whole under 0x0335
+            tfield = param_map.get(name.upper())
+            if tfield is None:
+                continue
+            result[tfield.name] = [
+                r for row in rows for r in decode(tfield.rfctype, row, tfield, 1)
+            ]
+
     # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
     # bypass the codec entirely (see decode_basxml_table).
     for name, payload in basxml.items():
@@ -1326,6 +1366,79 @@ def parse_invoke_response(
 # --------------------------------------------------------------------------- #
 # TLV parsing helpers
 # --------------------------------------------------------------------------- #
+
+
+def _iter_tlv_records(data: bytes) -> Iterator[tuple[int, bytes]]:
+    """Yield the (tag, value) records of a TLV stream in order, up to the terminator."""
+    pos, n = 0, len(data)
+    while pos + 4 <= n:
+        tag, length = struct.unpack_from(">HH", data, pos)
+        pos += 4
+        if tag == _TAG_TERMINATOR:
+            return
+        if length == 0xFFFF:
+            if pos + 4 > n:
+                raise ValueError(f"malformed TLV: tag 0x{tag:04x} truncated extended length")
+            length = struct.unpack_from(">I", data, pos)[0]
+            pos += 4
+        if pos + length > n:
+            raise ValueError(f"malformed TLV: tag 0x{tag:04x} length {length} exceeds payload")
+        yield tag, data[pos : pos + length]
+        pos += length
+        if pos + 2 <= n and struct.unpack_from(">H", data, pos)[0] == tag:
+            pos += 2
+
+
+def _apply_table_deltas(
+    resp: bytes, desc: FunctionDesc, dm_table_names: dict[int, str], sent_params: dict[str, Any]
+) -> dict[str, list[bytes]]:
+    """Rows of each table the call sent, with the server's row edits applied.
+
+    See the 0x0331 … 0x0336 note at the top of this module. Returns a table only if its
+    delta section was seen. An edit this module does not know raises ValueError rather
+    than producing a table that silently differs from the server's.
+    """
+    fields = {f.name.upper(): f for f in desc.parameters}
+    params_upper = {k.upper(): v for k, v in sent_params.items()}
+    rows_by_dm: dict[int, list[bytes]] = {}
+    for dm, name in dm_table_names.items():
+        field = fields.get(name.upper())
+        if field is None or field.type_desc is None:
+            continue
+        width = field.type_desc.uc_size if field.unicode_mode else field.type_desc.nuc_size
+        raw = encode(_RFCTYPE_TABLE, params_upper.get(name.upper()) or [], field)
+        rows_by_dm[dm] = [raw[i : i + width] for i in range(0, len(raw), width)]
+    seen: set[int] = set()
+    pending: tuple[int, int, int] | None = None
+    for tag, value in _iter_tlv_records(resp):
+        if tag == _TAG_DELTA_OPEN and len(value) == 4:
+            seen.add(struct.unpack(">I", value)[0])
+        elif tag in (_TAG_DELTA_ROW_OP, _TAG_DELTA_DELETE) and len(value) == 12:
+            op, dm, row = struct.unpack(">III", value)
+            rows = rows_by_dm.get(dm)
+            if rows is None:
+                raise ValueError(f"table delta for DM table id {dm}, which this call did not send")
+            if tag == _TAG_DELTA_DELETE:
+                if op != _DELTA_DELETE or not 1 <= row <= len(rows):
+                    raise ValueError(f"table delta: delete op {op} row {row} of {len(rows)}")
+                del rows[row - 1]
+            else:
+                pending = (op, dm, row)
+        elif tag == _TAG_DELTA_ROW and pending is not None:
+            op, dm, row = pending
+            pending = None
+            rows = rows_by_dm[dm]
+            if op == _DELTA_APPEND and row == len(rows) + 1:
+                rows.append(value)
+            elif op == _DELTA_INSERT and 1 <= row <= len(rows) + 1:
+                rows.insert(row - 1, value)
+            elif op == _DELTA_MODIFY and 1 <= row <= len(rows):
+                rows[row - 1] = value
+            else:
+                raise ValueError(f"table delta: op {op} at row {row} of {len(rows)} not understood")
+    if pending is not None:
+        raise ValueError("table delta: a row edit without its row (0x0334)")
+    return {dm_table_names[dm]: rows_by_dm[dm] for dm in seen if dm in rows_by_dm}
 
 
 def _parse_tlv_stream(data: bytes) -> dict[int, bytes]:

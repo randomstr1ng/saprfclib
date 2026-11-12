@@ -3545,7 +3545,7 @@ class Connection:
                             self._transport.recv_message, func_name
                         )
                         self._last_server_duration_s = extract_server_duration(tlv_response)
-                        result = parse_invoke_response(tlv_response, desc, dm_names)
+                        result = parse_invoke_response(tlv_response, desc, dm_names, call_params)
 
                 result = _convert_date_time_fields(result, desc)
                 _failed = False
@@ -5472,7 +5472,7 @@ class AsyncConnection:
                     # raises an ABAP error still reports how long the server spent
                     # on it -- that is often the interesting case.
                     self._last_server_duration_s = extract_server_duration(tlv_response)
-                    result = parse_invoke_response(tlv_response, desc, dm_names)
+                    result = parse_invoke_response(tlv_response, desc, dm_names, call_params)
                 result = _convert_date_time_fields(result, desc)
                 return result
             finally:
