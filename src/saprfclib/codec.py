@@ -32,6 +32,8 @@
 # normalizes to bytes once up front so all type branches see a uniform buffer.
 from __future__ import annotations
 
+import datetime as _dt
+import re
 import struct
 from decimal import Decimal
 from typing import Any, cast
@@ -81,12 +83,16 @@ RFCTYPE_CDAY = 40
 # struct format chars for the fixed-width integer / float types. All multi-byte
 # scalars are little-endian on the confirmed x86-64 wire (DATE/TIME excepted —
 # those are SAP_UC text, not integers). FLOAT is an IEEE 754 double "<d".
-# INT8 and types 32-40: [ASSUMED] little-endian integers of 8 (INT8, UTCLONG, UTCSECOND,
-# UTCMINUTE), 4 (DTDAY, DTWEEK, DTMONTH, TSECOND) or 2 (TMINUTE, CDAY) bytes, by analogy
-# with the confirmed INT/INT2 below. INT8's width (8) was seen in live metadata, but its
-# only live value was 0, which does not show the byte order; no standard remote-enabled
-# function module on A4H uses the other types. A capture of a function module with
-# parameters of these types (non-zero values) would settle all of them.
+# INT8 is CONFIRMED: signed 64-bit little-endian. A purpose-built function module
+# returned 0x0102030405060708 as 08 07 06 05 04 03 02 01 and -81985529216486896 as
+# 10 32 54 76 98 ba dc fe, and the reference client sent -2 as fe ff .. ff
+# (tests/golden/serialization/int8_utclong.json, live 2026-11-12).
+# UTCLONG has its own encoding, see _encode_utclong.
+# Types 33-40: [ASSUMED] little-endian integers of 8 (UTCSECOND, UTCMINUTE), 4 (DTDAY,
+# DTWEEK, DTMONTH, TSECOND) or 2 (TMINUTE, CDAY) bytes, by analogy with INT/INT2/INT8.
+# Kernel 793's dictionary has no data type for any of them (domain DATATYPE lists
+# INT8, UTCL, DATN, TIMN but none of these), so no RFC interface on that release can
+# carry one; a release that has them, and a function module using them, would settle it.
 # INT4 little-endian is CONFIRMED, not inferred: the STFC_CHANGING golden pair
 # settles it by arithmetic. The request carries START_VALUE=0a000000 and
 # COUNTER=01000000; the response carries RESULT=0b000000 and COUNTER=02000000. The
@@ -98,8 +104,7 @@ RFCTYPE_CDAY = 40
 _INT_FORMATS: dict[int, str] = {
     RFCTYPE_INT: "<i",  # signed 32-bit
     RFCTYPE_INT2: "<h",  # signed 16-bit
-    RFCTYPE_INT8: "<q",  # signed 64-bit [ASSUMED LE, see above]
-    RFCTYPE_UTCLONG: "<q",  # [ASSUMED]
+    RFCTYPE_INT8: "<q",  # signed 64-bit, confirmed above
     RFCTYPE_UTCSECOND: "<q",  # [ASSUMED]
     RFCTYPE_UTCMINUTE: "<q",  # [ASSUMED]
     RFCTYPE_DTDAY: "<i",  # [ASSUMED]
@@ -285,6 +290,88 @@ _OUT_OF_SCOPE = frozenset({RFCTYPE_NULL, RFCTYPE_ABAPOBJECT, RFCTYPE_XMLDATA})
 _BYTE_LIKE_TYPES = frozenset({RFCTYPE_BYTE, RFCTYPE_XSTRING})
 
 
+# --------------------------------------------------------------------------- #
+# UTCLONG
+# --------------------------------------------------------------------------- #
+#
+# UTCLONG travels as an 8-byte little-endian integer: 0 is the initial value, and
+# otherwise it is 1 + the number of 100-nanosecond units since 0001-01-01T00:00:00 on
+# the calendar in force -- Julian before 1582-10-15, Gregorian from then on. The days
+# 1582-10-05 .. 1582-10-14 do not exist. Source: live 2026-11-12, a purpose-built
+# function module echoing UTCLONG values from the reference client, twelve values
+# from 0001-01-01 to 9999-12-31 including 1000-06-15, 1582-10-04, 1582-10-15 and
+# 0004-02-29 (tests/golden/serialization/int8_utclong.json). The reference client
+# refuses the reform gap, and writes values as YYYY-MM-DDTHH:MM:SS.fffffff; a
+# trailing Z is accepted.
+
+_UTCLONG_EPOCH_JDN = 1721424  # Julian day number of Julian 0001-01-01
+_GREGORIAN_JDN = 2299161  # 1582-10-15, the first Gregorian day
+_TICKS_PER_DAY = 86_400 * 10**7
+
+
+def _jdn(y: int, m: int, d: int) -> int:
+    a = (14 - m) // 12
+    y2, m2 = y + 4800 - a, m + 12 * a - 3
+    base = d + (153 * m2 + 2) // 5 + 365 * y2 + y2 // 4
+    if (y, m, d) >= (1582, 10, 15):
+        return base - y2 // 100 + y2 // 400 - 32045
+    return base - 32083
+
+
+def _from_jdn(j: int) -> tuple[int, int, int]:
+    if j >= _GREGORIAN_JDN:
+        a = j + 32044
+        b = (4 * a + 3) // 146097
+        c = a - 146097 * b // 4
+    else:
+        b = 0
+        c = j + 32082
+    d = (4 * c + 3) // 1461
+    e = c - 1461 * d // 4
+    m = (5 * e + 2) // 153
+    return 100 * b + d - 4800 + m // 10, m + 3 - 12 * (m // 10), e - (153 * m + 2) // 5 + 1
+
+
+def _encode_utclong(value: Any) -> bytes:
+    if value is None or value == "":
+        return bytes(8)
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(_dt.UTC).replace(tzinfo=None)
+        y, mo, d = value.year, value.month, value.day
+        h, mi, s, frac = value.hour, value.minute, value.second, value.microsecond * 10
+    else:
+        m = re.fullmatch(
+            r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?Z?", str(value)
+        )
+        if m is None:
+            raise ValueError(f"UTCLONG value {value!r} is not YYYY-MM-DDTHH:MM:SS[.fffffff][Z]")
+        y, mo, d, h, mi, s = (int(g) for g in m.groups()[:6])
+        frac = int((m.group(7) or "0").ljust(7, "0"))
+    if (1582, 10, 5) <= (y, mo, d) <= (1582, 10, 14):
+        raise ValueError(f"UTCLONG date {y:04d}-{mo:02d}-{d:02d} is in the 1582 calendar gap")
+    if not (1 <= y <= 9999 and 1 <= mo <= 12 and h < 24 and mi < 60 and s < 60):
+        raise ValueError(f"UTCLONG value {value!r} is out of range")
+    j = _jdn(y, mo, d)
+    if _from_jdn(j) != (y, mo, d):
+        raise ValueError(f"UTCLONG date {y:04d}-{mo:02d}-{d:02d} does not exist")
+    days = j - _UTCLONG_EPOCH_JDN
+    ticks = (days * 86_400 + h * 3600 + mi * 60 + s) * 10**7 + frac
+    return struct.pack("<q", ticks + 1)
+
+
+def _decode_utclong(buf: bytes) -> str | None:
+    (raw,) = struct.unpack("<q", buf[:8])
+    if raw == 0:
+        return None
+    days, rest = divmod(raw - 1, _TICKS_PER_DAY)
+    y, mo, d = _from_jdn(days + _UTCLONG_EPOCH_JDN)
+    secs, frac = divmod(rest, 10**7)
+    h, r = divmod(secs, 3600)
+    mi, s = divmod(r, 60)
+    return f"{y:04d}-{mo:02d}-{d:02d}T{h:02d}:{mi:02d}:{s:02d}.{frac:07d}"
+
+
 def _default_field_value(child: FieldDesc) -> Any:
     """Return the initial value for a structure field the caller left unset.
 
@@ -312,6 +399,8 @@ def _default_field_value(child: FieldDesc) -> Any:
         return Decimal(0)
     if rfctype in _INT_FORMATS or rfctype == RFCTYPE_INT1:
         return 0
+    if rfctype == RFCTYPE_UTCLONG:
+        return None
     # CHAR / DATE / TIME / NUM / STRING and anything else character-shaped.
     return ""
 
@@ -574,9 +663,11 @@ def _decode_table(
     Neither obvious source for the width is usable, because the same DDIC row
     type reaches the client at two widths:
 
-    * ``TypeDesc.uc_size`` is the sum of the field widths. The uncompressed
-      0x0303 path packs rows to exactly that; the compressed 0x0305 path pads
-      each row to a 4-byte boundary. RFC_FUNINT is 402 packed and 404 padded.
+    * ``TypeDesc.uc_size`` is the structure's padded width (the end of its last
+      field rounded up to its alignment, as the reference client sends rows).
+      The server's uncompressed 0x0303 path packs rows to the end of the last
+      field; the compressed 0x0305 path pads them. RFC_FUNINT is 402 packed and
+      404 padded.
     * ``0x0302``'s ``row_size`` reports the padded width on **both** paths. It
       carries the DDIC layout width and does not track how the rows were
       actually serialized.
@@ -591,9 +682,8 @@ def _decode_table(
     sent, so it cannot disagree with the serializer, and the width falls out of
     the buffer it produced.
 
-    Rounding ``uc_size`` up to the structure alignment is not the fix either: it
-    corrects the padded case and breaks the packed one, the same inversion
-    reached by another route.
+    A row may be as narrow as the end of the last field (packed), never
+    narrower.
 
     Falls back to the descriptor width when no count is available, which keeps
     hand-built descriptors and the encode path working.
@@ -601,6 +691,12 @@ def _decode_table(
     type_desc = _require_type_desc(field, "decode")
     declared = _row_size(type_desc, field.unicode_mode)
     length = len(_as_bytes(data)) if not isinstance(data, memoryview) else len(data)
+    # The narrowest row the layout fits in: the end of its last field.
+    ends = []
+    for child in type_desc.fields:
+        child.unicode_mode = field.unicode_mode
+        ends.append(sum(_field_span(child)))
+    minimum = min(declared, max(ends)) if ends else declared
 
     if row_count is None or row_count <= 0:
         # No count to divide by: an absent 0x0302, a synthetic descriptor, or an
@@ -619,14 +715,14 @@ def _decode_table(
                 f"{length % row_count}); refusing to guess the row width"
             )
         row_size = length // row_count
-        if row_size < declared:
+        if row_size < minimum:
             # The width is derived from peer-supplied numbers and becomes a slice
             # length, so it sits on the same trust boundary as T-02-06. A row
             # narrower than the layout cannot be decoded -- every field past the
             # cut would read from the next row.
             raise ValueError(
                 f"TABLE {field.name!r}: {length} bytes over {row_count} rows gives "
-                f"a {row_size}-byte row, narrower than the {declared}-byte layout "
+                f"a {row_size}-byte row, narrower than the {minimum}-byte layout "
                 "its descriptor requires; refusing to decode misaligned bytes"
             )
     if row_size <= 0:
@@ -759,6 +855,8 @@ def decode(
         return decode_decfloat(bytes(buf))
 
     match rfctype:
+        case rfctype if rfctype == RFCTYPE_UTCLONG:
+            return _decode_utclong(bytes(buf))
         case _ if rfctype in _INT_FORMATS:
             fmt = _INT_FORMATS[rfctype]
             (value,) = struct.unpack(fmt, buf[: struct.calcsize(fmt)])
@@ -835,6 +933,8 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
         )
 
     match rfctype:
+        case rfctype if rfctype == RFCTYPE_UTCLONG:
+            return _encode_utclong(value)
         case _ if rfctype in _INT_FORMATS:
             return struct.pack(_INT_FORMATS[rfctype], int(value))
         case rfctype if rfctype == RFCTYPE_BCD:

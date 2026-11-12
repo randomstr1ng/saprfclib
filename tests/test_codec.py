@@ -212,7 +212,7 @@ def test_byte_decode_returns_bytes():
 @pytest.mark.parametrize(
     "rfctype,size",
     [
-        (UTCLONG, 8),
+        # UTCLONG is a timestamp, not an integer: tests/test_codec_int8_utclong.py.
         (UTCSECOND, 8),
         (UTCMINUTE, 8),
         (DTDAY, 4),

@@ -327,3 +327,42 @@ def test_parse_invoke_response_uses_the_declared_width_end_to_end() -> None:
     assert len(params) == 44
     assert all(r["PARAMCLASS"].strip() for r in params)
     assert params[0]["PARAMETER"].strip() == "ADDRESS"
+
+
+# --- the structure's padded width (sent) vs the packed width (accepted) -------------
+
+
+def _ddif_rows():
+    # (fieldname, position, offset, leng, intlen, decimals, datatype): an INT4 then a
+    # CHAR1, so the last field ends at 6 and the structure is 8 wide (alignment 4).
+    return [("N", 1, 0, 10, 4, 0, "INT4"), ("C", 2, 4, 1, 2, 0, "CHAR")]
+
+
+def test_structure_width_is_rounded_up_to_its_alignment() -> None:
+    from saprfclib.connection import _build_type_desc_from_ddif
+
+    td = _build_type_desc_from_ddif("ZPAD", _ddif_rows())
+    assert td.uc_size == 8  # what X030L-TABLEN reports for such a layout
+
+
+def test_packed_rows_still_decode() -> None:
+    import struct
+
+    from saprfclib.codec import decode
+    from saprfclib.connection import _build_type_desc_from_ddif
+
+    td = _build_type_desc_from_ddif("ZPAD", _ddif_rows())
+    field = FieldDesc(
+        name="T",
+        rfctype=5,
+        nuc_length=0,
+        nuc_offset=0,
+        uc_length=0,
+        uc_offset=0,
+        decimals=0,
+        type_desc=td,
+    )
+    packed = b"".join(struct.pack("<i", i) + "AB"[i].encode("utf-16-le") for i in range(2))
+    assert decode(5, packed, field, 2) == [{"N": 0, "C": "A"}, {"N": 1, "C": "B"}]
+    with pytest.raises(ValueError, match="narrower"):
+        decode(5, packed[:10], field, 2)

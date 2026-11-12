@@ -86,6 +86,12 @@ _DATATYPE_TO_RFCTYPE: dict[str, int] = {
     "ACCP": RFCTYPE_NUM,  # posting period YYYYMM, numeric text
     "DATS": RFCTYPE_DATE,
     "TIMS": RFCTYPE_TIME,
+    # DATN / TIMN travel exactly like DATS / TIMS: the metadata reports them as 'D'
+    # (16 bytes) and 'T' (12 bytes), and the reference client sends YYYYMMDD /
+    # HHMMSS in UTF-16LE (live, purpose-built function module, 2026-11-12). Unknown
+    # here before, so a DATN/TIMN field was dropped from a structure's layout.
+    "DATN": RFCTYPE_DATE,
+    "TIMN": RFCTYPE_TIME,
     # packed decimal
     "DEC": RFCTYPE_BCD,
     "CURR": RFCTYPE_BCD,
@@ -123,7 +129,7 @@ _DATATYPE_TO_RFCTYPE: dict[str, int] = {
 # type's width is a byte count taken from INTLEN (unit-invariant for binary,
 # packed, float, string-handle and decfloat types).
 _DOUBLED_DATATYPES = frozenset(
-    {"CHAR", "CLNT", "LANG", "CUKY", "UNIT", "LCHR", "NUMC", "ACCP", "DATS", "TIMS"}
+    {"CHAR", "CLNT", "LANG", "CUKY", "UNIT", "LCHR", "NUMC", "ACCP", "DATS", "TIMS", "DATN", "TIMN"}
 )
 
 # Tampering guard (threat T-03-META): cap result-table size and recursion depth
@@ -291,6 +297,10 @@ _EXID_TO_RFCTYPE: dict[str, int] = {
     "g": RFCTYPE_STRING,
     "y": RFCTYPE_XSTRING,
     "8": RFCTYPE_INT8,
+    # 'p' is UTCLONG, 8 bytes: live metadata of a purpose-built function module with
+    # UTCLONG parameters (A4H kernel 793, 2026-11-12). Unknown before, so every
+    # UTCLONG parameter was dropped from the descriptor with a warning.
+    "p": RFCTYPE_UTCLONG,
 }
 
 # RFCTYPE values for char-like types where unicode doubles the byte width.

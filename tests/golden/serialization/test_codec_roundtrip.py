@@ -82,8 +82,8 @@ _INT_RANGES: dict[int, tuple[int, int]] = {
 }
 
 # Temporal types share the integer wire format of a matching width.
+# UTCLONG is a timestamp, not an integer: tests/test_codec_int8_utclong.py.
 _TEMPORAL_RANGES: dict[int, tuple[int, int]] = {
-    UTCLONG: (-(2**63), 2**63 - 1),
     UTCSECOND: (-(2**63), 2**63 - 1),
     UTCMINUTE: (-(2**63), 2**63 - 1),
     DTDAY: (-(2**31), 2**31 - 1),

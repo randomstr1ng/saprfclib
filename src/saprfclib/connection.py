@@ -1452,27 +1452,25 @@ def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
 # Alignment of a field in a Unicode structure, by DDIC DATATYPE. A structure's width
 # is the end of its last field rounded up to the largest alignment among its fields:
 # the reference client sends ARFCRDATA rows 1918 bytes wide, though its last field
-# ends at 1917 (tRFC capture, tests/golden/trfc/trfc_submit_two_calls.json). The rule
-# was checked against X030L-TABLEN, the width the server itself reports, for 382
-# structures read from a live S/4HANA system on 2026-11-12: it held for all 357 flat
-# ones, 18 of them padded by one or two bytes. The alignments are each type's gcd of
-# field offsets in that sample. Types the sample did not contain are [ASSUMED]: LCHR
-# and ACCP like the character types, PREC like INT2, LRAW like RAW, and the 8-byte
-# types (INT8, decimal floats, UTCLONG, string references) at 8. A structure holding
-# one of those, read back from a live system, would settle it.
+# ends at 1917 (tRFC capture, tests/golden/trfc/trfc_reference.json). The rule was
+# checked against X030L-TABLEN, the width the server itself reports, on a live S/4HANA
+# system on 2026-11-12: 357 flat structures of a random sample (18 of them padded),
+# plus up to 40 structures for each type below that the sample lacked (all matched
+# except two holding object references, REF, which are not flat). The alignment
+# of each type is its gcd of field offsets across those structures; D34* (16) and the
+# string references (4) were found that way, not assumed. LRAW is [ASSUMED] 1: its
+# fields always sat at even offsets after their INT2 length field, which fits 1 or 2.
 _DATATYPE_ALIGNMENT: dict[str, int] = {
-    **dict.fromkeys(("CHAR", "CLNT", "LANG", "CUKY", "UNIT", "NUMC", "DATS", "TIMS"), 2),
-    "INT2": 2,
-    "INT4": 4,
-    "FLTP": 8,
-    **dict.fromkeys(("DEC", "CURR", "QUAN", "RAW", "INT1"), 1),
-    # [ASSUMED] -- not in the sample, see above.
-    **dict.fromkeys(("LCHR", "ACCP", "PREC"), 2),
-    "LRAW": 1,
     **dict.fromkeys(
-        ("INT8", "D16D", "D16R", "D16N", "D34D", "D34R", "D34N", "UTCL", "STRG", "SSTR", "RSTR"),
-        8,
+        ("CHAR", "CLNT", "LANG", "CUKY", "UNIT", "NUMC", "DATS", "TIMS", "DATN", "TIMN"), 2
     ),
+    **dict.fromkeys(("LCHR", "ACCP", "INT2", "PREC"), 2),
+    "INT4": 4,
+    **dict.fromkeys(("FLTP", "INT8", "UTCL", "D16D", "D16R", "D16N"), 8),
+    **dict.fromkeys(("D34D", "D34R", "D34N"), 16),
+    **dict.fromkeys(("STRG", "SSTR", "RSTR"), 4),
+    **dict.fromkeys(("DEC", "CURR", "QUAN", "RAW", "INT1"), 1),
+    "LRAW": 1,  # [ASSUMED], see above
 }
 
 

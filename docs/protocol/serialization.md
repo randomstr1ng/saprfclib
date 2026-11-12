@@ -53,8 +53,8 @@ confirmed about them.
 | 28 | `RFCTYPE_XMLDATA` | — | — | No longer used — skip |
 | 29 | `RFCTYPE_STRING` | variable | STRING | Null-terminated; length-prefixed on wire |
 | 30 | `RFCTYPE_XSTRING` | variable | XSTRING | Raw bytes; length-prefixed (byte count) |
-| 31 [A1] | `RFCTYPE_INT8` | 8 bytes | INT8 | Signed 64-bit integer |
-| 32 [A1] | `RFCTYPE_UTCLONG` | 8 bytes | UTCLONG | UTC timestamp/long (8-byte integer) |
+| 31 | `RFCTYPE_INT8` | 8 bytes | INT8 | Signed 64-bit integer, little-endian (live) |
+| 32 | `RFCTYPE_UTCLONG` | 8 bytes | UTCLONG | UTC timestamp, 100 ns ticks (live, see below) |
 | 33 [A1] | `RFCTYPE_UTCSECOND` | 8 bytes | UTCSECOND | UTC timestamp/second (8-byte integer) |
 | 34 [A1] | `RFCTYPE_UTCMINUTE` | 8 bytes | UTCMINUTE | UTC timestamp/minute (8-byte integer) |
 | 35 [A1] | `RFCTYPE_DTDAY` | 4 bytes | DTDAY | Date/day (4-byte integer) |
@@ -66,13 +66,15 @@ confirmed about them.
 | — | `RFCTYPE_BOX` | — | — | Out of scope (SDK: not supported) |
 | — | `RFCTYPE_GENERIC_BOX` | — | — | Out of scope (SDK: not supported) |
 
-**[A1]** Values 31–40 continue the sequence from `RFCTYPE_XSTRING = 30`. Confirmed live: type
-31 is INT8 with 8 bytes — A4H's function metadata for `GET_TASK_INFO.E_DISPATCHED_TASKS`
-(2026-11-12). Everything else about 31–40 is **[ASSUMED]**: the codes 32–40, the widths of
-32–40, and the little-endian byte order of all of them (by analogy with the confirmed INT
-and INT2). INT8's only live value was 0, which does not show the byte order, and no standard
-remote-enabled function module on A4H uses the types 32–40. A capture of a function module
-with parameters of these types, carrying non-zero values, would settle them.
+**[A1]** On the wire a parameter's type is the EXID character of its metadata row; the
+numbers in this table are saprfclib's own constants. Live (A4H kernel 793, 2026-11-12, a
+purpose-built function module, fixture `tests/golden/serialization/int8_utclong.json`):
+INT8 is EXID `8`, 8 bytes, and UTCLONG is EXID `p`, 8 bytes; the dictionary types DATN and
+TIMN are reported as `D` and `T` and travel exactly like DATE and TIME. Types 33–40 are
+**[ASSUMED]** little-endian integers of the widths shown: kernel 793's dictionary has no data
+type for any of them (domain `DATATYPE` lists `INT8`, `UTCL`, `DATN`, `TIMN` and none of
+these), so no RFC interface on that release can carry one. A release that has them, and a
+function module using them, would settle it.
 
 ---
 
@@ -488,23 +490,39 @@ xstring_value = tlv_payload  # bytes as-is
 
 ---
 
-### RFCTYPE_INT8 (type=31) — Signed 64-bit Integer (8 bytes)
+### RFCTYPE_INT8 (type=31) — Signed 64-bit Integer (8 bytes) — CONFIRMED
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `int8_value` | `2A 00 00 00 00 00 00 00` | Signed; little-endian **[ASSUMED]** |
+| 0x00 | 8 | int64-LE | `int8_value` | `08 07 06 05 04 03 02 01` = 0x0102030405060708 | Signed, little-endian |
 
-**Wire size:** 8 bytes (live metadata, see [A1]); little-endian **[ASSUMED]**.
+Live 2026-11-12 (fixture `int8_utclong.json`): the function module returned
+0x0102030405060708 as `08 07 06 05 04 03 02 01` and −81985529216486896 as
+`10 32 54 76 98 ba dc fe`; the reference client sent −2 as `fe ff ff ff ff ff ff ff`.
 
 ---
 
-### RFCTYPE_UTCLONG (type=32) — UTC Timestamp Long (8 bytes)
+### RFCTYPE_UTCLONG (type=32) — UTC Timestamp (8 bytes) — CONFIRMED
 
-| Offset | Length | Type | Name | Value (example) | Notes |
-|--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `utclong_value` | — | Signed 8-byte integer |
+An 8-byte little-endian integer. **0 is the initial value**; any other value is
+1 + the number of 100-nanosecond units since `0001-01-01T00:00:00`, counted on the calendar
+in force at the time — **Julian before 1582-10-15, Gregorian from then on**. The days
+1582-10-05 to 1582-10-14 do not exist.
 
-8 bytes, little-endian, like INT8 **[ASSUMED]** — see [A1].
+| Value | Wire (LE hex) |
+|-------|---------------|
+| initial | `00 00 00 00 00 00 00 00` |
+| `0001-01-01T00:00:00.0000000` | `01 00 00 00 00 00 00 00` |
+| `1582-10-04T23:59:59.0000000` (last Julian day) | `81 29 6f 38 b6 63 ed 06` |
+| `1582-10-15T00:00:00.0000000` (first Gregorian day) | `01 c0 07 39 b6 63 ed 06` |
+| `1970-01-01T00:00:00.0000000` | `01 00 89 4c 88 81 9f 08` |
+| `9999-12-31T23:59:59.9999999` | `00 c0 0a 49 08 2a ca 2b` |
+
+Live 2026-11-12, twelve values from 0001-01-01 to 9999-12-31, sent by the reference client
+and echoed by the function module (fixture `int8_utclong.json`). The reference client
+writes and reads values as `YYYY-MM-DDTHH:MM:SS.fffffff`, accepts a trailing `Z`, and
+refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns that string
+(`None` for the initial value) and accepts it, or a `datetime` (naive is taken as UTC).
 
 ---
 
@@ -641,7 +659,8 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 | CHAR, DATE, TIME | **CONFIRMED** | Live capture 2026-06-26 — UTF-16LE, fixed width |
 | NUM, BYTE | **CONFIRMED** | Live capture — UTF-16LE zero-padded / raw fixed-length bytes |
 | STRING, XSTRING | **CONFIRMED** | Confirmed 2026-07-05 — no internal length prefix; TLV header carries the byte count |
-| INT8, UTCLONG…CDAY (31–40) | **[ASSUMED]** | Only INT8 = 31 with 8 bytes seen live (2026-11-12); codes 32–40, widths and byte order assumed — see [A1] |
+| INT8, UTCLONG | **CONFIRMED** | Live capture, purpose-built function module (2026-11-12) |
+| UTCSECOND…CDAY (33–40) | **[ASSUMED]** | No dictionary type on kernel 793 — see [A1] |
 | BCD | **PARTIAL** | Positive sign nibble live-captured; negative nibble unconfirmed |
 | STRUCTURE | **PARTIAL** | Unicode offset layout exercised; non-Unicode layout undocumented |
 | DECF16, DECF34 | **UNCONFIRMED** | Big-endian DPD is documented behaviour; nothing seen on the wire. Not implemented. |
@@ -692,7 +711,7 @@ layout is exercised or documented. **Consequence:** none for any currently reach
 | OQ-03 | STRING/XSTRING length prefix — LE or BE uint32? | **RESOLVED 2026-07-05** — there is no internal prefix. STRING is UTF-8 in the TLV, XSTRING is raw bytes, and the TLV header carries the byte count. The earlier assumption (LE uint32 + UTF-16LE) was wrong and the codec was corrected. |
 | OQ-04 | BCD odd digit count — digit+sign in the last byte, or padding? | **RESOLVED** — live P15.2 capture confirms final digit in the high nibble, sign in the low nibble, no padding |
 | OQ-05 | STRUCTURE field layout — which offset set, and how is it selected? | **OPEN** — decided by the negotiated codepage; only the Unicode path is exercised |
-| OQ-06 | Are INT8 and the temporal types (UTCLONG…CDAY) serialized as little-endian integers of 8/4/2 bytes? | **OPEN** — implemented that way **[ASSUMED]**, by analogy with INT4/INT2. Needs a capture of a function module with parameters of these types and non-zero values; no standard remote-enabled module on A4H has one (checked 2026-11-12). |
+| OQ-06 | Are INT8 and the temporal types (UTCLONG…CDAY) serialized as little-endian integers of 8/4/2 bytes? | **PARTLY CLOSED** — INT8 is (live 2026-11-12); UTCLONG is not a plain integer but 100 ns ticks + 1 on the Julian/Gregorian calendar (live). 33–40 stay **[ASSUMED]**: kernel 793 has no dictionary type for them. |
 
 ---
 
