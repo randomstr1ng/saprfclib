@@ -3716,11 +3716,11 @@ class Connection:
                 request = self._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
                 )
-                try:
+                # A failed send or an unread reply leaves the stream out of step:
+                # retire the session instead of handing it back READY (#75).
+                with _fail_closed(self._session, func_name):
                     self._send_invoke_frame(request)
                     response = _join_response_frames(self._transport.recv_message, func_name)
-                except (OSError, EOFError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
                 raise_for_rfc_error(_strip_gw_header(response))
             finally:
                 if self._session.state is SessionState.IN_CALL:
@@ -3755,14 +3755,15 @@ class Connection:
                 request = self._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
                 )
-                try:
+                # A failed send or an unread reply leaves the stream out of step:
+                # retire the session instead of handing it back READY (#75).
+                with _fail_closed(self._session, "API_CLEAR_TID"):
                     self._send_invoke_frame(request)
                     response = _join_response_frames(self._transport.recv_message, "API_CLEAR_TID")
-                except (OSError, EOFError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
                 raise_for_rfc_error(_strip_gw_header(response))
             finally:
-                self._session.mark_ready()
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     # ------------------------------------------------------------------ #
     # bgRFC client methods — TRFC-05/06                                   #
@@ -3849,13 +3850,13 @@ class Connection:
                 request = self._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
                 )
-                try:
+                # A failed send or an unread reply leaves the stream out of step:
+                # retire the session instead of handing it back READY (#75).
+                with _fail_closed(self._session, "BGRFC_DEST_SHIP"):
                     self._send_invoke_frame(request)
                     response = _join_response_frames(
                         self._transport.recv_message, "BGRFC_DEST_SHIP"
                     )
-                except (OSError, EOFError) as exc:
-                    raise CommunicationError(str(exc), original_exception=exc) from exc
                 # The submit has no EXPORTING params, but the reply still reports
                 # whether the backend took the unit. Reading one frame and
                 # discarding it, as this did, hid two failures: a refusal read as
@@ -3865,7 +3866,8 @@ class Connection:
                 # the ASCII of an error string.
                 raise_for_rfc_error(_strip_gw_header(response))
             finally:
-                self._session.mark_ready()
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     def confirm_unit(self, unit_id: str, unit_type: str = "T") -> None:
         """Confirm a bgRFC unit as a distinct lifecycle step (TRFC-06 / D-05).
@@ -4839,7 +4841,7 @@ def connect(
         _socket_factory = socket_factory
         _gwhost = gwhost
 
-        async def _async_setup() -> AsyncConnection:
+        async def _open_transport() -> _SyncToAsyncTransport:
             # Use connect_tcp (sync, patchable in tests) wrapped in a thin async shim.
             # connect_async() uses real asyncio open_connection for non-blocking I/O.
             # This keeps the existing test suite (which patches connect_tcp) green (D-07).
@@ -4855,6 +4857,10 @@ def connect(
             at: _SyncToAsyncTransport = _SyncToAsyncTransport(sync_t)
             if _route_hops is not None:
                 await open_route_async(at, _route_hops, _ashost, str(_port))
+            return at
+
+        async def _async_setup() -> AsyncConnection:
+            at = await _open_transport()
             ac = AsyncConnection(
                 at,  # type: ignore[arg-type]
                 max_retries=_max_retries,
@@ -4875,6 +4881,8 @@ def connect(
                 lang=_lang,
                 gwhost=_gwhost,
             )
+            # A transactional retry reopens the same route (#75).
+            ac._reopen = _open_transport
             return ac
 
         try:
@@ -5115,6 +5123,49 @@ class AsyncConnection:
         self._retry_delay = retry_delay  # base backoff delay in seconds (D-02)
         self._tid_store = tid_store  # TidStore | None for tRFC/qRFC parking
         self._unit_store = unit_store  # UnitStore | None for bgRFC parking
+        # How to open a fresh transport to the same server (route included), and the
+        # handshake parameters, so a transactional retry can reconnect instead of
+        # resending on a stream that is no longer in step (#75). Set by connect() and
+        # connect_async(); None for a connection built any other way, which then
+        # cannot retry. The parameters include the password, held for the lifetime of
+        # the connection as the caller's own arguments are; it is never logged.
+        self._reopen: Callable[[], Awaitable[Any]] | None = None
+        self._handshake_kwargs: dict[str, Any] | None = None
+
+    async def _reconnect(self) -> None:
+        """Replace the transport and the session with a freshly logged-on pair.
+
+        The old transport is closed first: whatever it still holds belongs to a
+        request whose reply was not read to its end. The session object is reset in
+        place rather than replaced, because the pool and the sync Connection wrapper
+        hold a reference to it and judge the connection by its state.
+
+        Raises:
+            CommunicationError: the connection cannot be reopened, or reopening failed
+                at the transport level. A logon refusal raises as usual.
+        """
+        if self._reopen is None or self._handshake_kwargs is None:
+            raise CommunicationError(
+                "the connection broke and cannot be reopened: it was not opened by "
+                "connect() or connect_async()"
+            )
+        try:
+            await self._transport.close()
+        except Exception:  # noqa: BLE001 - the old stream is dead either way
+            pass
+        allow_restricted = self._session._allow_restricted_logon
+        self._session.__dict__.clear()
+        self._session.__init__(allow_restricted_logon=allow_restricted)  # type: ignore[misc]  # reset in place, see docstring
+        try:
+            self._transport = await self._reopen()
+            await self._handshake(**self._handshake_kwargs)
+        except (OSError, EOFError, asyncio.IncompleteReadError, TimeoutError) as exc:
+            self._session.mark_broken(f"reconnect: {exc}")
+            raise CommunicationError(f"reconnect failed: {exc}", original_exception=exc) from exc
+        except BaseException:
+            if self._session.state is not SessionState.READY:
+                self._session.mark_broken("reconnect failed")
+            raise
 
     # ------------------------------------------------------------------ #
     # Handshake (classic direct-TCP path — SNC/wRFC use sync Connection)  #
@@ -5144,6 +5195,15 @@ class AsyncConnection:
 
         Credentials are never logged (T-09-03-CRED).
         """
+        self._handshake_kwargs = {
+            "client": client,
+            "user": user,
+            "passwd": passwd,
+            "ashost": ashost,
+            "sysnr": sysnr,
+            "lang": lang,
+            "gwhost": gwhost,
+        }
         gwhost = gwhost or ashost
         local_ip = "127.0.0.1"
         try:
@@ -5642,8 +5702,19 @@ class AsyncConnection:
 
         for attempt in range(max_retries + 1):
             try:
+                if attempt:
+                    # Never resend on the old stream (#75): a partial write or an
+                    # unread reply leaves it out of step, so the resend could be read
+                    # as the tail of the last frame, or the old reply as the new
+                    # answer. The server keeps a TID across connections (a resubmit
+                    # on a new connection adds no second ARFCRSTATE entry; live
+                    # probe, docs/protocol/trfc.md), so a fresh connection is safe.
+                    await self._reconnect()
+                    self._session.mark_in_call()
                 return await send_coro_factory()  # type: ignore[operator]
             except CommunicationError as exc:
+                if self._session.state is not SessionState.BROKEN:
+                    self._session.mark_broken(f"transactional submit {log_key}: {exc}")
                 if attempt == max_retries:
                     # All retries exhausted: park and raise (T-09-04-LOSS handled inside).
                     await asyncio.to_thread(
@@ -5723,19 +5794,25 @@ class AsyncConnection:
                     strict=self._strict_params,
                     seen=self._dropped_params_seen,
                 )
-                origin = _trfc_origin(self._session)
-                payload = build_trfc_call(func_name.upper(), desc, call_params, origin)
-                request_tlv = build_trfc_request(
-                    tid, [(func_name.upper(), payload)], ship, origin, queue=queue
-                )
-                handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(
-                    handle, request_tlv, conn_idx=self._session.conn_idx
-                )
+
+                def _build() -> bytes:
+                    # From the current session: after a reconnect the handle, the
+                    # connection index and the logon header in the call all change.
+                    origin = _trfc_origin(self._session)
+                    payload = build_trfc_call(func_name.upper(), desc, call_params, origin)
+                    request_tlv = build_trfc_request(
+                        tid, [(func_name.upper(), payload)], ship, origin, queue=queue
+                    )
+                    handle = self._session.handle or b"        "
+                    return Connection._build_invoke_frame(
+                        handle, request_tlv, conn_idx=self._session.conn_idx
+                    )
+
+                request = _build()
 
                 async def _do_send() -> None:
                     try:
-                        await self._send_request(request)
+                        await self._send_request(_build())
                         response = await _join_response_frames_async(
                             self._transport.recv_message, func_name
                         )
@@ -5834,14 +5911,19 @@ class AsyncConnection:
             self._session.mark_in_call()
             try:
                 request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
-                handle = self._session.handle or b"        "
-                request = Connection._build_invoke_frame(
-                    handle, request_tlv, conn_idx=self._session.conn_idx
-                )
+
+                def _frame() -> bytes:
+                    # Handle and connection index of the current session (#75).
+                    handle = self._session.handle or b"        "
+                    return Connection._build_invoke_frame(
+                        handle, request_tlv, conn_idx=self._session.conn_idx
+                    )
+
+                request = _frame()
 
                 async def _do_send() -> None:
                     try:
-                        await self._send_request(request)
+                        await self._send_request(_frame())
                         response = await _join_response_frames_async(
                             self._transport.recv_message, "BGRFC_DEST_SHIP"
                         )
@@ -6382,16 +6464,20 @@ async def connect_async(
     # SAProuter: connect to the first router; the route names the rest (see connect()).
     route_hops = parse_route_string(saprouter) if saprouter is not None else None
     tcp_host, tcp_port = first_hop_address(route_hops) if route_hops else (ashost, port)
-    transport = await connect_tcp_async(
-        tcp_host,
-        tcp_port,
-        timeout=timeout,
-        connect_timeout=connect_timeout,
-        socket_factory=socket_factory,
-    )
 
-    if route_hops is not None:
-        await open_route_async(transport, route_hops, ashost, str(port))
+    async def _open_transport() -> AsyncTransport:
+        opened = await connect_tcp_async(
+            tcp_host,
+            tcp_port,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            socket_factory=socket_factory,
+        )
+        if route_hops is not None:
+            await open_route_async(opened, route_hops, ashost, str(port))
+        return opened
+
+    transport = await _open_transport()
 
     conn = AsyncConnection(
         transport,
@@ -6413,4 +6499,6 @@ async def connect_async(
         lang=lang,
         gwhost=gwhost,
     )
+    # A transactional retry reopens the same route (#75).
+    conn._reopen = _open_transport
     return conn

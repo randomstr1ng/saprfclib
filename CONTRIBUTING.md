@@ -47,6 +47,12 @@ Run offline tests:
 hatch run test -m "not integration"
 ```
 
+Network faults are tested against `tests/support/scripted_peer.py`: a loopback TCP
+server that speaks NI framing, records what the client sends and replies with captured
+frames, delivered split, merged, delayed, truncated, reset or half-closed on purpose.
+Use it for anything that depends on how the stream behaves, rather than a mock that
+hands over whole payloads (see `tests/test_scripted_peer.py`).
+
 Lint and format:
 
 ```bash

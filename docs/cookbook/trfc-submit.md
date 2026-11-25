@@ -92,7 +92,8 @@ finally:
 | Retry | Re-use the same `tid` and call `call_transactional` again | After a transport failure only |
 
 On a plain TCP connection `call_transactional` already retries a transport failure with the
-same TID (`max_retries`, `retry_delay` on `connect()`), then parks the request in `tid_store`
+same TID (`max_retries`, `retry_delay` on `connect()`), each time over a new connection,
+since the failed one may be out of step, then parks the request in `tid_store`
 if one is configured and raises `RetryExhausted`; `conn.retry_parked(tid)` sends the parked
 request again later. Over SNC there is no automatic retry, and a transport failure raises
 `CommunicationError`. In both cases: do **not** confirm the TID — it is safe to resubmit, and

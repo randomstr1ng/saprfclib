@@ -72,6 +72,24 @@ class _FailNThenOkTransport:
 # --------------------------------------------------------------------------- #
 
 
+def _count_reconnects(conn: AsyncConnection) -> list[int]:
+    """Stand in for a successful reconnect: count it and leave the session READY.
+
+    Since #75 every retry goes over a freshly opened connection, never the old
+    stream. These offline tests have no server to reconnect to, so this records each
+    request for a new connection instead; tests/test_scripted_peer.py exercises the
+    real reconnect over sockets.
+    """
+    count = [0]
+
+    async def _reconnect() -> None:
+        count[0] += 1
+        conn._session._state = SessionState.READY
+
+    conn._reconnect = _reconnect  # type: ignore[method-assign]
+    return count
+
+
 def _make_async_conn(
     *,
     max_retries: int = 0,
@@ -92,6 +110,7 @@ def _make_async_conn(
         tid_store=tid_store,
         unit_store=unit_store,
     )
+    _count_reconnects(conn)
     return conn, transport
 
 
@@ -108,6 +127,7 @@ async def test_trfc_retries_on_communication_error() -> None:
     - No exception is raised when the last attempt succeeds.
     """
     conn, _ = _make_async_conn(max_retries=2, retry_delay=0.0)
+    reconnects = _count_reconnects(conn)
     call_count = 0
 
     async def factory() -> None:
@@ -125,6 +145,8 @@ async def test_trfc_retries_on_communication_error() -> None:
         retry_delay=0.0,
     )
     assert call_count == 3
+    # Each retry went over a new connection (#75), none over the failed stream.
+    assert reconnects[0] == 2
 
 
 async def test_trfc_tid_reused_across_retries(monkeypatch) -> None:
@@ -136,10 +158,12 @@ async def test_trfc_tid_reused_across_retries(monkeypatch) -> None:
     Asserts:
     - All retry send_message calls include the same request bytes.
     - The TID bytes (UTF-16LE) appear in the first sent frame.
-    - Three send attempts occur (2 failures + 1 success).
+    - Three send attempts occur (2 failures + 1 success), each after a reconnect
+      but the first (#75).
     """
     transport = _FailNThenOkTransport(n_fails=2, ok_bytes=b"")
     conn = AsyncConnection(transport, max_retries=2, retry_delay=0.0)
+    reconnects = _count_reconnects(conn)
     use_fixture_metadata(monkeypatch, conn)
     # Force session to READY so call_transactional can proceed
     conn._session._state = SessionState.READY
@@ -147,7 +171,10 @@ async def test_trfc_tid_reused_across_retries(monkeypatch) -> None:
     await conn.call_transactional("STFC_CONNECTION", tid=tid, REQUTEXT="x")
     # call_transactional sends request each retry attempt; recv_message fails first 2
     assert len(transport.sent) == 3
+    assert reconnects[0] == 2
     assert tid.encode("utf-16-le") in transport.sent[0]
+    # Same bytes here because the stand-in reconnect keeps the session's handle; a
+    # real reconnect rebuilds the frame for the new session with the same TID.
     assert transport.sent[0] == transport.sent[1] == transport.sent[2]
 
 
@@ -169,12 +196,14 @@ async def test_qrfc_retry_with_queue(monkeypatch) -> None:
     """
     transport = _FailNThenOkTransport(n_fails=1, ok_bytes=b"")
     conn = AsyncConnection(transport, max_retries=1, retry_delay=0.0)
+    reconnects = _count_reconnects(conn)
     use_fixture_metadata(monkeypatch, conn)
     conn._session._state = SessionState.READY
     tid = "ABCDEF1234567890ABCDEF12"
     queue = "TESTQUEUE"
     await conn.call_transactional("STFC_CONNECTION", tid=tid, queue=queue, REQUTEXT="x")
     assert len(transport.sent) == 2
+    assert reconnects[0] == 1
     assert queue.encode("utf-16-le") in transport.sent[0]
     assert transport.sent[0] == transport.sent[1]
 
