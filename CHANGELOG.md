@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **XML table text (`ET_DATA`) is decoded strictly** (#74). A character reference is decoded
+  by its value at any zero-padded width; a reference that is not a Unicode character (a
+  surrogate, or above U+10FFFF), a bare `&`, an unknown entity, a malformed reference and
+  invalid UTF-8 now raise `ValueError` instead of being passed through, replaced, or turned
+  into a lone surrogate. What a server actually sends (`&#38;`, `&#60;`, `&#62;`, `&#34;`,
+  `&#39;` and raw UTF-8) is recorded in `basxml_character_references.json` and decodes as
+  before. The protocol reference now says the payload is UTF-8, not ASCII.
 - **Packed decimals with sign nibble `0xB` are negative** (#70). They were read as positive,
   so a negative amount arrived with its sign flipped. A live capture shows the server passes
   every sign nibble through, and the reference client reads `0xA`, `0xC`, `0xE`, `0xF` as

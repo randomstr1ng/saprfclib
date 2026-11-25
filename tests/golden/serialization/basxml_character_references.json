@@ -1,0 +1,39 @@
+{
+ "fixture": "basxml_character_references",
+ "capture_source": "live capture 2026-11-25: RFC_READ_TABLE on T100 (field TEXT, SAP standard message texts) with USE_ET_DATA_4_RETURN='X', kernel 793, release 758, Unicode. Rows selected for '&', '<', '>', '\"', \"'\" and a German umlaut.",
+ "evidence": "tier 1 live capture. 'item_hex' is one <item> element of the ET_DATA document exactly as the server sent it; 'value' is the LINE text the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) returned for that row, which saprfclib returned too. The server escapes & < > \" ' as decimal character references (&#38; &#60; &#62; &#34; &#39;) and sends other characters as raw UTF-8 (ä = c3 a4); no named entity, no hexadecimal or zero-padded reference was seen.",
+ "values": [
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e4669656c642076616c7565206f6620262333343b262333383b262333343b20262336303b4b6579576f726420616374696f6e436f6465262336323b20666f72205365617263685465787420262333343b262333383b262333343b206e6f7420737570706f727465643c2f4c494e453e3c2f6974656d3e",
+   "value": "Field value of \"&\" <KeyWord actionCode> for SearchText \"&\" not supported"
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e414d4450207265662e20262333383b31206973206e6f742076616c69642e20506c65617365207370656369667920696e20666f726d617420262336303b636c617373262336323b3d262336323b262336303b6d6574686f64262336323b3c2f4c494e453e3c2f6974656d3e",
+   "value": "AMDP ref. &1 is not valid. Please specify in format <class>=><method>"
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e556e7a756cc3a4737369676572204b6f6e66696775726174696f6e7374797020262333383b3120696e204b6c6173736520262333383b32204d6574686f646520262333383b333c2f4c494e453e3c2f6974656d3e",
+   "value": "Unzulässiger Konfigurationstyp &1 in Klasse &2 Methode &3"
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e556e7a756cc3a4737369676572205375626a656b7473746174757320262333393b262333383b31262333393b3c2f4c494e453e3c2f6974656d3e",
+   "value": "Unzulässiger Subjektstatus '&1'"
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e496e70757420262333383b3220616e642063757272656e7420262333383b332076616c75657320617265206e6f7420657175616c20696e20706172616d6574657220262333383b31202d262336323b20726573746172743c2f4c494e453e3c2f6974656d3e",
+   "value": "Input &2 and current &3 values are not equal in parameter &1 -> restart"
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e4572726f7220696e20696e7465726661636520746f2053502073797374656d202d262336323b2073797374656d2061646d696e697374726174696f6e3c2f4c494e453e3c2f6974656d3e",
+   "value": "Error in interface to SP system -> system administration"
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e4669656c6467726f757020646566696e6974696f6e20666f72204f444d206f626a656374207479706520262333343b262333383b31262333343b20616c7265616479206578697374732e3c2f4c494e453e3c2f6974656d3e",
+   "value": "Fieldgroup definition for ODM object type \"&1\" already exists."
+  },
+  {
+   "item_hex": "3c6974656d3e3c4c494e453e437573746f6d697a696e672073796e6368726f6e697a65723a20506172616d6574657220262333343b495f454e41424c455f534d41525453594e43262333343b206e6f742064656c6976657265643c2f4c494e453e3c2f6974656d3e",
+   "value": "Customizing synchronizer: Parameter \"I_ENABLE_SMARTSYNC\" not delivered"
+  }
+ ]
+}

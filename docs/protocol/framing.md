@@ -342,7 +342,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0514    | capture     | Session token / connection ID (16B binary, random per session)       |
 | 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
-| 0x3c05    | capture     | BASXML content — raw ASCII XML (NOT UTF-16LE)                        |
+| 0x3c05    | capture     | BASXML content — XML text in UTF-8 (NOT UTF-16LE)                    |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
 
 ---
@@ -445,7 +445,7 @@ brackets the block on both sides and the XML is carried in `0x3c05` chunks:
 ```
 0x0205 len=14   'ET_DATA'                     export declaration (UTF-16LE)
 0x3c02 len=0                                  block begin
-0x3c05 len=9    '<ET_DATA>'                   ASCII — NOT UTF-16LE
+0x3c05 len=9    '<ET_DATA>'                   UTF-8 — NOT UTF-16LE
 0x3c05 len=211  '<item><LINE>a|b|c</LINE></item></ET_DATA>'
 0x3c02 len=0                                  block end
 ```
@@ -462,8 +462,10 @@ populated row; `DATA` declared with row count 0) and
 
 Two properties that are easy to get wrong:
 
-* **The payload is ASCII.** Every other string-bearing tag in the protocol is
-  UTF-16LE; decoding these chunks that way yields mojibake.
+* **The payload is UTF-8.** Every other string-bearing tag in the protocol is
+  UTF-16LE; decoding these chunks that way yields mojibake. ASCII text looks the same
+  in both, which is how this was first recorded as ASCII; a German umlaut arrives as
+  the two bytes `c3 a4` (`basxml_character_references.json`).
 * **The fragments are one document split at arbitrary points, so only the first
   names the table.** In the capture above, chunk 2 begins `<item>` — re-deriving the
   name per chunk files the rows under a table called `item` and loses them.
@@ -477,6 +479,32 @@ Multi-row is confirmed by capture, not inferred. A ten-row `T100` read arrives a
 holding only the opening tag — so **fragment boundaries fall wherever the server
 chooses, not on item boundaries**. Golden fixture:
 `tests/golden/framing/basxml_et_data_multirow_response.bin`.
+
+**Escaping.** The server escapes the five XML special characters as **decimal character
+references** and sends everything else as itself:
+
+| Character | Sent as |
+|-----------|---------|
+| `&` | `&#38;` |
+| `<` | `&#60;` |
+| `>` | `&#62;` |
+| `"` | `&#34;` |
+| `'` | `&#39;` |
+
+No named entity (`&amp;`), hexadecimal or zero-padded reference was seen. Live capture
+2026-11-25, `RFC_READ_TABLE` on `T100` texts containing each of these and an umlaut, with the
+reference client returning the same text; fixture
+`tests/golden/serialization/basxml_character_references.json`.
+
+saprfclib's reader (`_xml_unescape` in `invoke.py`) decodes that, and beyond it follows the
+XML 1.0 grammar rather than the one observation. A reference is decided by its value at any
+zero-padded width (the digit run is bounded at 32 to keep the scan bounded); the five
+predefined entities resolve; a value that is not a Unicode scalar value (a surrogate, or
+above U+10FFFF), a bare `&`, an unknown entity and a malformed or unterminated reference are
+refused with `ValueError`, as is a payload that is not valid UTF-8. Until #74 a bare `&`, an
+unknown entity and an invalid UTF-8 byte were passed through or replaced silently, a surrogate
+reference produced a lone surrogate, and a reference padded past eight digits was left as
+text.
 
 !!! warning "The XML form is not blank-padded"
     Unlike the binary encoding, the XML form does **not** pad fields to their DDIC

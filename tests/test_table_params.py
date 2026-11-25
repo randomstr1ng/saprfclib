@@ -1186,13 +1186,16 @@ def test_basxml_decoder_is_bounded() -> None:
 def test_basxml_decoder_ignores_dtd_and_entity_declarations() -> None:
     """A hand-rolled scanner, so entity-expansion tricks have nothing to expand.
 
-    Only the five predefined entities and numeric references resolve; an undeclared
-    one is left as written rather than looked up.
+    Only the five predefined entities and numeric references resolve. An undeclared
+    one is never looked up: it is refused (#74; it was passed through as text before),
+    and in no case expanded to what the DTD declares.
     """
     from saprfclib.invoke import decode_basxml_table
 
     hostile = b"<!DOCTYPE T [<!ENTITY x 'boom'>]><T><item><L>&x;</L></item></T>"
-    assert decode_basxml_table(hostile, "T") == [{"L": "&x;"}]
+    with pytest.raises(ValueError, match="unknown XML entity") as info:
+        decode_basxml_table(hostile, "T")
+    assert "boom" not in str(info.value)
 
 
 def test_binary_basxml_is_refused_not_misparsed() -> None:
