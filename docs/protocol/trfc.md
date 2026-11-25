@@ -251,7 +251,8 @@ conn.call_transactional("FM", tid=tid, queue=None, **params)
     ├─ 2. serialize the call: header from the logon + build_invoke_request(transactional=True)
     ├─ 3. build_trfc_request: STATE row (TID, FM, queue), DATA rows (the serialized call)
     ├─ 4. send, read the reply; an error raises
-    └─ retried on CommunicationError with the same TID (the server runs it once)
+    └─ on CommunicationError: the session is retired, a new connection is opened and
+       logged on, and the call is built again for it and resent with the same TID
 
 conn.confirm_tid(tid)
     └─ API_CLEAR_TID with the TID -- the server forgets it
@@ -259,6 +260,26 @@ conn.confirm_tid(tid)
 
 One call per TID: the reference client can put several calls into one LUW, the public API
 sends one.
+
+**A retry never reuses the failed connection.** After a failed send or an unread reply the
+byte stream is out of step: a resend on it could be read as the tail of the previous frame, or
+the old reply taken for the answer to the new request. So the session is marked broken, the
+transport closed, and a new connection opened over the same route (SAProuter and proxy
+included) and logged on. The request is then built again from the new session, since its GW
+handle, connection index and the logon header in the call all change, and sent with the
+**same TID**.
+
+That is safe because the server keeps a TID across connections. Behavioural probe
+(2026-11-25, kernel 793): submit `STFC_CONNECTION` under a TID on one connection, close it,
+submit the same TID on a new connection: `ARFCRSTATE` holds one entry, `FINISHED`, before and
+after the resubmit, and none after `API_CLEAR_TID`. A reconnect that fails counts as a failed
+attempt; when the attempts are exhausted the request is parked and `RetryExhausted` raised,
+and the connection stays retired. Connections that do not run on the async core (SNC) do not
+retry; a transport failure there retires the session and raises.
+
+Exercised over real sockets by `tests/test_scripted_peer.py`, which serves captured frames
+from a loopback peer and breaks the connection during the submit (reset, truncated reply,
+half-close).
 
 ### bgRFC submit and confirm
 
@@ -389,6 +410,16 @@ inbound handler does not parse it yet ([ASSUMED] in `server.py`).
 
 The wire format carries any number of calls (fixture `trfc`: two). `call_transactional`
 sends one per TID.
+
+### Re-driving a parked request
+
+`retry_parked` and `retry_parked_unit` send the parked request bytes as they were stored.
+Those bytes carry the GW handle and connection index of the connection that built them, and
+for tRFC the logon header in the call, so on any later connection they belong to a session
+that no longer exists. A retry no longer reuses the failed connection, but the parked bytes
+themselves are not rebuilt: whether a gateway accepts such a frame on a new connection, or
+whether the request has to be rebuilt from stored parameters, has not been tested. A probe
+that parks a submit, reconnects and re-drives it would settle it.
 
 ### tRFC over WebSocket RFC
 No capture. `call_transactional` raises `NotImplementedError` on a WebSocket connection.

@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A transactional retry opens a new connection instead of resending on the failed one**
+  (#75). tRFC, qRFC and bgRFC retries resent on the same transport after a
+  `CommunicationError`, where a partial write or an unread reply leaves the stream out of
+  step. Now the session is retired, a new connection is opened over the same route and
+  logged on, and the request is rebuilt for it and sent with the same TID; a live probe
+  shows the server keeps a TID across connections. On connections without automatic retry
+  (SNC), a failed submit or confirm now retires the session instead of returning it as
+  ready, and no longer masks the `CommunicationError` with a state error.
 - **XML table text (`ET_DATA`) is decoded strictly** (#74). A character reference is decoded
   by its value at any zero-padded width; a reference that is not a Unicode character (a
   surrogate, or above U+10FFFF), a bare `&`, an unknown entity, a malformed reference and
@@ -80,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches the reference client byte for byte. A CHAR value longer than its field keeps being
   truncated to the field (#72), which is also what the reference client does; both are now
   documented and pinned by tests.
+
+### Tests
+
+- **A scripted peer on a real socket** (#87). `tests/support/scripted_peer.py` serves
+  captured frames from a loopback NI server and delivers them damaged on purpose: split,
+  merged, delayed, duplicated, truncated, with a rewritten length, or with the connection
+  reset, half-closed or closed. Bounded in steps, delays and bytes so a broken test fails
+  instead of hanging. `tests/test_scripted_peer.py` uses it for the handshake, every
+  damaged-reply case and the reconnecting tRFC retry.
 
 ### Documentation
 
