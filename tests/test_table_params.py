@@ -1655,3 +1655,84 @@ def test_empty_response_frame_is_not_reported_as_malformed() -> None:
     with pytest.raises(CommunicationError, match="malformed"):
         body = struct.pack(">HH", 0x0016, 4) + b"1101" + struct.pack(">H", 0x0016)
         parse_invoke_response(body, FunctionDesc(name="RFC_PING", parameters=[]))
+
+
+# --------------------------------------------------------------------------- #
+# strict_params — unknown keys inside structures and table rows
+# --------------------------------------------------------------------------- #
+#
+# The encoder lays a structure out from its descriptor, so a key it does not name was
+# dropped from the request without a word. The reference client refuses one
+# (behavioural probe, STFC_STRUCTURE with IMPORTSTRUCT={"RFCCHAR4": "AB", "NOPE": 1}:
+# RFC_INVALID_PARAMETER, "field 'NOPE' not found"). Nested keys now follow the same
+# strict_params policy as top-level names.
+
+
+def _nested_desc() -> FunctionDesc:
+    inner = TypeDesc("INNER", [_char("C1", 2, 0)], 1, 2)
+    row = TypeDesc(
+        "ROW",
+        [
+            _char("A", 2, 0),
+            FieldDesc("SUB", RFCTYPE_STRUCTURE, 1, 1, 2, 2, 0, unicode_mode=True, type_desc=inner),
+        ],
+        2,
+        4,
+    )
+    return FunctionDesc(
+        "Z_NESTED",
+        [
+            FieldDesc(
+                "IS_ROW", RFCTYPE_STRUCTURE, 2, 0, 4, 0, 0, type_desc=row, direction=RFC_IMPORT
+            ),
+            FieldDesc("IT_ROWS", RFCTYPE_TABLE, 2, 0, 4, 0, 0, type_desc=row, direction=RFC_TABLES),
+        ],
+    )
+
+
+def test_unknown_nested_keys_are_reported_as_paths() -> None:
+    from saprfclib.invoke import unknown_fields
+
+    params = {
+        "IS_ROW": {"A": "x", "NOPE": 1, "SUB": {"C1": "y", "DEEP": 2}},
+        "IT_ROWS": [{"A": "1", "BAD": 1}, {"A": "2", "BAD": 2}, {"a": "3"}],
+    }
+    assert unknown_fields(_nested_desc(), params) == [
+        "IS_ROW-NOPE",
+        "IS_ROW-SUB-DEEP",
+        "IT_ROWS[]-BAD",  # once, not once per row
+        "IT_ROWS[]-a",  # keys match exactly, as the encoder matches them
+    ]
+
+
+def test_strict_mode_refuses_an_unknown_nested_key() -> None:
+    with pytest.raises(ValueError, match=r"IS_ROW-NOPE"):
+        build_invoke_request("Z_NESTED", _nested_desc(), {"IS_ROW": {"A": "x", "NOPE": 1}})
+
+
+def test_lenient_mode_drops_unknown_nested_keys_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from saprfclib.connection import _filter_call_params
+
+    params = {
+        "IS_ROW": {"A": "x", "NOPE": 1, "SUB": {"C1": "y", "DEEP": 2}},
+        "IT_ROWS": [{"A": "1", "BAD": 1}],
+    }
+    with caplog.at_level(logging.WARNING, logger="saprfclib.connection"):
+        out = _filter_call_params("Z_NESTED", _nested_desc(), params, strict=False, seen=set())
+    assert out == {"IS_ROW": {"A": "x", "SUB": {"C1": "y"}}, "IT_ROWS": [{"A": "1"}]}
+    assert "IS_ROW-NOPE" in caplog.text and "IT_ROWS[]-BAD" in caplog.text
+    # The caller's objects are not modified.
+    assert params["IS_ROW"]["NOPE"] == 1
+    # What is left encodes without complaint.
+    build_invoke_request("Z_NESTED", _nested_desc(), out)
+
+
+def test_known_nested_keys_pass_untouched() -> None:
+    from saprfclib.connection import _filter_call_params
+
+    params = {"IS_ROW": {"A": "x", "SUB": {"C1": "y"}}, "IT_ROWS": [{"A": "1"}]}
+    for strict in (True, False):
+        out = _filter_call_params("Z_NESTED", _nested_desc(), params, strict=strict, seen=set())
+        assert out is params

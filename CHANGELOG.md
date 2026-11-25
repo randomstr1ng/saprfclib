@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame declared was fully built in memory first. Each literal run and match is now checked
   before it is copied, and a frame declaring more than an LZ4 block can produce (255 bytes
   per compressed byte) is refused before decoding starts.
+- **Packed decimals keep every digit** (#71). A packed field holds up to 31 digits, but
+  encoding and decoding went through Python's 28-digit default decimal context, so a
+  wider value was silently rounded in both directions. Both now work in exact integer
+  arithmetic.
+- **Packed-decimal rounding matches the reference client** (#71). A value with more
+  fraction digits than the field was rounded half to even (1.005 → 1.00); it is now
+  rounded half away from zero (1.005 → 1.01), byte for byte what the reference client
+  sends. Replayed from `tests/golden/serialization/bcd_rounding.json`. NaN and infinity
+  are refused with a clear error, and an extreme exponent is refused or rounded to zero
+  without building a huge number first.
+- **DECFLOAT accepts the 24 non-canonical DPD declets** (#73) that IEEE 754-2008 requires
+  a decoder to accept, instead of failing with `KeyError`. Encoding is unchanged.
+- **Unknown keys inside structures and table rows are no longer dropped silently** (#72).
+  They follow `strict_params` like unknown top-level parameters: by default they are
+  dropped with a warning naming the path (`IMPORTSTRUCT-NOPE`, `IT_ROWS[]-FIELD`); with
+  `strict_params=True` the call raises `ValueError`, as the reference client does.
 
 ## [0.2.1] - 2026-11-12
 
