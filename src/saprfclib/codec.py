@@ -146,13 +146,18 @@ _DECF_PARAMS: dict[int, tuple[int, int, int, int]] = {
 
 
 def _build_dpd_tables() -> tuple[dict[tuple[int, int, int], int], dict[int, tuple[int, int, int]]]:
-    """Build the declet <-> three-digit maps from the IEEE 754-2008 encoding rules.
+    """Build the declet <-> three-digit maps from the IEEE 754-2008 coding rules.
 
-    Generated from the encoding rules rather than transcribed as a 1024-entry
-    literal: the rules are eight cases keyed on the high bit of each digit, which
-    is far easier to check by eye than a table of magic numbers. Several bit
-    patterns decode to the same digits (the redundant encodings); the decode map
-    keeps the first, and encoding always emits the canonical one.
+    Generated from the rules rather than transcribed as a 1024-entry literal: each
+    direction is a handful of cases, far easier to check by eye than a table of
+    magic numbers.
+
+    The encode map covers the 1000 digit triples and always yields the canonical
+    declet. The decode map covers all 1024 ten-bit patterns: 24 of them are the
+    non-canonical (redundant) encodings, which IEEE 754-2008 section 3.5.2 requires
+    a decoder to accept, and which decode to the same digits as a canonical declet.
+    Building the decode map by inverting the encode map would leave those 24 out,
+    and a peer that sends one would make decoding fail.
     """
     encode_map: dict[tuple[int, int, int], int] = {}
     decode_map: dict[int, tuple[int, int, int]] = {}
@@ -183,8 +188,47 @@ def _build_dpd_tables() -> tuple[dict[tuple[int, int, int], int], dict[int, tupl
                 for bit in (*pqr, *stu, v, *wxy):
                     declet = (declet << 1) | bit
                 encode_map[(d1, d2, d3)] = declet
-                decode_map.setdefault(declet, (d1, d2, d3))
+    for declet in range(1024):
+        decode_map[declet] = _dpd_decode_declet(declet)
+    # The two directions are built from independent rule sets; check they agree.
+    for trio, declet in encode_map.items():
+        if decode_map[declet] != trio:  # pragma: no cover - a rule transcription error
+            raise AssertionError(f"DPD tables disagree at {trio} / {declet:#05x}")
     return encode_map, decode_map
+
+
+def _dpd_decode_declet(declet: int) -> tuple[int, int, int]:
+    """Decode one ten-bit declet ``pqr stu v wxy`` into three digits (IEEE 754-2008).
+
+    Defined for all 1024 patterns. Where the rules leave bits unused (the p and q
+    bits when ``v wx st`` is ``1 11 11``), any value decodes to the same digits;
+    those are the redundant encodings.
+    """
+    p, q, r = (declet >> 9) & 1, (declet >> 8) & 1, (declet >> 7) & 1
+    s, t, u = (declet >> 6) & 1, (declet >> 5) & 1, (declet >> 4) & 1
+    v = (declet >> 3) & 1
+    w, x, y = (declet >> 2) & 1, (declet >> 1) & 1, declet & 1
+    pqr = (p << 2) | (q << 1) | r
+    stu = (s << 2) | (t << 1) | u
+    pqy = (p << 2) | (q << 1) | y
+    sty = (s << 2) | (t << 1) | y
+    if not v:
+        return pqr, stu, (w << 2) | (x << 1) | y
+    match (w << 1) | x:
+        case 0b00:
+            return pqr, stu, 8 + y
+        case 0b01:
+            return pqr, 8 + u, sty
+        case 0b10:
+            return 8 + r, stu, pqy
+    match (s << 1) | t:
+        case 0b00:
+            return 8 + r, 8 + u, pqy
+        case 0b01:
+            return 8 + r, (p << 2) | (q << 1) | u, 8 + y
+        case 0b10:
+            return pqr, 8 + u, 8 + y
+    return 8 + r, 8 + u, 8 + y
 
 
 _DPD_ENCODE, _DPD_DECODE = _build_dpd_tables()
@@ -553,9 +597,9 @@ def _decode_bcd(data: bytes, field: FieldDesc) -> Decimal:
         if n > 9:
             raise ValueError(f"invalid BCD digit nibble 0x{n:X}")
 
-    digits = "".join(str(n) for n in nibbles) or "0"
-    unscaled = Decimal(f"{'-' if negative else ''}{digits}")
-    return unscaled.scaleb(-field.decimals)
+    # Built from the digit tuple, not via Decimal.scaleb: scaleb rounds to the
+    # context precision (28 digits by default), and a packed field holds up to 31.
+    return Decimal((1 if negative else 0, tuple(nibbles), -field.decimals))
 
 
 def _encode_bcd(value: Decimal, field: FieldDesc) -> bytes:
@@ -577,12 +621,41 @@ def _encode_bcd(value: Decimal, field: FieldDesc) -> bytes:
         raise ValueError(f"BCD field width must be positive, got {width}")
     digit_count = width * 2 - 1
 
-    negative = value.as_tuple().sign == 1
-    # Unscaled integer = value * 10**decimals, exact in Decimal. Convert to a
-    # plain Python int so the digit string never carries an exponent suffix
-    # (e.g. Decimal('0').scaleb(2) renders as '0E+2') — int() collapses it.
-    unscaled = int(value.scaleb(field.decimals).to_integral_value())
-    digit_str = str(abs(unscaled))
+    if not value.is_finite():
+        raise ValueError(f"BCD value must be finite, got {value}")
+    sign, digit_tuple, exponent = value.as_tuple()
+    if not isinstance(exponent, int):  # pragma: no cover - excluded by is_finite above
+        raise ValueError(f"BCD value must be finite, got {value}")
+    negative = sign == 1
+    # Unscaled magnitude = |value| * 10**decimals, in exact integer arithmetic.
+    # Decimal.scaleb / to_integral_value would round to the context precision
+    # (28 digits by default), and a packed field holds up to 31.
+    coefficient = int("".join(map(str, digit_tuple)) or "0")
+    shift = exponent + field.decimals
+    if coefficient == 0:
+        magnitude = 0
+    elif shift >= 0:
+        if len(digit_tuple) + shift > digit_count:
+            # Checked before multiplying, so 1E+100000000 cannot build a huge int.
+            raise ValueError(
+                f"BCD value {value} needs {len(digit_tuple) + shift} digits "
+                f"but field holds {digit_count}"
+            )
+        magnitude = coefficient * 10**shift
+    elif -shift > len(digit_tuple):
+        # Every digit lies below the half-unit, so the value rounds to zero; this also
+        # keeps 1E-100000000 from building a huge divisor.
+        magnitude = 0
+    else:
+        # More fraction digits than the field holds: round half away from zero, which
+        # is what the reference client does. Source: behavioural probe — a packed
+        # P(2 decimals) import echoed back by a test function module: 1.005 -> 1.01,
+        # -1.005 -> -1.01, 0.125 -> 0.13, 1.004 -> 1.00.
+        divisor = 10**-shift
+        magnitude, remainder = divmod(coefficient, divisor)
+        if 2 * remainder >= divisor:
+            magnitude += 1
+    digit_str = str(magnitude)
     if len(digit_str) > digit_count:
         raise ValueError(
             f"BCD value {value} needs {len(digit_str)} digits but field holds {digit_count}"

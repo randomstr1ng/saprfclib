@@ -75,12 +75,14 @@ from saprfclib.invoke import (
     build_trfc_request,
     decompress_table_stream,
     dm_table_ids,
+    drop_unknown_fields,
     drop_unknown_parameters,
     extract_server_duration,
     parse_invoke_response,
     raise_for_rfc_error,
     tlv_stream_status,
     unit_state_from_wire,
+    unknown_fields,
     unknown_parameters,
 )
 from saprfclib.language import normalize_logon_language
@@ -992,20 +994,24 @@ def _filter_call_params(
     a record that the arguments never reached the server.
     """
     unknown = unknown_parameters(desc, params)
-    if not unknown or strict:
+    # Keys inside structures and table rows follow the same policy (PARAM-FIELD paths).
+    unknown_nested = unknown_fields(desc, params)
+    if not (unknown or unknown_nested) or strict:
         return params
 
-    key = (func_name.upper(), tuple(unknown))
+    names = unknown + unknown_nested
+    key = (func_name.upper(), tuple(names))
     message = (
         "%s: dropping parameter(s) %s - not in the function interface "
         "(strict_params=False). The call proceeds without them."
     )
     if key in seen:
-        _logger.debug(message, func_name.upper(), ", ".join(unknown))
+        _logger.debug(message, func_name.upper(), ", ".join(names))
     else:
         seen.add(key)
-        _logger.warning(message, func_name.upper(), ", ".join(unknown))
-    return drop_unknown_parameters(desc, params)
+        _logger.warning(message, func_name.upper(), ", ".join(names))
+    kept = drop_unknown_parameters(desc, params)
+    return drop_unknown_fields(desc, kept) if unknown_nested else kept
 
 
 def _table_row_buffers(response: bytes, table: str = "") -> list[bytes]:

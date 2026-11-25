@@ -1,0 +1,18 @@
+{
+ "fixture": "bcd_rounding",
+ "capture_source": "live capture 2026-11-25: the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) calling Z_SAPRFCLIB_BCD (see bcd_sign.json; kernel 793) with importing values that carry more fraction digits than the field. IV_DEC is typed DMBTR, packed decimal 23 digits with 2 decimals, 12 bytes.",
+ "evidence": "tier 1 live capture. 'input' is the Decimal handed to the reference client, 'hex' the IV_DEC bytes it put on the wire, 'echo' the value the server returned. The client rounds half away from zero, and a value that rounds to zero keeps its negative sign nibble.",
+ "decimals": 2,
+ "bytes": 12,
+ "values": [
+  {"input": "1.005", "hex": "00000000000000000000101c", "echo": "1.01"},
+  {"input": "-1.005", "hex": "00000000000000000000101d", "echo": "-1.01"},
+  {"input": "1.015", "hex": "00000000000000000000102c", "echo": "1.02"},
+  {"input": "1.004", "hex": "00000000000000000000100c", "echo": "1.00"},
+  {"input": "0.125", "hex": "00000000000000000000013c", "echo": "0.13"},
+  {"input": "-0.125", "hex": "00000000000000000000013d", "echo": "-0.13"},
+  {"input": "0.005", "hex": "00000000000000000000001c", "echo": "0.01"},
+  {"input": "-0.004", "hex": "00000000000000000000000d", "echo": "-0.00"},
+  {"input": "123.455", "hex": "00000000000000000012346c", "echo": "123.46"}
+ ]
+}

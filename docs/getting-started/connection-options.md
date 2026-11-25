@@ -240,6 +240,16 @@ conn.call("SXPG_STEP_XPG_START", COMMANDNAME="LIST_DB2DUMP", MXROW=100)
 # MXROW is not in the interface -> dropped, warning logged, call proceeds
 ```
 
+Keys inside a structure or a table row follow the same policy. They are reported as
+paths, `PARAM-FIELD` for a structure and `PARAM[]-FIELD` for table rows (once per
+table, not once per row), and are matched exactly, as the encoder matches them:
+
+```python
+conn.call("STFC_STRUCTURE", IMPORTSTRUCT={"RFCCHAR4": "AB", "NOPE": 1})
+# lenient: IMPORTSTRUCT-NOPE dropped, warning logged
+# strict:  ValueError naming IMPORTSTRUCT-NOPE
+```
+
 Each dropped argument is logged. The first occurrence of a given
 (function, argument-names) combination logs at `WARNING`; repeats fall to `DEBUG`,
 so a long-running loop leaves a record without flooding its log.
