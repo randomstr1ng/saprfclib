@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Packed decimals with sign nibble `0xB` are negative** (#70). They were read as positive,
+  so a negative amount arrived with its sign flipped. A live capture shows the server passes
+  every sign nibble through, and the reference client reads `0xA`, `0xC`, `0xE`, `0xF` as
+  positive and `0xB`, `0xD` as negative; saprfclib now does the same, and no longer refuses
+  `0xA` and `0xE`. Replayed from `tests/golden/serialization/bcd_sign_nibbles.json`.
+- **A packed field of all zero bytes decodes as zero** (#69) instead of raising, as the
+  reference client reads it.
 - **A one-character logon language keeps its case** (#66). It was uppercased, but SAP
   language codes are case-sensitive: `lang="a"` (Afrikaans) logged on as `A` (Arabic). It is
   now sent exactly as given, as the reference client sends it, and `language_sap_to_iso` is

@@ -247,14 +247,20 @@ def test_bcd_decode_returns_decimal_never_float():
 @pytest.mark.parametrize(
     "sign_nibble,negative",
     [
+        (0x0A, False),
         (0x0C, False),  # canonical positive
-        (0x0F, False),  # alternate positive (unsigned)
-        (0x0B, False),  # alternate positive
+        (0x0E, False),
+        (0x0F, False),
+        (0x0B, True),  # negative: read as positive until bcd_sign_nibbles.json
         (0x0D, True),  # canonical negative
     ],
 )
-def test_bcd_decode_accepts_all_four_sign_nibbles(sign_nibble, negative):
-    """0x0C/0x0F/0x0B → positive, 0x0D → negative on decode (Pitfall 4)."""
+def test_bcd_decode_accepts_all_six_sign_nibbles(sign_nibble, negative):
+    """0xA/0xC/0xE/0xF positive, 0xB/0xD negative, as the reference client reads them.
+
+    Source: tests/golden/serialization/bcd_sign_nibbles.json. 0xB was listed here as
+    positive, an [ASSUMED] value the capture disproves (#70).
+    """
     f = _bcd_field(precision=5, decimals=2)
     # digits 12345, sign nibble varies in the low nibble of the last byte.
     wire = bytes([0x12, 0x34, (0x5 << 4) | sign_nibble])

@@ -1,0 +1,20 @@
+{
+ "fixture": "bcd_sign_nibbles",
+ "capture_source": "live capture 2026-11-25: the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) calling Z_SAPRFCLIB_BCD_SIGNS, a purpose-built remote-enabled function module (local object, kernel 793). EV_VAL is typed DMBTR, packed decimal 23 digits with 2 decimals, 12 bytes. Cases P, N, I and D set it through ABAP (PACK, arithmetic, CLEAR, a SELECT from SFLIGHT); the other cases write the bytes directly, each with a different sign nibble, to see what reaches the wire and how the reference client reads it.",
+ "evidence": "tier 1 live capture. 'hex' is the EV_VAL value as the server sent it, 'value' what the reference client returned for it. The server passes every nibble through unchanged; ABAP itself produced only 0x0C and 0x0D.",
+ "decimals": 2,
+ "bytes": 12,
+ "values": [
+  {"case": "P", "source": "PACK '12345'", "hex": "00000000000000000012345c", "value": "123.45"},
+  {"case": "N", "source": "0 - '1.23'", "hex": "00000000000000000000123d", "value": "-1.23"},
+  {"case": "I", "source": "CLEAR", "hex": "00000000000000000000000c", "value": "0.00"},
+  {"case": "D", "source": "SELECT SINGLE price FROM sflight", "hex": "00000000000000000042294c", "value": "422.94"},
+  {"case": "A", "source": "raw sign nibble 0xA", "hex": "00000000000000000012345a", "value": "123.45"},
+  {"case": "B", "source": "raw sign nibble 0xB", "hex": "00000000000000000012345b", "value": "-123.45"},
+  {"case": "C", "source": "raw sign nibble 0xC", "hex": "00000000000000000012345c", "value": "123.45"},
+  {"case": "E", "source": "raw sign nibble 0xE", "hex": "00000000000000000012345e", "value": "123.45"},
+  {"case": "F", "source": "raw sign nibble 0xF", "hex": "00000000000000000012345f", "value": "123.45"},
+  {"case": "M", "source": "raw sign nibble 0xD", "hex": "00000000000000000012345d", "value": "-123.45"},
+  {"case": "Z", "source": "all twelve bytes zero", "hex": "000000000000000000000000", "value": "0.00"}
+ ]
+}
