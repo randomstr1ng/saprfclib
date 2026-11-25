@@ -89,6 +89,71 @@ conn = saprfclib.connect(ashost="s4-2025", sysnr="00", client="001",
 See the [Connection Options guide](https://randomstr1ng.github.io/saprfclib/getting-started/connection-options/)
 for the full parameter reference.
 
+## What works, and what doesn't
+
+Every feature is in one of four groups. **Supported** means verified against a live SAP
+system — a capture, a golden fixture under `tests/golden/` or an integration test.
+**Preview** means implemented and tested offline, but not verified live, or verified with
+documented open gaps; it may change in a minor release. **Not implemented** means there
+is no such option yet. **Refused** means the library recognises the case and raises a
+clear error rather than sending or returning something unverified. The public API
+carries the same labels (`tests/api/public_api.json`).
+
+**Supported**
+
+| Capability | Notes |
+|---|---|
+| Direct logon with password (`ashost`, `sysnr`) | Kernels 793 and 916 |
+| Calls with scalar, structure and table parameters; DDIC metadata | |
+| ABAP types CHAR, NUM, DATE, TIME, INT1/2/4/8, FLOAT, packed (BCD), DECFLOAT16/34, STRING, XSTRING, UTCLONG | Packed rounding and every sign nibble as the reference client reads them |
+| Compressed tables (SAPCOMPRESS LZH) | |
+| XML table text (`ET_DATA` with `USE_ET_DATA_4_RETURN`) | |
+| Connection pool, sync and async; `connect_async()` | The pool does not reset ABAP session state on release yet (#68) |
+| Message server / group logon (`mshost`) | Binary and HTTP resolution |
+| SAProuter, including chained routers | |
+| SOCKS5 / SAP BTP Connectivity proxy without proxy authentication | |
+| WebSocket RFC (`wshost`) | Calls; tRFC over WebSocket is refused |
+| Built-in SNC with X.509 (`snc_pse`), RSA and EC (P-256) client keys | Server certificates with EC keys are tested by loopback only |
+| Built-in SNC with Kerberos (`snc_kerberos`), including Windows logon-session tickets | AES enctypes only |
+| SNC through an external GSS-API library (`snc_lib`) | |
+| SNC single sign-on (`snc_sso=True`) | |
+| RFC server: registration and inbound calls (`RfcServer`, `AsyncRfcServer`) | Plain TCP |
+| tRFC and qRFC submit, with durable TID stores | A retry resends on the same connection (#75) |
+
+**Preview**
+
+| Capability | Why |
+|---|---|
+| SOCKS5 proxy authentication with a JWT (method `0x80`), message-server logon through the proxy | Not verified live (`docs/protocol/socks5.md`) |
+| bgRFC submit and unit stores | The submit payload (SDATA) is not implemented (#34) |
+| RFC types 33–40 (UTCSECOND … CDAY) | No system exposes them; widths `[ASSUMED]` |
+| SAP LZ4 frames, LZC compression on send | Frame layout `[ASSUMED]`; no capture of a client sending LZC |
+| SDK-format traces (`RfcTrace`) | Tested offline only |
+| Structures containing STRING, XSTRING or nested tables | Known to corrupt the buffer (#85) |
+| Inbound tRFC in server mode | The parameter block (`0x5001`) is parsed from an `[ASSUMED]` layout; no committed capture (`docs/protocol/trfc.md`) |
+
+**Not implemented**
+
+| Capability | Tracked in |
+|---|---|
+| SNC on the server side (acceptor role) | `docs/protocol/snc.md` |
+| SAP logon tickets (`MYSAPSSO2`) | #78 |
+| Client-side callbacks (`DESTINATION 'BACK'`) | #79 |
+| Cancelling a call in flight | #82 |
+
+**Refused on purpose**
+
+| Capability | Why |
+|---|---|
+| Non-Unicode and big-endian systems | Refused at logon: the character handling has never been validated against one (#48) |
+| SAP's binary BASXML (`BXML`) | Refused with `NotImplementedError` (#18) |
+| RFC types NULL, ABAPOBJECT, XMLDATA | Not serialised |
+| Kerberos RC4/DES enctypes, cross-realm tickets; SNC with DSA or EdDSA keys | Refused with a clear error (`docs/protocol/kerberos.md`, `docs/protocol/snc-mechanism.md`) |
+
+CI runs the offline suite on CPython 3.12–3.15 (Linux), 3.12 and 3.15 (Windows, macOS)
+and the free-threaded 3.15t build (Linux). Live verification is done against the
+maintainer's own systems and recorded as captures; see [SUPPORT.md](SUPPORT.md).
+
 ## Documentation
 
 Full documentation: **https://randomstr1ng.github.io/saprfclib/**

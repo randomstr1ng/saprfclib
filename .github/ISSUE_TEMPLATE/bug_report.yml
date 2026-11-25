@@ -5,15 +5,39 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Never paste real credentials, real hostnames, customer data, or an unsanitised
-        pcap.** Redact before posting. If this is a security issue, do not open an issue —
-        see SECURITY.md.
+        **Nothing that identifies your system, your users or your business data belongs in
+        this issue.** RFC failures depend on the exact function interface, so it is tempting
+        to paste the real thing — please send the synthetic version instead:
+
+        | Instead of | Send |
+        |---|---|
+        | host name, IP address, SID, client, instance number | the release family, e.g. "S/4HANA 2023" |
+        | the RFC user | nothing — it is never needed |
+        | a custom function module's name, parameter or field names | invented names (`Z_FM_A`, `ZFIELD_A`, `ZTAB`); standard modules such as `STFC_CONNECTION` or `RFC_READ_TABLE` are fine |
+        | returned rows or business values | the ABAP type and length: `CHAR(10)`, `DEC(15,2)`, `DATS` |
+        | message variables V1–V4, or a message text built from them (they often carry document numbers or amounts) | the message coordinates: class, type, number, e.g. `ZFI/E/042` |
+        | a raw trace, a packet capture, a `.env` file, a password | the exception class and its `key` / message coordinates |
+
+        If the problem cannot be described without one of the left-hand items, say so and ask
+        how to proceed; a maintainer will never ask for them in a public issue. **Security
+        issues:** do not open an issue — use the private advisory described in SECURITY.md.
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: >-
+            I removed host names, IP addresses, SID, client, user names, business values,
+            message variables, raw traces and credentials from this report.
+          required: true
 
   - type: input
     id: version
     attributes:
       label: saprfclib version
-      placeholder: "0.1.0 (python -c 'import saprfclib; print(saprfclib.__version__)')"
+      description: An exact release from PyPI. A git checkout is fine too; then give the commit.
+      placeholder: "0.2.1 (python -c 'import saprfclib; print(saprfclib.__version__)')"
     validations:
       required: true
 
@@ -28,28 +52,70 @@ body:
   - type: input
     id: sap
     attributes:
-      label: SAP system release
-      placeholder: "SAP NW 7.58 / S/4HANA 2023 / BTP ABAP environment"
+      label: SAP release family and kernel
+      description: The release family and kernel only, e.g. from RFC_SYSTEM_INFO (RFCSAPRL, RFCKERNRL).
+      placeholder: "S/4HANA 2023, kernel 793 / ABAP Platform 2025, kernel 916"
 
   - type: dropdown
     id: transport
     attributes:
-      label: Connection mode
+      label: Connection route
       options:
         - Direct TCP (ashost/sysnr)
-        - SAProuter
         - Message server (group logon)
-        - SNC
-        - WebSocket RFC (BTP)
+        - SAProuter
+        - SOCKS5 / BTP Connectivity proxy
+        - WebSocket RFC
         - RFC server (inbound)
     validations:
       required: true
+
+  - type: dropdown
+    id: snc
+    attributes:
+      label: SNC
+      options:
+        - "No"
+        - Built-in X.509 (snc_pse / snc_credential)
+        - Built-in Kerberos (snc_kerberos)
+        - External GSS-API library (snc_lib)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure_point
+    attributes:
+      label: When did it fail?
+      description: >-
+        This decides whether a retry would have been safe. After a complete send the
+        system may already have executed the call.
+      options:
+        - During connect / logon
+        - Before the call was sent
+        - After the call was sent completely
+        - Partway through sending, or not known
+        - Not applicable
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: reduction
+    attributes:
+      label: Reduction
+      description: Narrow it down first; each step tells a maintainer where to look.
+      options:
+        - label: "`conn.ping()` (RFC_PING) works on this connection"
+        - label: "`STFC_CONNECTION` works (metadata lookup, a scalar sent and received)"
+        - label: "I removed parameters from the failing call one at a time; the last one removed is described below"
 
   - type: textarea
     id: what
     attributes:
       label: What happened
-      description: Include the full traceback if there is one, with credentials redacted.
+      description: >-
+        The exception class and, where there is one, its `key` and ABAP message class, type
+        and number. Trim file paths in the traceback, and read the message text before
+        pasting it: a message built from V1–V4 can carry a business value.
     validations:
       required: true
 
@@ -64,5 +130,8 @@ body:
     id: repro
     attributes:
       label: Reproduction
-      description: Smallest snippet that shows the problem, with placeholders for connection parameters.
+      description: >-
+        The smallest snippet that shows the problem, with placeholders for connection
+        parameters and invented names for custom objects. Describe the interface by ABAP
+        type and length (`IV_A CHAR(10)`, `IT_B` of a structure with `F1 DEC(15,2)`).
       render: python

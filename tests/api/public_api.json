@@ -1,0 +1,471 @@
+{
+ "note": "Snapshot of saprfclib.__all__ (except __version__), compared by tests/test_public_api.py. Regenerate with `python -m tests.test_public_api --update`; stability labels and reasons are kept. The labels match the support table in README.md.",
+ "stability_levels": {
+  "stable": "Part of the supported surface: its wire behaviour is verified against a live SAP system (a capture, a golden fixture or an integration test), or it has no wire behaviour of its own. Changes are recorded in CHANGELOG.md; a breaking change is called out there.",
+  "preview": "Implemented and tested offline, but not verified against a live system, or verified with documented open gaps. It may change in a minor release without a deprecation period."
+ },
+ "exports": {
+  "encode": {
+   "kind": "function",
+   "signature": "(rfctype: 'int', value: 'Any', field: 'FieldDesc') -> 'bytes'",
+   "members": {},
+   "stability": "stable",
+   "reason": "ABAP type codec; every type except 33-40 replays live captures (docs/protocol/serialization.md)"
+  },
+  "decode": {
+   "kind": "function",
+   "signature": "(rfctype: 'int', data: 'bytes | bytearray | memoryview', field: 'FieldDesc', row_count: 'int | None' = None) -> 'Any'",
+   "members": {},
+   "stability": "stable",
+   "reason": "ABAP type codec; every type except 33-40 replays live captures (docs/protocol/serialization.md)"
+  },
+  "language_iso_to_sap": {
+   "kind": "function",
+   "signature": "(iso_code: 'str') -> 'str'",
+   "members": {},
+   "stability": "stable",
+   "reason": "table probed against the reference client's conversion; logon bytes captured (#66)"
+  },
+  "language_sap_to_iso": {
+   "kind": "function",
+   "signature": "(sap_code: 'str') -> 'str'",
+   "members": {},
+   "stability": "stable",
+   "reason": "table probed against the reference client's conversion; logon bytes captured (#66)"
+  },
+  "jsonable": {
+   "kind": "function",
+   "signature": "(value: 'Any') -> 'Any'",
+   "members": {},
+   "stability": "stable",
+   "reason": "result conversion helper; no wire behaviour"
+  },
+  "get_function_desc": {
+   "kind": "function",
+   "signature": "(connection: 'object', name: 'str', *, cache: 'MetadataCache | None' = None) -> 'FunctionDesc'",
+   "members": {},
+   "stability": "stable",
+   "reason": "metadata lookup verified live (DDIF and function interface fixtures)"
+  },
+  "connect": {
+   "kind": "function",
+   "signature": "(ashost: 'str', sysnr: 'str | int', client: 'str', user: 'str | None' = None, passwd: 'str | None' = None, *, lang: 'str' = 'E', strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, timeout: 'float | None' = None, connect_timeout: 'float | None' = 10.0, read_timeout: 'float | None' = None, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None, saprouter: 'str | None' = None, mshost: 'str | None' = None, msserv: 'int | str | None' = None, ms_http_port: 'int | str | None' = None, ms_use_http: 'bool' = True, sysid: 'str | None' = None, group: 'str | None' = None, port: 'int | None' = None, wshost: 'str | None' = None, wsport: 'int | None' = None, ws_path: 'str | None' = None, ws_proxy_host: 'str | None' = None, ws_proxy_port: 'int | None' = None, ws_proxy_user: 'str | None' = None, ws_proxy_pass: 'str | None' = None, ws_tls_verify: 'bool' = True, proxy_type: 'str | None' = None, proxy_host: 'str | None' = None, proxy_port: 'int | None' = None, proxy_jwt: 'str | None' = None, proxy_scc_location_id: 'str | None' = None, proxy_client_id: 'str | None' = None, proxy_client_secret: 'str | None' = None, proxy_token_url: 'str | None' = None, socket_factory: 'Callable[[str, int], socket.socket] | None' = None, gwhost: 'str | None' = None, trace: 'RfcTrace | None' = None, snc_lib: 'str | None' = None, snc_partnername: 'str | None' = None, snc_myname: 'str | None' = None, snc_qop: 'int | None' = None, snc_sso: 'bool | None' = None, snc_pse: 'str | os.PathLike[str] | None' = None, snc_pse_pin: 'str | None' = None, snc_credential: 'SncCredential | None' = None, snc_kerberos: 'bool | KerberosLogin | None' = None, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None) -> 'Connection'",
+   "members": {},
+   "stability": "stable",
+   "reason": "direct, message-server, SAProuter, SNC and WebSocket logon verified live; route-specific previews are listed in README.md"
+  },
+  "connectivity_proxy_kwargs": {
+   "kind": "function",
+   "signature": "(binding: 'Mapping[str, Any] | str | None' = None, *, with_auth: 'bool' = True) -> 'dict[str, Any]'",
+   "members": {},
+   "stability": "preview",
+   "reason": "SOCKS5 without proxy authentication is verified live; the JWT method 0x80 it configures is [ASSUMED] (docs/protocol/socks5.md)"
+  },
+  "ConnectionPool": {
+   "kind": "class",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10) -> 'None'",
+   "members": {
+    "acquire": "(self, timeout: 'float' = 30.0) -> 'Iterator[Any]'",
+    "close": "(self) -> 'None'",
+    "idle": "property",
+    "in_use": "property",
+    "max_size": "property",
+    "release": "(self, conn: 'Any') -> 'None'",
+    "size": "property",
+    "stats": "(self) -> 'dict[str, float | int]'"
+   },
+   "stability": "stable",
+   "reason": "live acquire/call/release (tests/test_phase05_integration.py); session state is not reset on release yet (#68)"
+  },
+  "connect_async": {
+   "kind": "function",
+   "signature": "(ashost: 'str', sysnr: 'str | int', client: 'str', user: 'str | None' = None, passwd: 'str | None' = None, *, lang: 'str' = 'E', strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, timeout: 'float | None' = None, connect_timeout: 'float | None' = 10.0, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None, saprouter: 'str | None' = None, mshost: 'str | None' = None, msserv: 'int | str | None' = None, ms_http_port: 'int | str | None' = None, ms_use_http: 'bool' = True, sysid: 'str | None' = None, group: 'str | None' = None, port: 'int | None' = None, snc_lib: 'str | None' = None, snc_partnername: 'str | None' = None, snc_myname: 'str | None' = None, snc_qop: 'int | None' = None, snc_sso: 'bool | None' = None, snc_pse: 'str | os.PathLike[str] | None' = None, snc_pse_pin: 'str | None' = None, snc_credential: 'SncCredential | None' = None, snc_kerberos: 'bool | KerberosLogin | None' = None, wshost: 'str | None' = None, wsport: 'int | None' = None, ws_path: 'str | None' = None, ws_proxy_host: 'str | None' = None, ws_proxy_port: 'int | None' = None, ws_proxy_user: 'str | None' = None, ws_proxy_pass: 'str | None' = None, ws_tls_verify: 'bool' = True, read_timeout: 'float | None' = None, proxy_type: 'str | None' = None, proxy_host: 'str | None' = None, proxy_port: 'int | None' = None, proxy_jwt: 'str | None' = None, proxy_scc_location_id: 'str | None' = None, proxy_client_id: 'str | None' = None, proxy_client_secret: 'str | None' = None, proxy_token_url: 'str | None' = None, socket_factory: 'Callable[[str, int], socket.socket] | None' = None, gwhost: 'str | None' = None, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None) -> 'AsyncConnection'",
+   "members": {},
+   "stability": "stable",
+   "reason": "live async call (tests/test_phase09_integration.py)"
+  },
+  "AsyncConnection": {
+   "kind": "class",
+   "signature": "(transport: 'AsyncTransport', *, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None, strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None) -> 'None'",
+   "members": {
+    "call": "(self, func_name: 'str', **params: 'object') -> 'dict[str, Any]'",
+    "call_transactional": "(self, func_name: 'str', *, tid: 'str', queue: 'str | None' = None, **params: 'object') -> 'None'",
+    "close": "(self) -> 'None'",
+    "confirm_tid": "(self, tid: 'str') -> 'None'",
+    "confirm_unit": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'None'",
+    "create_unit": "(self, uid: 'str | None' = None, queues: 'list[str] | None' = None) -> '_AsyncUnitHandle'",
+    "get_connection_attributes": "(self) -> 'ConnectionAttributes'",
+    "get_unit_state": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'UnitState'",
+    "ping": "(self) -> 'bool'",
+    "retry_parked": "(self, tid: 'str') -> 'None'",
+    "retry_parked_unit": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'None'",
+    "rollback_unit": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'None'",
+    "sys_id": "property"
+   },
+   "stability": "stable",
+   "reason": "live async call (tests/test_phase09_integration.py)"
+  },
+  "CallStats": {
+   "kind": "class",
+   "signature": "(func_name: 'str', duration_s: 'float', request_bytes: 'int', response_bytes: 'int', failed: 'bool' = False, server_duration_s: 'float | None' = None) -> None",
+   "members": {},
+   "stability": "stable",
+   "reason": "per-call statistics; no wire behaviour of its own"
+  },
+  "ConnectionMetrics": {
+   "kind": "class",
+   "signature": "() -> 'None'",
+   "members": {
+    "as_dict": "(self) -> 'dict[str, float | int]'",
+    "mean_duration_s": "property",
+    "mean_server_duration_s": "property",
+    "record": "(self, stats: 'CallStats') -> 'None'",
+    "server_time_fraction": "property"
+   },
+   "stability": "stable",
+   "reason": "connection metrics; no wire behaviour of its own"
+  },
+  "RfcTrace": {
+   "kind": "class",
+   "signature": "(path: 'str', *, level: 'int' = 3) -> 'None'",
+   "members": {
+    "close": "(self) -> 'None'",
+    "frame": "(self, direction: 'str', payload: 'bytes', *, socket_id: 'int' = 1) -> 'None'",
+    "log": "(self, message: 'str', *, level: 'int' = 1) -> 'None'"
+   },
+   "stability": "preview",
+   "reason": "SDK-format trace output, tested offline only"
+  },
+  "PoolMetrics": {
+   "kind": "class",
+   "signature": "() -> 'None'",
+   "members": {
+    "as_dict": "(self) -> 'dict[str, float | int]'",
+    "hit_rate": "property",
+    "mean_wait_s": "property"
+   },
+   "stability": "stable",
+   "reason": "pool metrics; no wire behaviour of its own"
+  },
+  "AsyncConnectionPool": {
+   "kind": "class",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10) -> 'None'",
+   "members": {
+    "acquire": "(self, timeout: 'float' = 30.0) -> 'AsyncIterator[Any]'",
+    "close": "(self) -> 'None'",
+    "idle": "property",
+    "in_use": "property",
+    "max_size": "property",
+    "release": "(self, conn: 'Any') -> 'None'",
+    "size": "property",
+    "start": "(self) -> 'None'",
+    "stats": "(self) -> 'dict[str, float | int]'"
+   },
+   "stability": "stable",
+   "reason": "pool semantics shared with ConnectionPool; live async calls"
+  },
+  "AsyncRfcServer": {
+   "kind": "class",
+   "signature": "(params: 'dict[str, Any]') -> 'None'",
+   "members": {
+    "serve": "(self, host: 'str' = '0.0.0.0', port: 'int' = 0) -> 'None'",
+    "stop_async": "(self) -> 'None'"
+   },
+   "stability": "stable",
+   "reason": "same server session as RfcServer, verified live over plain TCP"
+  },
+  "RfcServer": {
+   "kind": "class",
+   "signature": "(params: 'dict[str, Any]') -> 'None'",
+   "members": {
+    "close": "(self) -> 'None'",
+    "dispatch_inbound": "(self, frame: 'bytes') -> 'bytes'",
+    "function": "(self, name: 'str', func_desc: 'FunctionDesc | None' = None) -> 'Callable[[Callable[[dict[str, Any]], dict[str, Any]]], Callable[[dict[str, Any]], dict[str, Any]]]'",
+    "install_transaction_handlers": "(self, *, on_check: 'Callable[[str], int] | None' = None, on_commit: 'Callable[[str], None] | None' = None, on_rollback: 'Callable[[str], None] | None' = None, on_confirm: 'Callable[[str], None] | None' = None) -> 'None'",
+    "install_unit_handlers": "(self, *, check: 'Callable[..., int] | None' = None, commit: 'Callable[..., None] | None' = None, rollback: 'Callable[..., None] | None' = None, confirm: 'Callable[..., None] | None' = None, get_state: 'Callable[..., UnitState] | None' = None) -> 'None'",
+    "serve_forever": "(self) -> 'None'",
+    "set_authentication_check": "(self, fn: 'Callable[..., bool]') -> 'None'",
+    "set_generic_handler": "(self, fn: 'Callable[[str], tuple[FunctionDesc, Callable[[dict[str, Any]], dict[str, Any]]] | None]') -> 'None'",
+    "set_tid_store": "(self, store: 'TidStore') -> 'None'",
+    "set_unit_store": "(self, store: 'UnitStore') -> 'None'",
+    "stop": "(self) -> 'None'"
+   },
+   "stability": "stable",
+   "reason": "registration and inbound calls verified live over plain TCP (#58); inbound tRFC is preview, the SNC acceptor role is not implemented"
+  },
+  "SapRfcError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "AbapApplicationError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "AbapSystemFailure": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "CommunicationError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "IncompleteDescriptorError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "LogonError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "PoolTimeoutError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "ProxyError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "RetryExhausted": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "SncError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "TransactionalError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "WebSocketError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "TidStore": {
+   "kind": "class",
+   "signature": "(*args, **kwargs)",
+   "members": {
+    "confirm": "(self, tid: 'str') -> 'None'",
+    "delete_parked": "(self, tid: 'str') -> 'None'",
+    "get_parked": "(self, tid: 'str') -> 'bytes | None'",
+    "is_executed": "(self, tid: 'str') -> 'bool'",
+    "list_parked": "(self) -> 'list[str]'",
+    "mark_executed": "(self, tid: 'str') -> 'None'",
+    "mark_received": "(self, tid: 'str') -> 'None'",
+    "mark_rolled_back": "(self, tid: 'str') -> 'None'",
+    "park": "(self, tid: 'str', payload: 'bytes') -> 'None'"
+   },
+   "stability": "stable",
+   "reason": "tRFC/qRFC submit verified live (tests/test_phase06_integration.py)"
+  },
+  "UnitStore": {
+   "kind": "class",
+   "signature": "(*args, **kwargs)",
+   "members": {
+    "confirm": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "delete_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "get_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'bytes | None'",
+    "get_unit_state": "(self, unit_id: 'str', unit_type: 'str') -> 'UnitState'",
+    "list_parked": "(self) -> 'list[tuple[str, str]]'",
+    "park": "(self, unit_id: 'str', unit_type: 'str', payload: 'bytes') -> 'None'",
+    "persist": "(self, unit_id: 'str', unit_type: 'str') -> 'None'"
+   },
+   "stability": "preview",
+   "reason": "bgRFC units: the submit payload (SDATA) is not implemented (#34)"
+  },
+  "UnitState": {
+   "kind": "class",
+   "signature": "(*values)",
+   "members": {},
+   "stability": "preview",
+   "reason": "bgRFC unit states, tied to the unfinished bgRFC submit (#34)"
+  },
+  "InMemoryTidStore": {
+   "kind": "class",
+   "signature": "() -> 'None'",
+   "members": {
+    "confirm": "(self, tid: 'str') -> 'None'",
+    "delete_parked": "(self, tid: 'str') -> 'None'",
+    "get_parked": "(self, tid: 'str') -> 'bytes | None'",
+    "is_executed": "(self, tid: 'str') -> 'bool'",
+    "list_parked": "(self) -> 'list[str]'",
+    "mark_executed": "(self, tid: 'str') -> 'None'",
+    "mark_received": "(self, tid: 'str') -> 'None'",
+    "mark_rolled_back": "(self, tid: 'str') -> 'None'",
+    "park": "(self, tid: 'str', payload: 'bytes') -> 'None'"
+   },
+   "stability": "stable",
+   "reason": "store for the live-verified tRFC/qRFC lifecycle"
+  },
+  "InMemoryUnitStore": {
+   "kind": "class",
+   "signature": "() -> 'None'",
+   "members": {
+    "confirm": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "delete_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "get_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'bytes | None'",
+    "get_unit_state": "(self, unit_id: 'str', unit_type: 'str') -> 'UnitState'",
+    "list_parked": "(self) -> 'list[tuple[str, str]]'",
+    "park": "(self, unit_id: 'str', unit_type: 'str', payload: 'bytes') -> 'None'",
+    "persist": "(self, unit_id: 'str', unit_type: 'str') -> 'None'"
+   },
+   "stability": "preview",
+   "reason": "bgRFC units: the submit payload (SDATA) is not implemented (#34)"
+  },
+  "SqliteTidStore": {
+   "kind": "class",
+   "signature": "(path: 'str' = ':memory:') -> 'None'",
+   "members": {
+    "close": "(self) -> 'None'",
+    "confirm": "(self, tid: 'str') -> 'None'",
+    "delete_parked": "(self, tid: 'str') -> 'None'",
+    "get_parked": "(self, tid: 'str') -> 'bytes | None'",
+    "is_executed": "(self, tid: 'str') -> 'bool'",
+    "list_parked": "(self) -> 'list[str]'",
+    "mark_executed": "(self, tid: 'str') -> 'None'",
+    "mark_received": "(self, tid: 'str') -> 'None'",
+    "mark_rolled_back": "(self, tid: 'str') -> 'None'",
+    "park": "(self, tid: 'str', payload: 'bytes') -> 'None'"
+   },
+   "stability": "stable",
+   "reason": "store for the live-verified tRFC/qRFC lifecycle; persistence tested offline"
+  },
+  "SqliteUnitStore": {
+   "kind": "class",
+   "signature": "(path: 'str' = ':memory:') -> 'None'",
+   "members": {
+    "close": "(self) -> 'None'",
+    "confirm": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "delete_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "get_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'bytes | None'",
+    "get_unit_state": "(self, unit_id: 'str', unit_type: 'str') -> 'UnitState'",
+    "list_parked": "(self) -> 'list[tuple[str, str]]'",
+    "park": "(self, unit_id: 'str', unit_type: 'str', payload: 'bytes') -> 'None'",
+    "persist": "(self, unit_id: 'str', unit_type: 'str') -> 'None'"
+   },
+   "stability": "preview",
+   "reason": "bgRFC units: the submit payload (SDATA) is not implemented (#34)"
+  },
+  "AsyncTidStore": {
+   "kind": "class",
+   "signature": "(*args, **kwargs)",
+   "members": {
+    "confirm": "(self, tid: 'str') -> 'None'",
+    "delete_parked": "(self, tid: 'str') -> 'None'",
+    "get_parked": "(self, tid: 'str') -> 'bytes | None'",
+    "is_executed": "(self, tid: 'str') -> 'bool'",
+    "list_parked": "(self) -> 'list[str]'",
+    "mark_executed": "(self, tid: 'str') -> 'None'",
+    "mark_received": "(self, tid: 'str') -> 'None'",
+    "mark_rolled_back": "(self, tid: 'str') -> 'None'",
+    "park": "(self, tid: 'str', payload: 'bytes') -> 'None'"
+   },
+   "stability": "stable",
+   "reason": "async counterpart of TidStore"
+  },
+  "AsyncUnitStore": {
+   "kind": "class",
+   "signature": "(*args, **kwargs)",
+   "members": {
+    "confirm": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "delete_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'None'",
+    "get_parked": "(self, unit_id: 'str', unit_type: 'str') -> 'bytes | None'",
+    "get_unit_state": "(self, unit_id: 'str', unit_type: 'str') -> 'UnitState'",
+    "list_parked": "(self) -> 'list[tuple[str, str]]'",
+    "park": "(self, unit_id: 'str', unit_type: 'str', payload: 'bytes') -> 'None'",
+    "persist": "(self, unit_id: 'str', unit_type: 'str') -> 'None'"
+   },
+   "stability": "preview",
+   "reason": "bgRFC units: the submit payload (SDATA) is not implemented (#34)"
+  },
+  "FieldDesc": {
+   "kind": "class",
+   "signature": "(name: 'str', rfctype: 'int', nuc_length: 'int', nuc_offset: 'int', uc_length: 'int', uc_offset: 'int', decimals: 'int', unicode_mode: 'bool' = True, type_desc: 'TypeDesc | None' = None, direction: 'int' = 1, optional: 'bool' = False, default_value: 'str | None' = None, param_text: 'str | None' = None) -> None",
+   "members": {},
+   "stability": "stable",
+   "reason": "descriptor dataclass built from live metadata"
+  },
+  "FunctionDesc": {
+   "kind": "class",
+   "signature": "(name: 'str', parameters: 'list[FieldDesc]' = <factory>) -> None",
+   "members": {},
+   "stability": "stable",
+   "reason": "descriptor dataclass built from live metadata"
+  },
+  "TypeDesc": {
+   "kind": "class",
+   "signature": "(name: 'str', fields: 'list[FieldDesc]', nuc_size: 'int', uc_size: 'int') -> None",
+   "members": {},
+   "stability": "stable",
+   "reason": "descriptor dataclass built from live metadata"
+  },
+  "RFC_IMPORT": {
+   "kind": "constant",
+   "signature": null,
+   "members": {},
+   "type": "int",
+   "stability": "stable",
+   "reason": "parameter direction constant, as decoded from live metadata"
+  },
+  "RFC_EXPORT": {
+   "kind": "constant",
+   "signature": null,
+   "members": {},
+   "type": "int",
+   "stability": "stable",
+   "reason": "parameter direction constant, as decoded from live metadata"
+  },
+  "RFC_CHANGING": {
+   "kind": "constant",
+   "signature": null,
+   "members": {},
+   "type": "int",
+   "stability": "stable",
+   "reason": "parameter direction constant, as decoded from live metadata"
+  },
+  "RFC_TABLES": {
+   "kind": "constant",
+   "signature": null,
+   "members": {},
+   "type": "int",
+   "stability": "stable",
+   "reason": "parameter direction constant, as decoded from live metadata"
+  }
+ }
+}
