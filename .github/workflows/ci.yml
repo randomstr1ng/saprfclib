@@ -23,18 +23,24 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
         include:
           # The library is pure Python, including the built-in SNC mechanism and its
-          # dependencies; run the offline suite on Windows and macOS too.
+          # dependencies; run the offline suite on Windows and macOS too, on the oldest
+          # and the newest supported version.
           - os: windows-latest
             python-version: "3.12"
           - os: windows-latest
-            python-version: "3.14"
+            python-version: "3.15"
           - os: macos-latest
             python-version: "3.12"
           - os: macos-latest
-            python-version: "3.14"
+            python-version: "3.15"
+          # Free-threaded build (no GIL). A Connection is owned by one thread at a time
+          # and the pool is the concurrency boundary; without the GIL that contract is
+          # actually exercised. Not a required check.
+          - os: ubuntu-latest
+            python-version: "3.15t"
     defaults:
       run:
         shell: bash
