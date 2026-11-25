@@ -41,3 +41,42 @@ def test_packed_decimal_matches_the_capture(case: dict) -> None:
 def test_sign_nibbles() -> None:
     signs = {Decimal(c["value"]) < 0: bytes.fromhex(c["hex"])[-1] & 0x0F for c in FX["values"]}
     assert signs == {True: 0x0D, False: 0x0C}
+
+
+# --------------------------------------------------------------------------- #
+# Every sign nibble a peer can send (#70, #69)
+# --------------------------------------------------------------------------- #
+
+NIBBLES = json.loads(
+    (
+        pathlib.Path(__file__).parent / "golden" / "serialization" / "bcd_sign_nibbles.json"
+    ).read_text(encoding="utf-8")
+)
+NIBBLE_FIELD = FieldDesc(
+    name="EV_VAL",
+    rfctype=RFCTYPE_BCD,
+    nuc_length=NIBBLES["bytes"],
+    nuc_offset=0,
+    uc_length=NIBBLES["bytes"],
+    uc_offset=0,
+    decimals=NIBBLES["decimals"],
+)
+
+
+@pytest.mark.parametrize("case", NIBBLES["values"], ids=lambda c: c["case"])
+def test_every_sign_nibble_decodes_as_the_reference_client_reads_it(case: dict) -> None:
+    """0xB is negative (it was read as positive), 0xA/0xE decode, all-zero is zero."""
+    value = decode(RFCTYPE_BCD, bytes.fromhex(case["hex"]), NIBBLE_FIELD)
+    assert value == Decimal(case["value"])
+    assert value.is_signed() == case["value"].startswith("-")
+
+
+def test_an_all_zero_field_keeps_its_scale() -> None:
+    value = decode(RFCTYPE_BCD, bytes(12), NIBBLE_FIELD)
+    assert str(value) == "0.00"
+
+
+def test_encode_still_emits_only_c_and_d() -> None:
+    """The alternative nibbles are accepted on the way in, never produced."""
+    assert encode(RFCTYPE_BCD, Decimal("123.45"), NIBBLE_FIELD)[-1] & 0x0F == 0x0C
+    assert encode(RFCTYPE_BCD, Decimal("-123.45"), NIBBLE_FIELD)[-1] & 0x0F == 0x0D

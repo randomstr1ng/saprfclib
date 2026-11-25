@@ -547,16 +547,25 @@ def _encode_uc_fixed(value: str, field: FieldDesc, *, pad: str) -> bytes:
 # Sign nibbles (Pitfall 4): 0x0C for zero and positive values and 0x0D for negative ones,
 # both ways -- live capture of a purpose-built function module, the reference client
 # sending and the server returning both signs (tests/golden/serialization/bcd_sign.json).
-# DECODE also reads 0x0F and 0x0B as positive [ASSUMED]: tolerated, never seen. The value is modelled with decimal.Decimal exclusively —
-# NEVER float — for exact base-10 financial correctness (D-13).
+# On decode, 0x0A, 0x0C, 0x0E and 0x0F are positive and 0x0B and 0x0D negative, and a field
+# of all zero bytes is zero: live capture of the reference client reading a function
+# module that wrote each nibble directly (tests/golden/serialization/bcd_sign_nibbles.json).
+# The server passes the nibble through unchanged, so a peer can send any of them. ABAP
+# itself produced only 0x0C and 0x0D (PACK, arithmetic, CLEAR, a DB read). This read
+# 0x0B as positive until that capture: a negative amount arrived with its sign flipped.
+# A digit (0-9) in the sign position of a field that is not all zero is still refused:
+# no capture shows what the reference client does with one.
+# The value is modelled with decimal.Decimal exclusively — NEVER float — for exact
+# base-10 financial correctness (D-13).
 #
 # Security (threat T-02-09 / T-02-11): the buffer length is validated against the
 # descriptor-declared width before parsing, and every digit nibble must be 0-9
 # (a value > 9 in a digit position is a malformed packed-BCD byte) — a typed
 # ValueError is raised rather than producing silent garbage.
 
-_BCD_POSITIVE_SIGNS = frozenset({0x0C, 0x0F, 0x0B})
-_BCD_NEGATIVE_SIGN = 0x0D
+_BCD_POSITIVE_SIGNS = frozenset({0x0A, 0x0C, 0x0E, 0x0F})
+_BCD_NEGATIVE_SIGNS = frozenset({0x0B, 0x0D})
+_BCD_NEGATIVE_SIGN = 0x0D  # the one encode emits
 
 
 def _bcd_width(field: FieldDesc) -> int:
@@ -569,9 +578,10 @@ def _decode_bcd(data: bytes, field: FieldDesc) -> Decimal:
     """Decode packed BCD into a ``decimal.Decimal`` (never float).
 
     Reads nibbles high-then-low across the bytes; the final low nibble is the
-    sign (0x0D → negative; 0x0C/0x0F/0x0B → positive). Assembles the digit string
-    and scales by ``-field.decimals``. Rejects a short buffer and any non-digit
-    nibble in a digit position (threat T-02-09 / T-02-11).
+    sign (0x0B/0x0D → negative; 0x0A/0x0C/0x0E/0x0F → positive), and a field of all
+    zero bytes is zero (bcd_sign_nibbles.json). Assembles the digit string and scales
+    by ``-field.decimals``. Rejects a short buffer, a digit in the sign position, and
+    any non-digit nibble in a digit position (threat T-02-09 / T-02-11).
     """
     width = _bcd_width(field)
     if width <= 0:
@@ -585,8 +595,12 @@ def _decode_bcd(data: bytes, field: FieldDesc) -> Decimal:
         nibbles.append(byte >> 4)
         nibbles.append(byte & 0x0F)
 
+    if not any(span):
+        # All zero bytes: zero, as the reference client reads it (bcd_sign_nibbles.json,
+        # case Z), although 0x0 is not a sign nibble.
+        return Decimal((0, (0,) * (len(nibbles) - 1), -field.decimals))
     sign_nibble = nibbles.pop()
-    if sign_nibble == _BCD_NEGATIVE_SIGN:
+    if sign_nibble in _BCD_NEGATIVE_SIGNS:
         negative = True
     elif sign_nibble in _BCD_POSITIVE_SIGNS:
         negative = False

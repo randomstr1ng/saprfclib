@@ -80,13 +80,15 @@ def test_a_truncated_bcd_field_is_refused() -> None:
 
 
 def test_an_invalid_bcd_sign_nibble_is_refused() -> None:
-    """0xC/0xD/0xF are the valid signs; anything else is not a packed decimal.
+    """0xA-0xF are the sign nibbles; a digit in the sign position is refused.
 
     Guessing a sign here would flip the sign of a financial value without a word.
+    No capture shows a digit there (bcd_sign_nibbles.json covers 0xA-0xF and an
+    all-zero field), so it stays refused rather than guessed.
     """
     field = _field(RFCTYPE_BCD, nuc=4, uc=4, decimals=2)
     with pytest.raises(ValueError, match="sign nibble"):
-        decode(RFCTYPE_BCD, b"\x00\x00\x01\x2a", field)
+        decode(RFCTYPE_BCD, b"\x00\x00\x01\x25", field)
     # 0xC, 0xD and 0xF are valid and must still decode.
     # 4 bytes is 8 nibbles: 7 digit positions plus the sign, so 0000012 at
     # 2 decimals is 0.12.

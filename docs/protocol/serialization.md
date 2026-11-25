@@ -24,7 +24,7 @@ DECFLOAT section below (`decfloat_response.bin`).
     DECFLOAT, INT8, UTCLONG and the packed-decimal sign. Not every file under
     `tests/golden/serialization/` is a capture. The captured ones are `type_float`,
     `type_int4`, `type_date`, `type_time`, `type_bcd_p15_2`, `bcd_sign.json`,
-    `int8_utclong.json`, `string_xstring.json` and `decfloat_response.bin`. The rest (`type_char`,
+    `bcd_sign_nibbles.json`, `bcd_rounding.json`, `int8_utclong.json`, `string_xstring.json` and `decfloat_response.bin`. The rest (`type_char`,
     `type_int1`, `type_int2`, `type_num`, `type_byte`, `type_bcd`,
     `type_int8`, `type_utclong`, `type_utcsecond` … `type_cday`, `type_structure`,
     `type_table`) are constructed values, marked synthetic in their own JSON, and are not
@@ -154,18 +154,32 @@ value = wire_bytes.decode('utf-16-le')  # → "20260626"
 - A value with fewer digits is zero-filled from the left; `codec._encode_bcd` encodes 1234
   in a 3-byte field as `01 23 4C`. **[ASSUMED]** for a declared even precision — every
   capture so far has an odd digit count; a P-field with even precision would settle it.
-- **Zero / initial form:** all bytes `0x00` with sign nibble `0x0C` in the trailing nibble.
+- **Zero / initial form:** all bytes `0x00` with sign nibble `0x0C` in the trailing nibble. A
+  field of **all zero bytes**, no sign nibble at all, is also read as zero (see below).
 
 **Sign nibble summary:**
-| Nibble | Meaning |
-|--------|---------|
-| `0x0C` | Zero or positive |
-| `0x0D` | Negative |
+| Nibble | Meaning | Produced by ABAP |
+|--------|---------|------------------|
+| `0x0C` | Zero or positive | yes: `PACK`, arithmetic, `CLEAR`, a DB read |
+| `0x0D` | Negative | yes: arithmetic |
+| `0x0A`, `0x0E`, `0x0F` | Positive | no |
+| `0x0B` | **Negative** | no |
+| all bytes `0x00` | Zero | no |
+| `0x0`–`0x9` in a field that is not all zero | Refused | no |
 
-**Evidence:** both are live captures (2026-11-12, fixture `bcd_sign.json`): a purpose-built
-function module returned −123.45, 123.45 and 0 as `…12 34 5d`, `…12 34 5c` and `…00 0c`, and the
-reference client sent −0.01 and −98765.43 with `0x0D`. On decode saprfclib also reads `0x0F` and
-`0x0B` as positive **[ASSUMED]** — tolerated, never seen.
+**Evidence:** live captures. `bcd_sign.json` (2026-11-12): a purpose-built function module
+returned −123.45, 123.45 and 0 as `…12 34 5d`, `…12 34 5c` and `…00 0c`, and the reference client
+sent −0.01 and −98765.43 with `0x0D`. `bcd_sign_nibbles.json` (2026-11-25): a function module
+that writes each nibble directly into a DMBTR field. The server passes every nibble to the wire
+unchanged, so a peer can send any of them, and the reference client reads `0x0A`, `0x0C`, `0x0E` and
+`0x0F` as positive, `0x0B` and `0x0D` as negative, and twelve zero bytes as 0.00. ABAP's own paths
+(`PACK`, arithmetic, `CLEAR`, `SELECT` from SFLIGHT) produced only `0x0C` and `0x0D`.
+
+saprfclib decodes exactly that. It read `0x0B` as positive **until 2026-11-25** (an
+`[ASSUMED]` value), which delivered a negative amount with its sign flipped, and refused `0x0A`,
+`0x0E` and an all-zero field. Encoding emits only `0x0C` and `0x0D`. A digit in the sign position of a
+field that is not all zero stays refused: no capture shows how the reference client reads one
+(see [Known Gaps](#known-gaps)).
 
 **What the codec does** (`_encode_bcd` in `src/saprfclib/codec.py`): it scales the
 `Decimal` by `10**decimals` to an integer, refuses it if it has more digits than the field holds
@@ -201,8 +215,9 @@ the low nibble of the last byte, 0x0C=positive) on real SAP wire bytes. Fixture:
 **Codec:** `_decode_bcd` / `_encode_bcd` in `src/saprfclib/codec.py`
 implement the scheme above using `decimal.Decimal` exclusively — never `float`, which cannot
 represent base-10 decimals exactly and would corrupt financial values. The total digit count is
-derived from the descriptor's wire byte width (`width * 2 - 1`); decode accepts `0x0C`/`0x0F`/`0x0B`
-as positive and `0x0D` as negative, while encode emits only canonical `0x0C`/`0x0D`. A malformed
+derived from the descriptor's wire byte width (`width * 2 - 1`); decode accepts `0x0A`/`0x0C`/`0x0E`/`0x0F`
+as positive, `0x0B`/`0x0D` as negative and an all-zero field as zero, while encode emits only
+canonical `0x0C`/`0x0D`. A malformed
 buffer (too short) or a non-digit nibble in a digit position raises a typed `ValueError`
 (threats T-02-09 / T-02-11). The live `type_bcd_p15_2` fixture replays byte-for-byte
 (`tests/golden/serialization/test_codec_roundtrip.py`); Hypothesis round-trips cover sign nibbles, odd/even lengths, the zero/initial form, and max decimals.
@@ -654,7 +669,7 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 | CHAR, DATE, TIME | Live capture 2026-06-26; UTF-16LE, fixed width |
 | NUM, BYTE | Live capture 2026-11-12 (`string_xstring.json`): NUM(10) is UTF-16LE digits, `0000000042`; RAW(16) is the 16 raw bytes |
 | STRING, XSTRING | Live capture 2026-11-12 (`string_xstring.json`): UTF-8 + NUL / raw bytes, no length prefix |
-| BCD | Live captures; both sign nibbles (`type_bcd_p15_2`, `bcd_sign.json`) |
+| BCD | Live captures; every sign nibble and the all-zero field (`type_bcd_p15_2`, `bcd_sign.json`, `bcd_sign_nibbles.json`), rounding (`bcd_rounding.json`) |
 | DECF16, DECF34 | Live capture, purpose-built function module; little-endian DPD (`decfloat_response.bin`) |
 | INT8, UTCLONG | Live capture, purpose-built function module, 2026-11-12 (`int8_utclong.json`) |
 | STRUCTURE | Unicode layout from live `DDIF_FIELDINFO_GET` (see framing.md) |
@@ -669,6 +684,13 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 No dictionary type on kernel 793 carries them, so no capture is possible there; widths and
 byte order are **[ASSUMED]** (see [A1]). A release that has them, and a function module using
 them, would settle it.
+
+### A digit in a packed field's sign position
+
+Every sign nibble `0x0A`–`0x0F` and the all-zero field are captured (`bcd_sign_nibbles.json`). A
+field that is not all zero but carries `0x0`–`0x9` in the sign position is not: no capture shows
+whether the reference client refuses it or reads it with some sign. saprfclib refuses it. The
+probe module would settle it with one more case writing such a byte pattern.
 
 ### STRUCTURE non-Unicode offsets
 
