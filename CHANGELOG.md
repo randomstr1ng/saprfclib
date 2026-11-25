@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Python 3.15** is supported and tested in CI on Linux, Windows and macOS, plus the
+  free-threaded 3.15t build on Linux (#95).
+
 ### Fixed
 
 - **A password or user name the logon cannot carry is refused instead of altered** (#67).
