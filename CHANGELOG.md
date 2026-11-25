@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`reset_server_context()`** on `Connection` and `AsyncConnection` (#68) drops the ABAP
+  session state behind a connection (function-group globals, buffers, an open LUW) and keeps
+  the logon. It sends what the reference client sends (`SYSTEM_RESET_RFC_SERVER`, captured,
+  `reset_server_context.json`), and a live probe shows the state is cleared and kept again
+  afterwards. `ConnectionPool(reset_on_release=True)` and the async pool use it on every
+  release; a connection whose reset fails is closed instead of lent again.
+- **`conn.transaction()`** (#83): `with conn.transaction(): ...` commits the block's calls with
+  `BAPI_TRANSACTION_COMMIT` (`WAIT='X'` unless `wait=False`) and raises if its `RETURN` reports
+  an error; if the block raises, `BAPI_TRANSACTION_ROLLBACK` is called and the original error
+  propagates. `async with conn.transaction():` on async connections.
 - **Golden fixtures from a kernel 916 system** (ABAP Platform 2025) for the logon reply and an
   `STFC_CONNECTION` reply (#81). Both parse with the existing code; the logon reply carries
   the same tags as kernel 793 except `0x0006`. `docs/protocol/handshake.md` records the

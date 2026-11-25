@@ -340,6 +340,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0503    | capture     | Success marker (empty record) — present iff 0x0417 is absent         |
 | 0x0512    | capture     | Parameter section start / end of RFC exchange                        |
 | 0x0514    | capture     | Session token / connection ID (16B binary, random per session)       |
+| 0x0523    | capture     | Empty; last record of the reply to a server context reset (`reset_server_context.json`) |
 | 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — XML text in UTF-8 (NOT UTF-16LE)                    |
@@ -980,7 +981,49 @@ client's ids.
 
 ---
 
+### Resetting the server context
+
+`reset_server_context()` drops the ABAP session state behind a connection (function-group
+globals, buffers, an open LUW) and keeps the connection and its logon. On the wire it is an
+**ordinary zero-parameter call of `SYSTEM_RESET_RFC_SERVER`**, which the reference client sends
+without a metadata lookup first:
+
+```
+0502 len=0 | 000b "754" | 0102 "SYSTEM_RESET_RFC_SERVER" | 0512 len=0 | ffff
+```
+
+The reply is an ordinary reply that ends with an extra empty `0x0523` record. Live capture
+2026-11-25 (reference client, kernel 793), fixture
+`tests/golden/framing/reset_server_context.json`; saprfclib's request body is byte-identical to
+it (the GW header carries the connection's own conversation id and connection index).
+
+What it does was checked with a probe function module that keeps a value in its function group
+(`STATICS`): set a value, reset, read it back empty; set another value and it persists from call
+to call again; a second reset clears it again. The reference client and saprfclib behave
+identically (behavioural probe, 2026-11-25).
+
+`ConnectionPool(..., reset_on_release=True)` and `AsyncConnectionPool` call it on every release,
+so the next borrower starts with a clean session; a connection whose reset fails is closed
+instead of lent again. Over WebSocket RFC no reset was captured, and `reset_server_context()`
+refuses rather than sends one.
+
+---
+
 ## Open Questions
+
+!!! note "LOW: client attributes after a context reset"
+    In its first call after a reset, the reference client sends its client attributes again
+    (`0x0007`, `0x0011`, `0x0012`, `0x0013`, `0x0008`, `0x0006`, `0x0130`, UTF-16LE, some built
+    from the server's details: `0x0013` held the server's kernel release and the gateway
+    address, `0x0006` a truncated server host name). saprfclib does not. Session state behaves
+    the same either way (above); what differs is that the server then answers every later call
+    with the full logon attribute block, and records no client program name. How each value is
+    derived would have to be settled by more captures before saprfclib sends them.
+
+!!! note "LOW: GW header byte 25"
+    The reference client sets byte 25 of the GW header to `01` from its second call on;
+    saprfclib always sends `00`. The server accepts both (every live capture), and session
+    state is unaffected. What the byte signals is not known.
 
 !!! note "MEDIUM: Port 3200 (dispatcher) wire format"
     All captures used port 3300 (gateway). If a client connects directly to port 3200

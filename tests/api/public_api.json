@@ -63,7 +63,7 @@
   },
   "ConnectionPool": {
    "kind": "class",
-   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10) -> 'None'",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False) -> 'None'",
    "members": {
     "acquire": "(self, timeout: 'float' = 30.0) -> 'Iterator[Any]'",
     "close": "(self) -> 'None'",
@@ -75,7 +75,7 @@
     "stats": "(self) -> 'dict[str, float | int]'"
    },
    "stability": "stable",
-   "reason": "live acquire/call/release (tests/test_phase05_integration.py); session state is not reset on release yet (#68)"
+   "reason": "live acquire/call/release (tests/test_phase05_integration.py); reset_on_release verified with a live context reset (#68)"
   },
   "connect_async": {
    "kind": "function",
@@ -97,10 +97,12 @@
     "get_connection_attributes": "(self) -> 'ConnectionAttributes'",
     "get_unit_state": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'UnitState'",
     "ping": "(self) -> 'bool'",
+    "reset_server_context": "(self) -> 'None'",
     "retry_parked": "(self, tid: 'str') -> 'None'",
     "retry_parked_unit": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'None'",
     "rollback_unit": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'None'",
-    "sys_id": "property"
+    "sys_id": "property",
+    "transaction": "(self, *, wait: 'bool' = True) -> 'AsyncIterator[AsyncConnection]'"
    },
    "stability": "stable",
    "reason": "live async call (tests/test_phase09_integration.py)"
@@ -149,7 +151,7 @@
   },
   "AsyncConnectionPool": {
    "kind": "class",
-   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10) -> 'None'",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False) -> 'None'",
    "members": {
     "acquire": "(self, timeout: 'float' = 30.0) -> 'AsyncIterator[Any]'",
     "close": "(self) -> 'None'",

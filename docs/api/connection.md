@@ -5,6 +5,8 @@
       members:
         - call
         - ping
+        - reset_server_context
+        - transaction
         - close
         - get_connection_attributes
         - create_tid
