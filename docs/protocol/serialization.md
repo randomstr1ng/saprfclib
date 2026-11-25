@@ -24,7 +24,7 @@ DECFLOAT section below (`decfloat_response.bin`).
     DECFLOAT, INT8, UTCLONG and the packed-decimal sign. Not every file under
     `tests/golden/serialization/` is a capture. The captured ones are `type_float`,
     `type_int4`, `type_date`, `type_time`, `type_bcd_p15_2`, `bcd_sign.json`,
-    `bcd_sign_nibbles.json`, `bcd_rounding.json`, `int8_utclong.json`, `string_xstring.json` and `decfloat_response.bin`. The rest (`type_char`,
+    `bcd_sign_nibbles.json`, `bcd_rounding.json`, `basxml_character_references.json`, `int8_utclong.json`, `string_xstring.json` and `decfloat_response.bin`. The rest (`type_char`,
     `type_int1`, `type_int2`, `type_num`, `type_byte`, `type_bcd`,
     `type_int8`, `type_utclong`, `type_utcsecond` … `type_cday`, `type_structure`,
     `type_table`) are constructed values, marked synthetic in their own JSON, and are not

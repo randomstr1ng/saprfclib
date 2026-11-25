@@ -1588,8 +1588,31 @@ _BASXML_ENTITIES = {
 }
 
 
+# Longest digit run accepted in a character reference. Not a wire value: XML allows any
+# number of leading zeros, and this only bounds the scan on input the peer controls.
+_XML_REF_MAX_DIGITS = 32
+_DEC_DIGITS = frozenset("0123456789")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
 def _xml_unescape(text: str) -> str:
-    """Resolve the five predefined XML entities plus numeric character references.
+    """Resolve the five predefined XML entities and numeric character references.
+
+    What the server sends: ``& < > " '`` as decimal character references (``&#38;``,
+    ``&#60;``, ``&#62;``, ``&#34;``, ``&#39;``) and every other character as itself, in
+    UTF-8. Source: live capture, tests/golden/serialization/
+    basxml_character_references.json.
+
+    Everything else follows the XML 1.0 grammar rather than that one observation:
+
+    * a reference is decided by its value, not by how many digits spell it, so
+      ``&#x00000041;`` is ``A`` like ``&#x41;`` (the digit run is bounded, see
+      ``_XML_REF_MAX_DIGITS``);
+    * a value that is not a Unicode scalar value (a surrogate, or above U+10FFFF) is
+      refused, never turned into a lone surrogate;
+    * a bare ``&``, an unknown entity, an unterminated or malformed reference is
+      refused: it is not well-formed XML, and passing it through as text would hand
+      the caller something the server did not send.
 
     Deliberately hand-rolled rather than using an XML library: this payload arrives
     from the peer (trust boundary T-04-RESP), and the stdlib parsers accept DTDs and
@@ -1597,37 +1620,50 @@ def _xml_unescape(text: str) -> str:
     The BASXML grammar in play is elements with text content and nothing else — no
     attributes, no namespaces, no processing instructions — so a bounded scanner
     covers it exactly and offers no such surface.
+
+    Raises:
+        ValueError: on any of the refused forms above.
     """
     if "&" not in text:
         return text
     out: list[str] = []
     i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch != "&":
-            out.append(ch)
-            i += 1
-            continue
-        end = text.find(";", i + 1, i + 12)
+    n = len(text)
+    # "&#x" + digits + ";" is the longest form; entity names are shorter.
+    window = 3 + _XML_REF_MAX_DIGITS + 1
+    while i < n:
+        amp = text.find("&", i)
+        if amp == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:amp])
+        end = text.find(";", amp + 1, amp + window)
         if end == -1:
-            out.append(ch)
-            i += 1
-            continue
-        ref = text[i + 1 : end]
-        if ref.startswith("#"):
-            try:
-                code = int(ref[2:], 16) if ref[1:2].lower() == "x" else int(ref[1:])
-                out.append(chr(code))
-                i = end + 1
-                continue
-            except (ValueError, OverflowError):
-                pass
-        elif ref in _BASXML_ENTITIES:
-            out.append(_BASXML_ENTITIES[ref])
+            raise ValueError(
+                f"malformed XML at offset {amp}: '&' that starts no entity or character "
+                f"reference within {window} characters"
+            )
+        ref = text[amp + 1 : end]
+        if ref.startswith("#x"):
+            digits, base, allowed = ref[2:], 16, _HEX_DIGITS
+        elif ref.startswith("#"):
+            digits, base, allowed = ref[1:], 10, _DEC_DIGITS
+        else:
+            entity = _BASXML_ENTITIES.get(ref)
+            if entity is None:
+                raise ValueError(f"unknown XML entity &{ref}; at offset {amp}")
+            out.append(entity)
             i = end + 1
             continue
-        out.append(ch)
-        i += 1
+        if not digits or not set(digits) <= allowed:
+            raise ValueError(f"malformed XML character reference &{ref}; at offset {amp}")
+        code = int(digits, base)
+        if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+            raise ValueError(
+                f"XML character reference &{ref}; at offset {amp} is not a Unicode scalar value"
+            )
+        out.append(chr(code))
+        i = end + 1
     return "".join(out)
 
 
@@ -1665,7 +1701,8 @@ def decode_basxml_table(payload: bytes, table_name: str = "") -> list[dict[str, 
 
         <ET_DATA><item><LINE>VAL1|VAL2|VAL3</LINE></item></ET_DATA>
 
-    The payload is ASCII, not the UTF-16LE every other string-bearing tag uses, and
+    The payload is UTF-8, not the UTF-16LE every other string-bearing tag uses (a
+    German umlaut arrives as ``c3 a4``; basxml_character_references.json), and
     arrives split across 0x3c05 records that must be joined before parsing.
 
     Each ``<item>`` becomes one row and each element inside it a key. The observed
@@ -1702,7 +1739,13 @@ def decode_basxml_table(payload: bytes, table_name: str = "") -> list[dict[str, 
             f"BASXML payload for table {table_name!r} is {len(payload)} bytes, "
             f"over the {_BASXML_MAX_BYTES} byte cap"
         )
-    text = payload.decode("utf-8", errors="replace")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # Strict: a replacement character would deliver text the server did not send.
+        raise ValueError(
+            f"BASXML payload for table {table_name!r} is not valid UTF-8 at byte {exc.start}"
+        ) from None
 
     # Skip any XML declaration, DTD or comment before the root element. No server has
     # been observed sending one, but skipping them keeps the structure walk
