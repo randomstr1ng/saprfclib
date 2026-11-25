@@ -21,9 +21,20 @@ jobs:
           persist-credentials: false
 
       - name: Install Trivy
+        # A pinned release, checked against the SHA-256 published in that release's
+        # checksums file, instead of an installer script from a moving branch that
+        # installs whatever release is newest. Bump TRIVY_VERSION and TRIVY_SHA256
+        # together: Dependabot does not update these.
+        env:
+          TRIVY_VERSION: "0.76.2"
+          TRIVY_SHA256: "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin latest
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sfLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${tarball}"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          sudo tar -xzf "$RUNNER_TEMP/$tarball" -C /usr/local/bin trivy
+          trivy --version
 
       - name: Dependency vulnerability scan (HIGH/CRITICAL)
         # Scans pyproject.toml / requirements / installed packages for known CVEs.
@@ -61,7 +72,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install Semgrep
-        run: pip install semgrep
+        # Exact versions with hashes (.github/requirements/semgrep.txt), so a new
+        # upstream release cannot run here unreviewed.
+        run: 'pip install --require-hashes --only-binary=:all: -r .github/requirements/semgrep.txt'
 
       - name: SAST scan
         # p/python      — Python security rules (dangerous builtins, injection, etc.)
@@ -98,5 +111,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pip install zizmor
+          pip install --require-hashes --only-binary=:all: -r .github/requirements/zizmor.txt
           zizmor --persona=regular .github/workflows/
