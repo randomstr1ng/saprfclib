@@ -200,8 +200,12 @@ def test_a_password_that_cannot_be_encoded_fails_loudly() -> None:
     Silently replacing a character would authenticate as a different credential
     than the caller supplied, and the failure would look like a wrong password.
     """
-    with pytest.raises(UnicodeEncodeError):
+    with pytest.raises(ValueError, match="ISO-8859-1") as info:
         _scramble_password_ws("pass中word", seed=1)
+    # No trace of the password: not in the message, and no UnicodeEncodeError
+    # (whose ``object`` attribute is the whole password) chained as the cause.
+    assert "pass中word" not in str(info.value) and "中" not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
 def test_the_invoke_key_machinery_is_gone() -> None:

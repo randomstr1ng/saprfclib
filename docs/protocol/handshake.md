@@ -513,6 +513,16 @@ kt (64-byte key table):
     55d7027784 13acddf9b8311 6610e6dfa   (whitespace cosmetic)
 ```
 
+**The password codepage is ISO-8859-1, one byte per character**, and so are the user
+(`0x0111`) and client (`0x0114`) records. A character outside it cannot be sent, and the
+reference client refuses such a credential before sending the logon. Behavioural probe
+(2026-11-25): a password containing `ä` goes out as a 3-byte body for 3 characters, and a
+user `MÜLLERX` as `4d dc 4c 4c 45 52 58`; a password or user containing `€` is refused
+client-side with `RFC_CONVERSION_FAILURE` ("Could not convert from 4103 codepage to 1100
+codepage") and no logon request is sent. saprfclib does the same, raising `ValueError` before
+opening a socket: substituting a character would log on with a different credential, and the
+failure would count against the user's failed-logon limit.
+
 Implemented as `_scramble_password` in `src/saprfclib/connection.py`, verified two ways: a live
 logon reaching READY (`0x0420 == 0`), and the `0x0117` record of seven reference-client logons
 (2026-11-12, each with its own seed) descrambling to the known password. Two of them, made

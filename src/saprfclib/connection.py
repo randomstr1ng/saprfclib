@@ -409,11 +409,54 @@ def _scramble_password(passwd: str, *, seed: int | None = None) -> bytes:
     if seed is None:
         seed = int.from_bytes(os.urandom(4), "little")
     seed &= 0xFFFFFFFF
-    # Single-byte (passthrough) codepage for the password bytes; non-encodable
-    # chars are replaced rather than raising (never echoes the plaintext).
-    body = bytearray(passwd.encode("latin-1", "replace"))
+    body = bytearray(_password_bytes(passwd))
     _ab_scramble(body, seed)
     return struct.pack("<I", seed) + bytes(body)
+
+
+def _logon_text(value: str, what: str) -> bytes:
+    """A logon text field (user, client) as the logon sends it: ISO-8859-1.
+
+    This replaced ``ascii`` with ``"replace"``, which turned a user name such as
+    ``MÜLLER`` into ``M?LLER`` and logged on as somebody else. The reference client
+    sends the user one byte per character in ISO-8859-1 (behavioural probe: ``Ü``
+    arrives as ``0xDC`` in 0x0111) and refuses a character outside it before sending
+    the logon (``RFC_CONVERSION_FAILURE``). A user name is not a secret, but the
+    message still leaves the value out: it may be logged next to the password field.
+    """
+    try:
+        return value.encode("latin-1")
+    except UnicodeEncodeError:
+        pass
+    raise ValueError(
+        f"the logon {what} contains a character outside ISO-8859-1 (Latin-1), which a "
+        f"logon cannot carry; the logon was not sent"
+    ) from None
+
+
+def _password_bytes(passwd: str) -> bytes:
+    """The password as the logon sends it: one byte per character, ISO-8859-1.
+
+    A character outside ISO-8859-1 cannot be sent. Replacing it (with ``?``) would
+    log on with a different password, a failure that counts against the user's
+    failed-logon limit. The reference client refuses such a password before sending
+    anything (behavioural probe: ``RFC_CONVERSION_FAILURE``, "Could not convert from
+    4103 codepage to 1100 codepage", and no logon request on the wire), and so does
+    this.
+
+    The error names neither the character nor its position, and is raised without
+    the ``UnicodeEncodeError`` as its cause: that exception carries the whole
+    password in its ``object`` attribute, where a traceback formatter or an error
+    reporter could pick it up.
+    """
+    try:
+        return passwd.encode("latin-1")
+    except UnicodeEncodeError:
+        pass
+    raise ValueError(
+        "the password contains a character that a logon cannot carry: only ISO-8859-1 "
+        "(Latin-1) characters can be sent; the logon was not sent"
+    ) from None
 
 
 def _scramble_password_ws(passwd: str, *, seed: int | None = None) -> bytes:
@@ -436,10 +479,8 @@ def _scramble_password_ws(passwd: str, *, seed: int | None = None) -> bytes:
     if seed is None:
         seed = int.from_bytes(os.urandom(4), "little")
     seed &= 0xFFFFFFFF
-    # latin-1 maps each code point below 256 to one byte and raises above it,
-    # rather than silently substituting -- a password this cannot represent must
-    # fail loudly here, not authenticate as something else.
-    body = bytearray(passwd.encode("latin-1"))
+    # One byte per character, refused rather than substituted (see _password_bytes).
+    body = bytearray(_password_bytes(passwd))
     _ab_scramble(body, seed)
     return struct.pack("<I", seed) + bytes(body)
 
@@ -844,6 +885,12 @@ def _resolve_credentials(
     anonymously, it is a missing environment variable or a typo, and turning it into
     a silent anonymous attempt would replace a clear error with a confusing one.
     """
+    # Refuse what the logon cannot carry before any socket is opened (see _logon_text
+    # and _password_bytes): nothing is sent, so no failed attempt is counted.
+    if user is not None:
+        _logon_text(user, "user")
+    if passwd is not None:
+        _password_bytes(passwd)
     if snc or (snc is None and snc_lib is not None):
         return user, passwd
     if user is None and passwd is None:
@@ -2624,14 +2671,14 @@ class Connection:
             _tlv_ext(0x0103, _TLV_VER),
             _tlv_ext(0x0106, _TLV_CP),
             _tlv_ext(0x0514, session_token),
-            _tlv_ext(_TAG_CLIENT, client.encode("ascii", "replace")),
+            _tlv_ext(_TAG_CLIENT, _logon_text(client, "client")),
         ]
         # No credentials: omit the user and password records rather than sending
         # empty ones. An empty password is still a password attempt as far as the
         # server is concerned, and repeated attempts against a real account name
         # count towards lockout; omitting the fields cannot.
         if user is not None:
-            parts.append(_tlv_ext(_TAG_USER, user.encode("ascii", "replace")))
+            parts.append(_tlv_ext(_TAG_USER, _logon_text(user, "user")))
         if passwd is not None:
             parts.append(_tlv_ext(_TAG_PASSWORD, _scramble_password(passwd, seed=seed)))
         parts += [
