@@ -232,6 +232,18 @@ code, matching the SDK's `LANG` connection option. A one-character code is passe
 untouched; a two-character code is converted to its SAP code first. Both end up as one byte in
 the frame.
 
+**The one-character code is case-sensitive.** `a` (Afrikaans) and `A` (Arabic) are different
+languages, and so are `e` and `E`. The reference client sends a one-character code exactly as
+given: live capture 2026-11-25, `lang="a"` and `lang="e"` arrive as `a` and `e` in `0x0115`, and the
+server refuses both with "Select one of the installed languages" while `E` logs on. The ISO code is
+case-insensitive: `AF` and `af` both become `a`. saprfclib did uppercase a one-character code until
+0.2.1, which turned a lowercase key into a different language; it now sends it unchanged.
+
+**`0x0011` differs from `0x0115` in the reference client.** It sent `E` in `0x0011` for every
+logon language tried (`a`, `e`, `AF`, `E`), while `0x0115` carried the requested language.
+saprfclib sends the logon language in both. The server accepted and refused the same logons
+either way, so what `0x0011` controls is not known (open question OQ-C07).
+
 The SDK behaves the same way. Its `LANG` handling converts any input longer than one character
 through the SAP kernel's language routine before the logon frame is built, and refuses the
 connection with `RFC_INVALID_PARAMETER` when the code will not map. `pyrfc` adds nothing here —
@@ -572,6 +584,7 @@ by a live logon. Behaviour for non-ASCII passwords is untested — treat it as a
 |---|----------|---------|-------|
 | OQ-C02 | Tag 0x0106 (11 bytes): codepage negotiation detail | MEDIUM | Present in both request and response; binary content not decoded |
 | OQ-C03 | Tag 0x0101 (8 bytes): bytes 1–2 of the response, and the meaning of the client's value `0301010101010000` | MEDIUM | Response bytes 0, 3, 4–7 are decoded under "The `0x0101` encoding header"; bytes 1–2 need a big-endian capture |
+| OQ-C07 | Tag 0x0011 in the logon request | LOW | The reference client sends `E` there whatever the logon language; saprfclib sends the logon language. A logon where the two lead to different results would show what it controls |
 | OQ-C06 | Tag 0x0161 (1 byte) in the logon reply | LOW | Always `00` so far (kernels 793 and 916); a system where it differs would show what it means |
 
 ---

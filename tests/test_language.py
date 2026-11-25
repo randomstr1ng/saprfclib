@@ -61,9 +61,19 @@ def test_known_pairs(iso: str, sap: str) -> None:
     assert language_sap_to_iso(sap) == iso
 
 
-def test_conversion_is_case_insensitive() -> None:
+def test_iso_codes_are_case_insensitive_sap_codes_are_not() -> None:
+    """ISO "en" and "EN" are one language; SAP "a" and "A" are two.
+
+    The reference conversion maps "af" and "AF" alike to "a", and knows no SAP
+    code "e" at all (it raises). This asserted "e" -> "EN" until the capture for
+    #66 showed the server treats "e" as a different, uninstalled language.
+    """
     assert language_iso_to_sap("en") == "E"
-    assert language_sap_to_iso("e") == "EN"
+    assert language_iso_to_sap("af") == "a"
+    assert language_sap_to_iso("a") == "AF"
+    assert language_sap_to_iso("A") == "AR"
+    with pytest.raises(ValueError, match="unknown SAP language code"):
+        language_sap_to_iso("e")
 
 
 def test_unknown_iso_code_raises_rather_than_returning_garbage() -> None:
@@ -111,7 +121,10 @@ def test_non_str_input_raises_valueerror_not_typeerror() -> None:
     ("given", "expected"),
     [
         ("E", "E"),  # SAP code passes through
-        ("e", "E"),  # uppercased
+        ("e", "e"),  # case kept: "e" is not "E" to the server (#66)
+        ("a", "a"),  # Afrikaans, not Arabic
+        ("AF", "a"),  # ISO converted to a lowercase SAP code
+        ("af", "a"),
         ("EN", "E"),  # ISO converted
         ("en", "E"),
         ("DE", "D"),

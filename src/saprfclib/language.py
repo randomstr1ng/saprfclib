@@ -9,6 +9,10 @@
 # fixture tests/golden/framing/logon_request.bin — TLV tags 0x0115 and 0x0011 each
 # hold one ASCII byte, b"E", for a logon in English.
 #
+# The one-character code is case-sensitive ("a" Afrikaans, "A" Arabic) and goes on
+# the wire exactly as given: live capture of the reference client, lang="a" arrives
+# as a in 0x0115 (#66). Only the two-character ISO code is case-insensitive.
+#
 # The SAP RFC SDK also accepts the two-character ISO code on its LANG connection
 # option, purely as a client-side convenience: it converts anything longer than one
 # character to the corresponding one-character SAP code before the logon frame is
@@ -38,8 +42,15 @@ __all__ = [
 ]
 
 # One-character SAP language code → two-character ISO code.
-# Round-trip verified in both directions; 35 pairs, no mismatches.
+# Round-trip verified in both directions; 41 pairs, no mismatches. The SAP code is
+# case-sensitive: "a" (Afrikaans) and "A" (Arabic) are different languages, and the
+# reference conversion knows no "e" at all. Probed over every ASCII letter and digit.
 _SAP_TO_ISO: dict[str, str] = {
+    "a": "AF",  # Afrikaans
+    "b": "IS",  # Icelandic
+    "c": "CA",  # Catalan
+    "d": "SH",  # Serbian (Latin) — SAP-specific code
+    "i": "ID",  # Indonesian
     "A": "AR",  # Arabic
     "B": "HE",  # Hebrew
     "C": "CS",  # Czech
@@ -116,7 +127,8 @@ def language_sap_to_iso(sap_code: str) -> str:
     Mirrors ``RfcLanguageSapToIso`` in the SAP RFC SDK.
 
     Args:
-        sap_code: One-character SAP code, e.g. ``"E"``. Case-insensitive.
+        sap_code: One-character SAP code, e.g. ``"E"``. Case-sensitive: ``"a"`` is
+            Afrikaans and ``"A"`` Arabic, as in the SDK.
 
     Returns:
         The two-character ISO code, e.g. ``"EN"``.
@@ -127,7 +139,7 @@ def language_sap_to_iso(sap_code: str) -> str:
     """
     if not isinstance(sap_code, str):
         raise ValueError(f"SAP language code must be a str, got {type(sap_code).__name__!r}")
-    code = sap_code.strip().upper()
+    code = sap_code.strip()
     if len(code) != 1:
         raise ValueError(f"SAP language code must be exactly one character, got {sap_code!r}")
     try:
@@ -144,16 +156,21 @@ def normalize_logon_language(lang: str) -> str:
 
     Accepts either form, matching the SDK's ``LANG`` connection option:
 
-    * one character — taken as the SAP code and passed through unchanged, with no
-      lookup. Custom languages installed on a system are not in any table, and the
-      SDK does not validate one-character input either.
-    * two characters — treated as an ISO code and converted.
+    * one character — taken as the SAP code and passed through unchanged, case
+      included, with no lookup. The case is significant: ``"a"`` is Afrikaans and
+      ``"A"`` Arabic. The reference client sends a one-character code exactly as
+      given (live capture: ``"a"`` and ``"e"`` arrive as ``a`` and ``e`` in 0x0115,
+      and the server rejects ``"e"`` as not installed where ``"E"`` logs on).
+      Custom languages installed on a system are in no table, and the SDK does not
+      validate one-character input either.
+    * two characters — treated as an ISO code (case-insensitive) and converted.
 
     Args:
-        lang: One-character SAP code or two-character ISO code. Case-insensitive.
+        lang: One-character SAP code (case-sensitive) or two-character ISO code
+            (case-insensitive).
 
     Returns:
-        The one-character SAP language code, uppercased.
+        The one-character SAP language code.
 
     Raises:
         ValueError: If ``lang`` is neither one nor two characters, is non-ASCII, or
@@ -161,7 +178,7 @@ def normalize_logon_language(lang: str) -> str:
     """
     if not isinstance(lang, str):
         raise ValueError(f"lang must be a str, got {type(lang).__name__!r}")
-    code = lang.strip().upper()
+    code = lang.strip()
     if len(code) == 2:
         code = language_iso_to_sap(code)
     elif len(code) != 1:

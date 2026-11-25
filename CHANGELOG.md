@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A one-character logon language keeps its case** (#66). It was uppercased, but SAP
+  language codes are case-sensitive: `lang="a"` (Afrikaans) logged on as `A` (Arabic). It is
+  now sent exactly as given, as the reference client sends it, and `language_sap_to_iso` is
+  case-sensitive too. The language table gains the five lowercase codes the reference
+  conversion knows (`a` Afrikaans, `b` Icelandic, `c` Catalan, `d` Serbian Latin,
+  `i` Indonesian), so `lang="AF"` now works.
 - **A password or user name the logon cannot carry is refused instead of altered** (#67).
   The classic logon replaced a character outside ISO-8859-1 with `?`, so it logged on with
   a different credential, and the failed attempt counted against the user's lockout limit.

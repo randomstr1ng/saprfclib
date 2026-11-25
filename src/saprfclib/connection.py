@@ -324,7 +324,12 @@ def _encode_logon_language(lang: str) -> bytes:
 
     A two-character ISO code is converted to that one character first, matching
     what the SAP RFC SDK does with its LANG connection option (see
-    saprfclib.language).
+    saprfclib.language). A one-character code keeps its case: SAP codes are
+    case-sensitive, and the reference client sends ``"a"`` as ``a`` (#66).
+
+    The reference client puts ``E`` in 0x0011 whatever the logon language, where
+    this sends the logon language in both tags; what 0x0011 controls is an open
+    question (docs/protocol/handshake.md, OQ-C07).
     """
     return normalize_logon_language(lang).encode("ascii")
 

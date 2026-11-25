@@ -170,7 +170,11 @@ conn = saprfclib.connect(
 conn = saprfclib.connect(..., lang="E")    # or the one-character SAP code
 ```
 
-`lang` defaults to `"E"` (English). Input is case-insensitive.
+`lang` defaults to `"E"` (English). A two-character ISO code is case-insensitive
+(`"en"` and `"EN"` are the same). A one-character SAP code is **case-sensitive** and
+sent exactly as given, as the C SDK does: `"a"` is Afrikaans and `"A"` Arabic, and
+`"e"` is not English. A system refuses a language it has not installed with
+"Select one of the installed languages".
 
 The RFC logon frame itself only ever carries **one character** — the SAP language
 code from the ABAP `SPRAS` domain. A two-character ISO code is converted before the
