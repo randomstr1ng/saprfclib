@@ -1,0 +1,282 @@
+{
+ "message_type": "RFC_LOGON_REPLY",
+ "capture_source": "live capture 2026-11-25: saprfclib logging on to an ABAP Platform 2025 system (SAP_BASIS 816 SP01, kernel 916, Unicode, codepage 4103) and calling STFC_CONNECTION. The reference client's capture of the same exchange carries the same tag sequence.",
+ "evidence": "tier 1 live capture. The server address in 0x0007 and 0x0018 is replaced by the documentation address 198.51.100.9, same length in UTF-16LE, so every length field is unchanged.",
+ "ni_header_length": 4,
+ "notes": [
+  "Accepted logon reply from kernel 916. Tag sequence: 0x0101 0x0103 0x0106 0x0161 0x0016 0x0450 0x0451 0x0452 0x0453 0x0007 0x0020 0x0021 0x0018 0x0008 0x0011 0x0013 0x0012 0x0130 0x0150 0x0151 0x0152 0x0500 0x0503 0x0514 0x0420 0x0512 0x0130 0x0667.",
+  "Compared with kernel 793 (the reference client's logon to SAP_BASIS 758, captured the same day): identical tags in the same order, except that 793 also sends 0x0006 (18 bytes) after 0x0012.",
+  "0x0161 (1 byte, value 00) is sent by both kernels; its meaning is not known.",
+  "No 0x0454 and no 0x0527 record appears on this kernel."
+ ],
+ "expected_parse": {
+  "sys_id": "A4H",
+  "sys_number": "00",
+  "partner_host": "vhcala4hci",
+  "client": "001",
+  "user": "DEVELOPER",
+  "language": "E",
+  "partner_rel": "816",
+  "kernel_rel": "916",
+  "codepage": "4103",
+  "unicode_mode": true
+ },
+ "field_annotations": [
+  {
+   "offset": 0,
+   "length": 4,
+   "name": "ni_payload_length",
+   "value": "",
+   "type": "fixed",
+   "note": "BE uint32 = 710"
+  },
+  {
+   "offset": 4,
+   "length": 74,
+   "name": "gw_header",
+   "value": "",
+   "type": "variable",
+   "note": "GW RFC header, type 0x06CB; carries the conversation id"
+  },
+  {
+   "offset": 78,
+   "length": 6,
+   "name": "tag_0x0000",
+   "value": "",
+   "type": "fixed",
+   "note": "empty record"
+  },
+  {
+   "offset": 84,
+   "length": 14,
+   "name": "tag_0x0101",
+   "value": "0101010504010003",
+   "type": "fixed",
+   "note": "capabilities"
+  },
+  {
+   "offset": 98,
+   "length": 10,
+   "name": "tag_0x0103",
+   "value": "00000e0b",
+   "type": "fixed",
+   "note": "version"
+  },
+  {
+   "offset": 108,
+   "length": 17,
+   "name": "tag_0x0106",
+   "value": "0401000300030200000023",
+   "type": "fixed",
+   "note": "codepage block"
+  },
+  {
+   "offset": 125,
+   "length": 7,
+   "name": "tag_0x0161",
+   "value": "00",
+   "type": "fixed",
+   "note": "unknown, 1 byte"
+  },
+  {
+   "offset": 132,
+   "length": 14,
+   "name": "tag_0x0016",
+   "value": "3100310030003000",
+   "type": "fixed",
+   "note": "logon codepage '1100'"
+  },
+  {
+   "offset": 146,
+   "length": 12,
+   "name": "tag_0x0450",
+   "value": "410034004800",
+   "type": "fixed",
+   "note": "sys_id"
+  },
+  {
+   "offset": 158,
+   "length": 26,
+   "name": "tag_0x0451",
+   "value": "",
+   "type": "fixed",
+   "note": "system description"
+  },
+  {
+   "offset": 184,
+   "length": 10,
+   "name": "tag_0x0452",
+   "value": "30003000",
+   "type": "fixed",
+   "note": "sys_number"
+  },
+  {
+   "offset": 194,
+   "length": 26,
+   "name": "tag_0x0453",
+   "value": "",
+   "type": "fixed",
+   "note": "partner_host"
+  },
+  {
+   "offset": 220,
+   "length": 36,
+   "name": "tag_0x0007",
+   "value": "",
+   "type": "variable",
+   "note": "server address (scrubbed)"
+  },
+  {
+   "offset": 256,
+   "length": 98,
+   "name": "tag_0x0020",
+   "value": "",
+   "type": "fixed",
+   "note": "unknown block, all zero"
+  },
+  {
+   "offset": 354,
+   "length": 26,
+   "name": "tag_0x0021",
+   "value": "",
+   "type": "fixed",
+   "note": "unknown block, all zero"
+  },
+  {
+   "offset": 380,
+   "length": 30,
+   "name": "tag_0x0018",
+   "value": "",
+   "type": "variable",
+   "note": "server address (scrubbed)"
+  },
+  {
+   "offset": 410,
+   "length": 40,
+   "name": "tag_0x0008",
+   "value": "",
+   "type": "fixed",
+   "note": "instance name"
+  },
+  {
+   "offset": 450,
+   "length": 8,
+   "name": "tag_0x0011",
+   "value": "3300",
+   "type": "fixed",
+   "note": "language"
+  },
+  {
+   "offset": 458,
+   "length": 14,
+   "name": "tag_0x0013",
+   "value": "3900310036002000",
+   "type": "fixed",
+   "note": "kernel_rel"
+  },
+  {
+   "offset": 472,
+   "length": 14,
+   "name": "tag_0x0012",
+   "value": "3800310036002000",
+   "type": "fixed",
+   "note": "partner_rel"
+  },
+  {
+   "offset": 486,
+   "length": 22,
+   "name": "tag_0x0130",
+   "value": "5300410050004c005300590053005500",
+   "type": "fixed",
+   "note": "program name"
+  },
+  {
+   "offset": 508,
+   "length": 30,
+   "name": "tag_0x0150",
+   "value": "",
+   "type": "fixed",
+   "note": "user"
+  },
+  {
+   "offset": 538,
+   "length": 12,
+   "name": "tag_0x0151",
+   "value": "300030003100",
+   "type": "fixed",
+   "note": "client"
+  },
+  {
+   "offset": 550,
+   "length": 8,
+   "name": "tag_0x0152",
+   "value": "4500",
+   "type": "fixed",
+   "note": "language"
+  },
+  {
+   "offset": 558,
+   "length": 6,
+   "name": "tag_0x0500",
+   "value": "",
+   "type": "fixed",
+   "note": "call end"
+  },
+  {
+   "offset": 564,
+   "length": 6,
+   "name": "tag_0x0503",
+   "value": "",
+   "type": "fixed",
+   "note": "marker"
+  },
+  {
+   "offset": 570,
+   "length": 22,
+   "name": "tag_0x0514",
+   "value": "d92a0c18f67b6502a331382de88430ed",
+   "type": "variable",
+   "note": "session token"
+  },
+  {
+   "offset": 592,
+   "length": 10,
+   "name": "tag_0x0420",
+   "value": "00000000",
+   "type": "fixed",
+   "note": "return code"
+  },
+  {
+   "offset": 602,
+   "length": 6,
+   "name": "tag_0x0512",
+   "value": "",
+   "type": "fixed",
+   "note": "marker"
+  },
+  {
+   "offset": 608,
+   "length": 86,
+   "name": "tag_0x0130",
+   "value": "",
+   "type": "fixed",
+   "note": "program name"
+  },
+  {
+   "offset": 694,
+   "length": 14,
+   "name": "tag_0x0667",
+   "value": "0000000000406b40",
+   "type": "variable",
+   "note": "server duration"
+  },
+  {
+   "offset": 708,
+   "length": 6,
+   "name": "terminator",
+   "value": "ffff",
+   "type": "fixed",
+   "note": "end of TLV stream"
+  }
+ ]
+}

@@ -267,6 +267,7 @@ first will hide the bug, because the walk returns before it can drift.
 | 0x0151 | 6 | "001" | Client number |
 | 0x0152 | 2 | "E" | Language |
 | 0x0016 | 8 | "1100" | Client codepage as reported |
+| 0x0161 | 1 | 0x00 | Meaning not known; sent by kernels 793 and 916, right after `0x0106` |
 | 0x0420 | 4 | 0x00000000 | RFC return code (0 = success) |
 | 0x0514 | 16 | binary | Session token |
 
@@ -274,6 +275,13 @@ first will hide the bug, because the walk returns before it can drift.
 answers with none of `0x0450`/`0x0451`/`0x0452`/`0x0453` — it identifies itself through
 `0x0008` (`host_SID_instance`), `0x0006`, `0x0007` and `0x0018` instead. See
 `tests/golden/framing/signon_incomplete_752_response.bin`.
+
+**Kernel 916 (ABAP Platform 2025, SAP_BASIS 816) sends the same tags as kernel 793, in the
+same order, except `0x0006`**, which 793 sends after `0x0012` (18 bytes) and 916 omits. Neither
+`0x0454` nor `0x0527` appears, in the logon reply or in an ordinary call reply. The existing parser
+reads both unchanged. Live captures 2026-11-25 of saprfclib and the reference client against both
+kernels; fixtures `tests/golden/framing/logon_reply_kernel916.bin` and
+`stfc_connection_response_kernel916.bin`, replayed by `tests/test_kernel916.py`.
 
 Consequence for callers: `ConnectionAttributes.sys_id` can legitimately be empty. Nothing
 may key on it unconditionally — the in-process descriptor cache in particular, since two
@@ -564,7 +572,7 @@ by a live logon. Behaviour for non-ASCII passwords is untested — treat it as a
 |---|----------|---------|-------|
 | OQ-C02 | Tag 0x0106 (11 bytes): codepage negotiation detail | MEDIUM | Present in both request and response; binary content not decoded |
 | OQ-C03 | Tag 0x0101 (8 bytes): bytes 1–2 of the response, and the meaning of the client's value `0301010101010000` | MEDIUM | Response bytes 0, 3, 4–7 are decoded under "The `0x0101` encoding header"; bytes 1–2 need a big-endian capture |
-| OQ-C05 | Non-ASCII password codepage | LOW | Single-byte scrambling confirmed for ASCII only |
+| OQ-C06 | Tag 0x0161 (1 byte) in the logon reply | LOW | Always `00` so far (kernels 793 and 916); a system where it differs would show what it means |
 
 ---
 

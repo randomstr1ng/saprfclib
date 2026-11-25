@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Golden fixtures from a kernel 916 system** (ABAP Platform 2025) for the logon reply and an
+  `STFC_CONNECTION` reply (#81). Both parse with the existing code; the logon reply carries
+  the same tags as kernel 793 except `0x0006`. `docs/protocol/handshake.md` records the
+  comparison and the so far unexplained `0x0161`.
 - **Python 3.15** is supported and tested in CI on Linux, Windows and macOS, plus the
   free-threaded 3.15t build on Linux (#95).
 

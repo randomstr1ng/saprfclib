@@ -1,0 +1,151 @@
+{
+ "message_type": "RFC_INVOKE_RESPONSE",
+ "capture_source": "live capture 2026-11-25: saprfclib logging on to an ABAP Platform 2025 system (SAP_BASIS 816 SP01, kernel 916, Unicode, codepage 4103) and calling STFC_CONNECTION. The reference client's capture of the same exchange carries the same tag sequence.",
+ "evidence": "tier 1 live capture, unmodified: the reply carries no address or host name of the capture side.",
+ "ni_header_length": 4,
+ "notes": [
+  "STFC_CONNECTION reply from kernel 916 for REQUTEXT='hello'. Ordinary tag stream: 0x0500 0x0503 0x0514 0x0420 0x0512, the two export parameters, 0x0130, 0x0667. No leading 0x0527 record."
+ ],
+ "expected_parse": {
+  "ECHOTEXT": "hello",
+  "RESPTEXT_prefix": "SAP R/3 Rel. 816   Sysid: A4H"
+ },
+ "field_annotations": [
+  {
+   "offset": 0,
+   "length": 4,
+   "name": "ni_payload_length",
+   "value": "",
+   "type": "fixed",
+   "note": "BE uint32 = 1356"
+  },
+  {
+   "offset": 4,
+   "length": 74,
+   "name": "gw_header",
+   "value": "",
+   "type": "variable",
+   "note": "GW RFC header, type 0x06CB; carries the conversation id"
+  },
+  {
+   "offset": 78,
+   "length": 6,
+   "name": "tag_0x0000",
+   "value": "",
+   "type": "fixed",
+   "note": "empty record"
+  },
+  {
+   "offset": 84,
+   "length": 6,
+   "name": "tag_0x0500",
+   "value": "",
+   "type": "fixed",
+   "note": "call end"
+  },
+  {
+   "offset": 90,
+   "length": 6,
+   "name": "tag_0x0503",
+   "value": "",
+   "type": "fixed",
+   "note": "marker"
+  },
+  {
+   "offset": 96,
+   "length": 22,
+   "name": "tag_0x0514",
+   "value": "d92a0c18f67b6502a331382de88430ed",
+   "type": "variable",
+   "note": "session token"
+  },
+  {
+   "offset": 118,
+   "length": 10,
+   "name": "tag_0x0420",
+   "value": "00000000",
+   "type": "fixed",
+   "note": "return code"
+  },
+  {
+   "offset": 128,
+   "length": 6,
+   "name": "tag_0x0512",
+   "value": "",
+   "type": "fixed",
+   "note": "marker"
+  },
+  {
+   "offset": 134,
+   "length": 22,
+   "name": "tag_0x0205",
+   "value": "4500430048004f005400450058005400",
+   "type": "fixed",
+   "note": "param decl"
+  },
+  {
+   "offset": 156,
+   "length": 22,
+   "name": "tag_0x0205",
+   "value": "52004500530050005400450058005400",
+   "type": "fixed",
+   "note": "param decl"
+  },
+  {
+   "offset": 178,
+   "length": 22,
+   "name": "tag_0x0201",
+   "value": "4500430048004f005400450058005400",
+   "type": "fixed",
+   "note": "param name"
+  },
+  {
+   "offset": 200,
+   "length": 516,
+   "name": "tag_0x0203",
+   "value": "",
+   "type": "fixed",
+   "note": "param value"
+  },
+  {
+   "offset": 716,
+   "length": 22,
+   "name": "tag_0x0201",
+   "value": "52004500530050005400450058005400",
+   "type": "fixed",
+   "note": "param name"
+  },
+  {
+   "offset": 738,
+   "length": 516,
+   "name": "tag_0x0203",
+   "value": "",
+   "type": "fixed",
+   "note": "param value"
+  },
+  {
+   "offset": 1254,
+   "length": 86,
+   "name": "tag_0x0130",
+   "value": "",
+   "type": "fixed",
+   "note": "program name"
+  },
+  {
+   "offset": 1340,
+   "length": 14,
+   "name": "tag_0x0667",
+   "value": "0000000000606640",
+   "type": "variable",
+   "note": "server duration"
+  },
+  {
+   "offset": 1354,
+   "length": 6,
+   "name": "terminator",
+   "value": "ffff",
+   "type": "fixed",
+   "note": "end of TLV stream"
+  }
+ ]
+}
