@@ -30,6 +30,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+# What a send raises once the client has closed or reset its end.
+_CLIENT_GONE = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
+
 MAX_STEPS = 256
 MAX_DELAY = 5.0
 MAX_BYTES = 8 * 1024 * 1024
@@ -174,7 +177,14 @@ class ScriptedPeer:
                     return
                 record.received.append(frame)
             elif isinstance(step, Reply):
-                held = self._reply(sock, step, held)
+                try:
+                    held = self._reply(sock, step, held)
+                except _CLIENT_GONE:
+                    # The client already hung up (after a timeout, say). Linux accepts
+                    # the first write into such a socket silently, Windows reports
+                    # it; either way it is an outcome to record, not a peer failure.
+                    record.closed_by_client = True
+                    return
                 if step.truncate is not None:
                     return
             elif isinstance(step, Delay):
@@ -187,7 +197,11 @@ class ScriptedPeer:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                 return
         if held:
-            sock.sendall(held)
+            try:
+                sock.sendall(held)
+            except _CLIENT_GONE:
+                record.closed_by_client = True
+                return
         # Script done: wait for the client to close, so its last frame is recorded
         # rather than lost to an early FIN.
         while _read_frame(sock) is not None:
