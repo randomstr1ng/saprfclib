@@ -946,11 +946,17 @@ def test_logon_language_defaults_to_english() -> None:
     assert _tlv_ext_value(tlv, 0x0011) == b"E"
 
 
-def test_logon_language_is_uppercased() -> None:
+def test_a_one_character_language_is_sent_as_given() -> None:
+    """One-character SAP codes are case-sensitive: "d" is Serbian (Latin), "D" German.
+
+    This asserted "d" -> "D" until the capture for #66: the reference client sends a
+    one-character code unchanged, and the server treats the lowercase one as a
+    different language.
+    """
     tlv = Connection._build_logon_request(
         client="001", user="DEVELOPER", passwd="secret", lang="d", seed=1
     )
-    assert _tlv_ext_value(tlv, 0x0011) == b"D"
+    assert _tlv_ext_value(tlv, 0x0115) == b"d"
 
 
 @pytest.mark.parametrize(("given", "expected"), [("EN", b"E"), ("DE", b"D"), ("ES", b"S")])

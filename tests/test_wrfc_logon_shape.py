@@ -242,10 +242,12 @@ def test_an_iso_language_code_becomes_one_byte() -> None:
     The classic logon path already normalised this. Only the wRFC builder did
     not, which is why a helper existing in the same module was no protection.
     """
-    for given in ("EN", "en", "E", "e"):
+    for given in ("EN", "en", "E"):
         by_tag = dict(_records(_logon(lang=given)))
         assert by_tag[0x0115] == b"E", given
         assert by_tag[0x0011] == b"E", given
+    # A one-character code keeps its case: "e" is not "E" to the server (#66).
+    assert dict(_records(_logon(lang="e")))[0x0115] == b"e"
 
 
 def test_the_frame_width_is_fixed_for_the_reference_inputs() -> None:
