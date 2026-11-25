@@ -1213,3 +1213,51 @@ def test_invoke_footer_matches_every_request_fixture() -> None:
         assert struct.unpack_from(">I", raw, len(raw) - 8)[0] == len(body)
         checked += 1
     assert checked >= 8, f"expected to check most request fixtures, checked {checked}"
+
+
+# --------------------------------------------------------------------------- #
+# Logon text the logon cannot carry (#67)
+# --------------------------------------------------------------------------- #
+#
+# The classic logon replaced unencodable password characters with "?" and
+# unencodable user characters likewise, so it logged on with a different
+# credential, which counts against the failed-logon limit. The reference client
+# sends both one byte per character in ISO-8859-1 and refuses anything else before
+# sending the logon (behavioural probe: RFC_CONVERSION_FAILURE, no logon on the wire;
+# "ä" sent as one byte, "Ü" in the user as 0xDC).
+
+
+def test_a_latin1_password_is_sent_one_byte_per_character() -> None:
+    value = _scramble_password("xäy", seed=0x01020304)
+    assert len(value) == 4 + 3
+
+
+@pytest.mark.parametrize("passwd", ["x€y", "pass中word", "\U0001f600"])
+def test_a_password_outside_latin1_is_refused_without_leaking_it(passwd: str) -> None:
+    with pytest.raises(ValueError, match="ISO-8859-1") as info:
+        _scramble_password(passwd, seed=1)
+    assert passwd not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+def test_a_latin1_user_is_sent_as_the_reference_client_sends_it() -> None:
+    from saprfclib.connection import _logon_text
+
+    assert _logon_text("MÜLLERX", "user") == b"M\xdcLLERX"
+
+
+def test_credentials_are_checked_before_any_socket_is_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    from saprfclib.connection import connect
+
+    def no_network(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a socket was opened")
+
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    for user, passwd in (("DEVELOPER", "x€y"), ("M€LLER", "secret")):
+        with pytest.raises(ValueError, match="ISO-8859-1"):
+            connect(ashost="127.0.0.1", sysnr="00", client="001", user=user, passwd=passwd)

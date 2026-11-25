@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A password or user name the logon cannot carry is refused instead of altered** (#67).
+  The classic logon replaced a character outside ISO-8859-1 with `?`, so it logged on with
+  a different credential, and the failed attempt counted against the user's lockout limit.
+  `connect()` now raises `ValueError` before opening a socket, as the reference client
+  refuses such a credential before sending the logon. User names with ISO-8859-1 characters
+  such as `Ü` are now sent as the reference client sends them, instead of as `?`. The error
+  never contains the password and does not chain the `UnicodeEncodeError`, which holds it.
+
 ## [0.2.1] - 2026-11-12
 
 tRFC and qRFC submits work, EC keys for the built-in SNC, stricter yes/no parameters, and
