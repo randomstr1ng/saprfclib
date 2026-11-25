@@ -145,15 +145,18 @@ annotations are required on all public APIs; mypy strict mode is enforced via
 
 Zero non-Python runtime dependencies is a hard project constraint — do not add C
 extensions, ctypes-wrapped vendor binaries, or third-party native deps to the core
-package. `wsproto` and `h11` are the only runtime dependencies and both are pure
-Python.
+package. The runtime dependencies are `wsproto` and `h11` (WebSocket RFC) and
+`asn1crypto`, `ecdsa` and `tlslite-ng` (built-in SNC), all pure Python;
+`tests/test_packaging.py` enforces that set.
 
 ## Pull Requests
 
 1. Branch from `main`.
 2. Keep the change focused; protocol changes and refactors go in separate PRs.
 3. Add or update tests. Protocol changes need a golden fixture or an explicit
-   `[ASSUMED]` label.
+   `[ASSUMED]` label. A new or changed decoder is checked against
+   [The Recurring Decoder Bug](docs/protocol/recurring-bug-class.md): nothing that
+   varies by peer, release or function module may be pinned to one observation.
 4. Update `docs/protocol/` when wire behaviour changes, and `CHANGELOG.md` under
    "Unreleased".
 5. Ensure `hatch run lint:check`, `hatch run lint:type`, and

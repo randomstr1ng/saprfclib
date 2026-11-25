@@ -81,6 +81,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated to the field (#72), which is also what the reference client does; both are now
   documented and pinned by tests.
 
+### Documentation
+
+- **Support boundary** (#91). The README has a "What works, and what doesn't" table that puts
+  every capability in one group, Supported (verified live), Preview, Not implemented or
+  Refused, with the reason or issue for each. `SUPPORT.md` gives the tested Python and OS
+  versions, the SAP releases the captures come from, and where to get help.
+- **Public API snapshot** (#90). `tests/api/public_api.json` lists every export with its kind,
+  signature, public methods and a stability label (stable / preview) with its reason, and
+  `tests/test_public_api.py` fails on any unrecorded change. Regenerate with
+  `python -m tests.test_public_api --update`.
+- **The recurring decoder bug** (#89). `docs/protocol/recurring-bug-class.md` describes the
+  mistake this codebase keeps making, a decoder that memorises one system's answer, lists
+  the instances so far, and gives the test recipe that catches it. CONTRIBUTING and the PR
+  template link to it.
+- **Bug reports without system data** (#92). The bug template requires a redaction checkbox,
+  shows what to send instead of host names, user names, custom names, values and message
+  variables, and asks for the route, SNC, failure point and reduction steps.
+- CONTRIBUTING lists the five runtime dependencies (it named two).
+
 ## [0.2.1] - 2026-11-12
 
 tRFC and qRFC submits work, EC keys for the built-in SNC, stricter yes/no parameters, and

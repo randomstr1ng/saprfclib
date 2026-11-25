@@ -86,6 +86,7 @@ nav:
     - Kerberos: protocol/kerberos.md
     - tRFC / bgRFC: protocol/trfc.md
     - RE Methodology: protocol/methodology.md
+    - The Recurring Decoder Bug: protocol/recurring-bug-class.md
 
 validation:
   links:

@@ -12,6 +12,9 @@ Delete this section only if the PR touches no protocol behaviour.
 - [ ] Live capture / golden fixture — fixture path:
 - [ ] Behavioural probe against a live system — describe:
 - [ ] Inference from a confirmed field — labelled `[ASSUMED]` in code and docs
+- [ ] A new or changed decoder pins nothing that varies by peer, release or function
+      module (see `docs/protocol/recurring-bug-class.md`), and its new tests fail with
+      the fix reverted
 
 ## Checklist
 
