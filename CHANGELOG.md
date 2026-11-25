@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The LZ4 block decoder enforces its output cap while decoding** (#76). The cap was only
+  compared at the end, so a block whose match lengths claimed far more output than its
+  frame declared was fully built in memory first. Each literal run and match is now checked
+  before it is copied, and a frame declaring more than an LZ4 block can produce (255 bytes
+  per compressed byte) is refused before decoding starts.
+
 ## [0.2.1] - 2026-11-12
 
 tRFC and qRFC submits work, EC keys for the built-in SNC, stricter yes/no parameters, and

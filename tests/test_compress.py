@@ -16,6 +16,8 @@ from __future__ import annotations
 import struct
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from saprfclib.compress import (
     DecompressError,
@@ -179,6 +181,57 @@ class TestLZ4Block:
         block = bytes([0xA0]) + b"ABC"  # lit_len=10, only 3 bytes follow
         with pytest.raises(DecompressError, match="literal overrun"):
             lz4_block_decompress(block)
+
+
+class TestLZ4OutputBound:
+    """The output cap is enforced while decoding, not after (#76).
+
+    A match length is extended one byte at a time, so a few hundred input bytes can
+    claim tens of kilobytes of output. Checking the length only at the end let the
+    peer, not the caller, decide how much memory was used.
+    """
+
+    @staticmethod
+    def _bomb(extension_bytes: int) -> bytes:
+        # 'A', then a match of offset 1 whose length grows by 255 per extension byte.
+        return bytes([0x1F]) + b"A" + bytes([0x01, 0x00]) + b"\xff" * extension_bytes + b"\x00"
+
+    def test_a_match_length_bomb_is_refused_at_the_cap(self):
+        block = self._bomb(4000)  # about a megabyte if decoded
+        with pytest.raises(DecompressError, match="exceed 100 bytes"):
+            lz4_block_decompress(block, max_output=100)
+
+    def test_without_a_cap_the_same_block_decodes(self):
+        out = lz4_block_decompress(self._bomb(4))
+        assert out == b"A" * (1 + 4 + 15 + 4 * 255)
+
+    def test_output_exactly_at_the_cap_is_accepted(self):
+        block = bytes([0x20]) + b"AB" + bytes([0x02, 0x00])  # 'ABABAB'
+        assert lz4_block_decompress(block, max_output=6) == b"ABABAB"
+        with pytest.raises(DecompressError, match="exceed 5 bytes"):
+            lz4_block_decompress(block, max_output=5)
+
+    def test_literals_count_against_the_cap(self):
+        with pytest.raises(DecompressError, match="exceed 3 bytes"):
+            lz4_block_decompress(bytes([0x50]) + b"HELLO", max_output=3)
+
+    @given(st.binary(max_size=512), st.integers(min_value=1, max_value=4096))
+    @settings(max_examples=300, deadline=None)
+    def test_arbitrary_input_never_exceeds_the_cap(self, block: bytes, cap: int):
+        try:
+            out = lz4_block_decompress(block, max_output=cap)
+        except DecompressError:
+            return
+        assert len(out) <= cap
+
+    @given(st.binary(max_size=512))
+    @settings(max_examples=300, deadline=None)
+    def test_output_never_exceeds_255_bytes_per_input_byte(self, block: bytes):
+        try:
+            out = lz4_block_decompress(block)
+        except DecompressError:
+            return
+        assert len(out) <= 255 * len(block)
 
 
 # ---------------------------------------------------------------------------
@@ -430,3 +483,11 @@ def test_lzc_honours_a_non_default_code_length_limit() -> None:
         blob = sapcompress_compress_lzc(data, code_len_limit=limit)
         assert blob[7] & 0x1F == limit
         assert sapcompress_decompress(blob, len(data)) == data, limit
+
+
+def test_a_frame_declaring_more_than_lz4_can_produce_is_refused() -> None:
+    """A forged header must not set a multi-gigabyte cap for the decoder (#76)."""
+    block = bytes([0x50]) + b"HELLO"
+    frame = b"\x34" + struct.pack("<II", 0xFFFFFFFF, len(block)) + block
+    with pytest.raises(DecompressError, match="more than an LZ4 block can produce"):
+        sap_lz4_frame_decompress(frame)
