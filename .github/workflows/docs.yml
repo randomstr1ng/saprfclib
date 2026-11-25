@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Hatch
-        run: pip install hatch "hatchling>=1.21,<1.33"
+        run: 'pip install --require-hashes --only-binary=:all: -r .github/requirements/hatch.txt'
 
       - name: Build docs
         run: hatch run docs:build

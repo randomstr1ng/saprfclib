@@ -8,6 +8,16 @@ updates:
     open-pull-requests-limit: 5
     labels: ["dependencies"]
 
+  # Hash-locked CI tools (hatch, semgrep, zizmor), compiled from the .in files with
+  # the command in each .txt header.
+  - package-ecosystem: "pip"
+    directory: "/.github/requirements"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
