@@ -54,5 +54,10 @@ pool.close()
 - The pool is thread-safe: multiple threads may call `acquire()` concurrently.
 - Do not share a single acquired connection across threads — each `with pool.acquire()` block
   owns exactly one connection for its duration.
+- Pass `reset_on_release=True` to reset each connection's ABAP session state when it is
+  returned, so the next borrower does not inherit function-group globals, buffers or an
+  uncommitted LUW from the previous one. It costs one round trip per release; a connection
+  whose reset fails is closed instead of lent again. Without it, state carries over between
+  borrowers, which is what a stateful sequence across several `acquire()` blocks would need.
 - `pool.close()` does not wait: it closes the idle connections at once, and each
   checked-out connection is closed when it is released. Call it once at application shutdown.

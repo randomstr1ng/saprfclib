@@ -171,6 +171,8 @@ class ConnectionPool:
         params: dict[str, Any],
         min_size: int = 1,
         max_size: int = 10,
+        *,
+        reset_on_release: bool = False,
     ) -> None:
         if min_size < 0:
             raise ValueError("min_size must be >= 0")
@@ -181,6 +183,10 @@ class ConnectionPool:
 
         self._params: dict[str, Any] = dict(params)
         self._max_size = max_size
+        # Reset the ABAP session state before a connection goes back to the idle set
+        # (#68), so the next borrower does not inherit function-group globals, buffers
+        # or an uncommitted LUW. Off by default: it costs one round trip per release.
+        self._reset_on_release = reset_on_release
         # One descriptor cache for the whole pool. A FunctionDesc describes the
         # system, not the socket it arrived over, so a per-connection cache made
         # a pool of N connections pay N round-trips to learn each interface. The
@@ -351,10 +357,18 @@ class ConnectionPool:
                 self._cv.wait(remaining)
 
     def release(self, conn: Any) -> None:
-        """Return a lent connection to the idle set and wake one waiter (POOL-04)."""
+        """Return a lent connection to the idle set and wake one waiter (POOL-04).
+
+        With ``reset_on_release`` the server context is reset first, outside the lock
+        (it is a round trip). A connection whose reset fails, or that has already
+        retired itself, is closed instead of being returned.
+        """
+        discard = self._reset_failed(conn) or _is_retired(conn)
         with self._cv:
             self._in_use.discard(conn)
-            if self._closed:
+            if discard and not self._closed:
+                self.metrics.discards += 1
+            if self._closed or discard:
                 # Pool shut down while this connection was out: close it instead of
                 # returning it to a defunct idle set.
                 self._created -= 1
@@ -367,6 +381,21 @@ class ConnectionPool:
                 return
             self._idle.append(conn)
             self._cv.notify()
+
+    def _reset_failed(self, conn: Any) -> bool:
+        """Reset the connection's server context if configured; True if that failed."""
+        if not self._reset_on_release or self._closed or _is_retired(conn):
+            return False
+        try:
+            conn.reset_server_context()
+        except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it again"
+            _logger.debug(
+                "pool: discarding a connection whose context reset failed (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            return True
+        return False
 
     # ------------------------------------------------------------------ #
     # Live gauges                                                        #
@@ -465,6 +494,8 @@ class AsyncConnectionPool:
         params: dict[str, Any],
         min_size: int = 1,
         max_size: int = 10,
+        *,
+        reset_on_release: bool = False,
     ) -> None:
         if min_size < 0:
             raise ValueError("min_size must be >= 0")
@@ -475,6 +506,10 @@ class AsyncConnectionPool:
 
         self._params: dict[str, Any] = dict(params)
         self._max_size = max_size
+        # Reset the ABAP session state before a connection goes back to the idle set
+        # (#68), so the next borrower does not inherit function-group globals, buffers
+        # or an uncommitted LUW. Off by default: it costs one round trip per release.
+        self._reset_on_release = reset_on_release
         self._min_size = min_size
         # Single asyncio.Condition guards ALL pool state (idle deque, in_use set,
         # _created counter).  Its underlying asyncio.Lock is the boundary for
@@ -666,11 +701,16 @@ class AsyncConnectionPool:
         If the pool was closed while the connection was out, close it instead of
         returning it to a defunct idle set.
         """
+        discard = await self._reset_failed(conn) or _is_retired(conn)
         close_it = False
         async with self._cond:
             self._in_use.discard(conn)
-            if self._closed:
-                # Pool shut down while this connection was lent: close on release.
+            if self._closed or discard:
+                # Pool shut down while this connection was lent, or the connection
+                # cannot be lent again: close it on release.
+                if discard and not self._closed:
+                    self.metrics.discards += 1
+                    self._discarded_total += 1
                 self._created -= 1
                 self._cond.notify()
                 close_it = True
@@ -679,6 +719,21 @@ class AsyncConnectionPool:
                 self._cond.notify()
         if close_it:
             await self._safe_close(conn)
+
+    async def _reset_failed(self, conn: Any) -> bool:
+        """Reset the connection's server context if configured; True if that failed."""
+        if not self._reset_on_release or self._closed or _is_retired(conn):
+            return False
+        try:
+            await conn.reset_server_context()
+        except Exception as exc:  # noqa: BLE001 — any failure means "do not lend it again"
+            _logger.debug(
+                "pool: discarding a connection whose context reset failed (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            return True
+        return False
 
     # ------------------------------------------------------------------ #
     # Live gauges                                                        #

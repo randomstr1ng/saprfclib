@@ -47,7 +47,7 @@ import threading
 import time
 import uuid
 import warnings
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
@@ -246,6 +246,8 @@ _TLV_VER = b"\x00\x00\x0e\x0b"  # tag 0x0103: RFC protocol version (14.11)
 _TLV_CP = b"\x04\x01\x00\x03\x00\x0a\x02\x00\x00\x00\x23"  # tag 0x0106: codepage descriptor
 _TLV_PROG = b"<unknown>"  # tag 0x0006: caller program name
 _DEFAULT_LANG = "E"  # tags 0x0115/0x0011: logon language when the caller gives none
+# The function a server context reset calls (reference client capture; framing.md).
+_RESET_SERVER_CONTEXT = "SYSTEM_RESET_RFC_SERVER"
 _TLV_REL = b"754"  # tags 0x0012/0x0013/0x000B: SAP release
 
 # wRFC-specific static TLV values (pcap-verified frames 108/169; different from NI/TCP)
@@ -2054,6 +2056,43 @@ async def _join_response_frames_async(
     return tlv
 
 
+def _rollback_quietly(session: Session, rollback: Callable[[], Any]) -> None:
+    """Roll back after a failed transaction block, without hiding the block's error."""
+    if session.state is SessionState.BROKEN:
+        return
+    try:
+        rollback()
+    except Exception as exc:  # noqa: BLE001 - the original error wins
+        _logger.warning(
+            "transaction: rollback after a failed block also failed (%s)", type(exc).__name__
+        )
+
+
+def _raise_for_bapi_return(func_name: str, ret: Any) -> None:
+    """Raise if a BAPIRET2 ``RETURN`` reports an error (TYPE ``E`` or ``A``).
+
+    ``BAPI_TRANSACTION_COMMIT`` reports a failed commit through ``RETURN`` rather
+    than an RFC exception; an empty TYPE is success (live call, kernel 793).
+    """
+    if not isinstance(ret, dict) or str(ret.get("TYPE", "")).strip() not in ("E", "A"):
+        return
+
+    def text(key: str) -> str | None:
+        return str(ret.get(key, "")).strip() or None
+
+    raise AbapApplicationError(
+        key=func_name,
+        msg_class=text("ID"),
+        msg_type=text("TYPE"),
+        msg_number=text("NUMBER"),
+        msg_v1=text("MESSAGE_V1"),
+        msg_v2=text("MESSAGE_V2"),
+        msg_v3=text("MESSAGE_V3"),
+        msg_v4=text("MESSAGE_V4"),
+        message=text("MESSAGE"),
+    )
+
+
 @contextlib.contextmanager
 def _fail_closed(session: Session, func_name: str) -> Iterator[None]:
     """Retire the session if a reply could not be read to its end.
@@ -3256,6 +3295,19 @@ class Connection:
         return _build_type_desc_from_dfies(tabname, dfies_rows)
 
     @staticmethod
+    def _reset_request_tlv() -> bytes:
+        """The invoke TLV of a server context reset: ``SYSTEM_RESET_RFC_SERVER``, no params.
+
+        This is what the reference client sends for ``reset_server_context()``: an
+        ordinary zero-parameter call of that function, without a metadata lookup
+        first (live capture; docs/protocol/framing.md, "Resetting the server
+        context").
+        """
+        return build_invoke_request(
+            _RESET_SERVER_CONTEXT, FunctionDesc(name=_RESET_SERVER_CONTEXT, parameters=[]), {}
+        )
+
+    @staticmethod
     def _rfcping_request_tlv() -> bytes:
         """Build the RFCPING invoke TLV body.
 
@@ -3265,6 +3317,71 @@ class Connection:
         path instead of hand-rolling a second TLV writer.
         """
         return build_invoke_request("RFCPING", FunctionDesc(name="RFCPING", parameters=[]), {})
+
+    @contextlib.contextmanager
+    def transaction(self, *, wait: bool = True) -> Iterator[Connection]:
+        """Commit the calls made inside the block as one BAPI transaction (#83).
+
+        On a normal exit ``BAPI_TRANSACTION_COMMIT`` is called (with ``WAIT='X'``
+        unless ``wait=False``) and its ``RETURN`` checked: an error there raises
+        :class:`AbapApplicationError`. If the block raises, ``BAPI_TRANSACTION_ROLLBACK``
+        is called and the original exception propagates. A connection that retired
+        itself (its session is BROKEN) cannot carry the rollback, so none is sent;
+        the commit was not sent either.
+
+        ::
+
+            with conn.transaction():
+                conn.call("BAPI_USER_CHANGE", ...)
+        """
+        try:
+            yield self
+        except BaseException:
+            _rollback_quietly(self._session, lambda: self.call("BAPI_TRANSACTION_ROLLBACK"))
+            raise
+        ret = self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
+        _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
+
+    def reset_server_context(self) -> None:
+        """Discard the ABAP session state behind this connection.
+
+        Function-group globals, buffers and anything a stateful call sequence left
+        behind are dropped; the connection itself, its logon and its metadata cache
+        stay. Equivalent to the reference client's ``reset_server_context()``: the
+        same call goes on the wire (``SYSTEM_RESET_RFC_SERVER``), and a probe module
+        holding a value in its function group reads it back empty afterwards, then
+        keeps state again from the next call on (docs/protocol/framing.md).
+
+        Raises:
+            NotImplementedError: over WebSocket RFC, where no reset was captured.
+            CommunicationError: the transport failed; the connection is retired.
+            AbapApplicationError / AbapSystemFailure: the server refused it.
+        """
+        if self._async_conn is not None and self._loop_thread is not None:
+            self._loop_thread.run(self._async_conn.reset_server_context())
+            return
+        if self._is_ws():
+            raise NotImplementedError(
+                "reset_server_context over WebSocket RFC: no capture of a reset over a "
+                "WebSocket connection exists, so it is not sent"
+            )
+        with self._lock:
+            self._session._require_state(SessionState.READY)
+            self._session.mark_in_call()
+            try:
+                handle = self._session.handle or b"        "
+                request = self._build_invoke_frame(
+                    handle, self._reset_request_tlv(), conn_idx=self._session.conn_idx
+                )
+                with _fail_closed(self._session, _RESET_SERVER_CONTEXT):
+                    self._send_invoke_frame(request)
+                    response = _join_response_frames(
+                        self._transport.recv_message, _RESET_SERVER_CONTEXT
+                    )
+                raise_for_rfc_error(_strip_gw_header(response))
+            finally:
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
 
     def ping(self) -> bool:
         """Issue an RFC-level RFCPING and report liveness (TRANS-05).
@@ -5597,6 +5714,50 @@ class AsyncConnection:
                 if self._session.state is SessionState.IN_CALL:
                     self._session.mark_ready()
 
+    @contextlib.asynccontextmanager
+    async def transaction(self, *, wait: bool = True) -> AsyncIterator[AsyncConnection]:
+        """Commit the calls made inside the block as one BAPI transaction (async parity).
+
+        See :meth:`Connection.transaction`.
+        """
+        try:
+            yield self
+        except BaseException:
+            if self._session.state is not SessionState.BROKEN:
+                try:
+                    await self.call("BAPI_TRANSACTION_ROLLBACK")
+                except Exception as exc:  # noqa: BLE001 - the original error wins
+                    _logger.warning(
+                        "transaction: rollback after a failed block also failed (%s)",
+                        type(exc).__name__,
+                    )
+            raise
+        ret = await self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
+        _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
+
+    async def reset_server_context(self) -> None:
+        """Discard the ABAP session state behind this connection (async parity).
+
+        See :meth:`Connection.reset_server_context`.
+        """
+        async with self._lock:
+            self._session._require_state(SessionState.READY)
+            self._session.mark_in_call()
+            try:
+                handle = self._session.handle or b"        "
+                frame = Connection._build_invoke_frame(
+                    handle, Connection._reset_request_tlv(), conn_idx=self._session.conn_idx
+                )
+                with _fail_closed(self._session, _RESET_SERVER_CONTEXT):
+                    await self._send_request(frame)
+                    response = await _join_response_frames_async(
+                        self._transport.recv_message, _RESET_SERVER_CONTEXT
+                    )
+                raise_for_rfc_error(_strip_gw_header(response))
+            finally:
+                if self._session.state is SessionState.IN_CALL:
+                    self._session.mark_ready()
+
     async def ping(self) -> bool:
         """Issue an async RFC-level RFCPING and report liveness (TRANS-05 parity).
 
@@ -6184,6 +6345,15 @@ class _ThreadedAsyncConnection(AsyncConnection):
             raise
         return cls(sync_conn, executor)
 
+    @property
+    def _session(self) -> Session:  # type: ignore[override]  # read-only: AsyncConnection assigns it, this class wraps one
+        """The wrapped connection's session, so state checks see the real one.
+
+        transaction() and the pool's retired-connection check read ``_session``;
+        this connection runs the sync implementation and has none of its own.
+        """
+        return self._sync._session
+
     async def _run(self, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
         if self._closed:
             raise ValueError("connection is closed")
@@ -6202,6 +6372,9 @@ class _ThreadedAsyncConnection(AsyncConnection):
 
     async def ping(self) -> bool:
         return await self._run(self._sync.ping)
+
+    async def reset_server_context(self) -> None:
+        await self._run(self._sync.reset_server_context)
 
     async def close(self) -> None:
         if self._closed:

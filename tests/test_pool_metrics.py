@@ -45,6 +45,7 @@ def _pool(max_size: int = 2, opener: Any = None) -> ConnectionPool:
     p._in_use = set()
     p._created = 0
     p._max_size = max_size
+    p._reset_on_release = False
     p._closed = False
     p._params = {}
     p.metrics = PoolMetrics()
@@ -184,6 +185,7 @@ async def test_the_async_pool_keeps_the_same_books() -> None:
     pool._in_use = set()
     pool._created = 0
     pool._max_size = 2
+    pool._reset_on_release = False
     pool._closed = False
     pool._discarded_total = 0
     pool.metrics = PoolMetrics()
