@@ -56,3 +56,24 @@ def test_value_matches_the_capture(case: dict) -> None:
     field = _field(case)
     assert decode(rfctype, raw, field) == value
     assert encode(rfctype, value, field) == raw
+
+
+# Behaviour matched to the reference client (behavioural probe, 2026-11-25; see
+# docs/protocol/serialization.md): an embedded NUL ends a STRING, and a CHAR value
+# longer than its field is truncated. Neither raises, as the reference client does not.
+
+
+def test_an_embedded_nul_ends_a_string_as_the_reference_client_sends_it() -> None:
+    field = FieldDesc("IV_STR", RFCTYPE_STRING, 0, 0, 0, 0, 0)
+    assert encode(RFCTYPE_STRING, "ab\x00cd", field) == b"ab\x00"
+    assert encode(RFCTYPE_STRING, "\x00tail", field) == b"\x00"
+    assert encode(RFCTYPE_STRING, "no nul", field) == b"no nul\x00"
+
+
+def test_a_char_value_longer_than_its_field_keeps_the_first_characters() -> None:
+    from saprfclib.codec import RFCTYPE_CHAR
+
+    field = FieldDesc("REQUTEXT", RFCTYPE_CHAR, 255, 0, 510, 0, 0)
+    raw = encode(RFCTYPE_CHAR, "x" * 300, field)
+    assert len(raw) == 510
+    assert decode(RFCTYPE_CHAR, raw, field) == "x" * 255

@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They follow `strict_params` like unknown top-level parameters: by default they are
   dropped with a warning naming the path (`IMPORTSTRUCT-NOPE`, `IT_ROWS[]-FIELD`); with
   `strict_params=True` the call raises `ValueError`, as the reference client does.
+- **A STRING with an embedded NUL is sent up to the NUL** (#77), as the reference client
+  sends it. The server already read only that far, so results do not change; the request now
+  matches the reference client byte for byte. A CHAR value longer than its field keeps being
+  truncated to the field (#72), which is also what the reference client does; both are now
+  documented and pinned by tests.
 
 ## [0.2.1] - 2026-11-12
 

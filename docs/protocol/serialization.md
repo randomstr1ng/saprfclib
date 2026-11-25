@@ -97,6 +97,10 @@ function module using them, would settle it.
 
 **PITFALL:** `field_length` is in *characters*, not bytes. Wire size is 2× the descriptor length. This is a classic off-by-2x error.
 
+**A value longer than the field is truncated, not refused**, as the reference client does it:
+300 characters sent to `STFC_CONNECTION`'s `REQUTEXT` (CHAR255) come back as the first 255
+(behavioural probe, 2026-11-25). saprfclib keeps the first `field_length` characters.
+
 **Python encode/decode:**
 ```python
 # Decode: 4 bytes → 2 chars
@@ -466,6 +470,12 @@ directions (`tests/golden/serialization/string_xstring.json`):
 
 saprfclib writes the terminator and removes it when reading. An earlier assumption of a leading
 little-endian uint32 length plus UTF-16LE content was wrong.
+
+**An embedded NUL ends the string.** The reference client sends `"ab\0cd"` as `61 62 00`, and the
+server reads a STRING up to its first NUL: an echo function module returned `"ab"` to both the
+reference client and saprfclib (behavioural probe, 2026-11-25). saprfclib cuts the value at the
+NUL before sending, like the reference client, and does not raise: the rest of the value is
+lost in both clients.
 
 ---
 

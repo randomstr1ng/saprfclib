@@ -1039,7 +1039,13 @@ def encode(rfctype: int, value: Any, field: FieldDesc) -> bytes:
             return bytes(value)
         case rfctype if rfctype == RFCTYPE_STRING:
             # UTF-8 plus the terminating NUL the reference client sends (see decode).
-            return cast(bytes, value.encode("utf-8")) + b"\x00"
+            # A value with an embedded NUL ends there: the reference client sends only
+            # what precedes it ("ab\0cd" goes out as 61 62 00), and the server reads a
+            # STRING up to its first NUL either way. Behavioural probe, 2026-11-25: both
+            # clients got "ab" back from an echo function module. Cut here so the request
+            # matches the reference client byte for byte.
+            text = cast(str, value).split("\x00", 1)[0]
+            return text.encode("utf-8") + b"\x00"
         case rfctype if rfctype == RFCTYPE_XSTRING:
             return bytes(value)
         case rfctype if rfctype == RFCTYPE_STRUCTURE:
