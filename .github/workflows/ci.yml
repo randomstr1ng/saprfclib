@@ -5,12 +5,17 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  # publish.yml runs this whole workflow before it builds a release, so a release is
+  # tested on exactly the matrix a pull request is.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # The workflow name is part of the group: called from publish.yml it is "Publish",
+  # so a release run never cancels, and is never cancelled by, an ordinary CI run.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

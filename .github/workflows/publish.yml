@@ -6,6 +6,13 @@ name: Publish
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # Uploads use PyPI Trusted Publishing (OIDC). No API token is stored in this repo.
+#
+# Nothing is uploaded unless all of these hold:
+#   - the run is for a tag vX.Y.Z (optionally aN / bN / rcN), also when started by hand;
+#   - the tag points at exactly the checked-out commit, and that commit is on main;
+#   - the full CI workflow (every OS and Python version, docs build) passes on it;
+#   - the built wheel and sdist carry exactly the tag's version, and the wheel installs
+#     and imports in a clean environment.
 
 on:
   push:
@@ -16,7 +23,52 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: Verify the release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag is vX.Y.Z, names this commit, and is on main
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" != "tag" ]]; then
+            echo "::error::A release runs from a tag. Started for $REF_TYPE '$TAG', which hatch-vcs would build as a development version."
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not vX.Y.Z (optionally followed by aN, bN or rcN)."
+            exit 1
+          fi
+          tag_commit="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
+          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag '$TAG' points at $tag_commit, but this run checked out $GITHUB_SHA."
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag '$TAG' points at a commit that is not on main."
+            exit 1
+          fi
+          echo "Release tag $TAG: commit $GITHUB_SHA, on main."
+
+  ci:
+    name: Full CI
+    needs: verify
+    # zizmor suggests a newer self-repository form; "./" is GitHub's documented syntax
+    # for a reusable workflow in the same repository and commit, so it stays.
+    uses: ./.github/workflows/ci.yml  # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
   build:
+    needs: [verify, ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -32,14 +84,50 @@ jobs:
       - name: Install Hatch
         run: 'pip install --require-hashes --only-binary=:all: -r .github/requirements/hatch.txt'
 
-      - name: Test before release (offline suite)
-        run: hatch run test -m "not integration"
-
       - name: Build wheel + sdist
         run: hatch build
 
-      - name: Show built version
-        run: ls -l dist/
+      - name: Built files carry exactly the tag's version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          ls -l dist/
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          if [[ ${#wheels[@]} -ne 1 || ${#sdists[@]} -ne 1 ]]; then
+            echo "::error::Expected one wheel and one sdist, found ${#wheels[@]} and ${#sdists[@]}."
+            exit 1
+          fi
+          if [[ "${wheels[0]}" != "dist/saprfclib-${version}-py3-none-any.whl" ]]; then
+            echo "::error::Wheel is ${wheels[0]}, expected version ${version}."
+            exit 1
+          fi
+          if [[ "${sdists[0]}" != "dist/saprfclib-${version}.tar.gz" ]]; then
+            echo "::error::Sdist is ${sdists[0]}, expected version ${version}."
+            exit 1
+          fi
+
+      - name: Wheel installs and imports in a clean environment
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install --disable-pip-version-check dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/smoke/bin/python" - <<'PY'
+          import os
+          import saprfclib
+          import saprfclib.pse
+          import saprfclib.secgss
+
+          expected = os.environ["TAG"].removeprefix("v")
+          assert saprfclib.__version__ == expected, (saprfclib.__version__, expected)
+          print("saprfclib", saprfclib.__version__)
+          PY
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:

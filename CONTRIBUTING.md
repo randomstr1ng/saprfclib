@@ -182,6 +182,31 @@ Python.
 
 Do not open a public issue for a security problem. See [SECURITY.md](SECURITY.md).
 
+## Releasing (Maintainers Only)
+
+A release is a tag on `main`; `.github/workflows/publish.yml` does the rest.
+
+```bash
+git checkout main && git pull
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin v0.3.0
+```
+
+The version comes from the tag (`hatch-vcs`), so nothing is edited by hand. Before anything
+is uploaded, the workflow checks that:
+
+- the tag is `vX.Y.Z`, optionally followed by `aN`, `bN` or `rcN`, and the run is for that tag.
+  A run started by hand from a branch is refused, since it would build a `.devN` version;
+- the tag points at exactly the checked-out commit, and that commit is on `main`;
+- the whole CI workflow passes on it, with every OS and Python version and the docs build
+  (`publish.yml` calls `ci.yml` itself, so the release matrix cannot drift from the PR one);
+- the wheel and sdist are named with exactly the tag's version, and the wheel installs and
+  imports in a clean environment, reporting that version.
+
+Only then does it publish to TestPyPI, then PyPI (the `pypi` environment can require a
+reviewer), then create the GitHub release. If a check fails, fix it on `main` and tag a new
+version; do not move a tag that may already have been seen.
+
 ## Branch Model (Maintainers Only)
 
 Day-to-day work lands on `development`; `main` is what gets tagged and released.

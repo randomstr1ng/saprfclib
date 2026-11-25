@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Python 3.15** is supported and tested in CI on Linux, Windows and macOS, plus the
   free-threaded 3.15t build on Linux (#95).
 
+### Changed
+
+- **A release is only published after it is verified** (#94). The publish workflow now checks
+  that it runs for a `vX.Y.Z` tag pointing at the checked-out commit on `main`, runs the full CI
+  workflow (every OS and Python version, docs build) on it, and checks that the wheel and sdist
+  carry exactly the tag's version and that the wheel installs and imports. Before, it tested
+  on one Python version and published whatever tag was pushed. See "Releasing" in
+  `CONTRIBUTING.md`.
+
 ### Fixed
 
 - **Packed decimals with sign nibble `0xB` are negative** (#70). They were read as positive,
