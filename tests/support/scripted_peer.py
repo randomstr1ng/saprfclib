@@ -254,7 +254,9 @@ def _read_exactly(sock: socket.socket, n: int) -> bytes | None:
     while len(buf) < n:
         try:
             chunk = sock.recv(n - len(buf))
-        except ConnectionResetError:
+        except _CLIENT_GONE:
+            # A reset or an abort is the client going away, like a FIN; Windows
+            # reports an aborted connection where Linux reports a reset.
             chunk = b""
         if not chunk:
             if not buf:
