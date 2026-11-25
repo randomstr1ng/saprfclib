@@ -196,3 +196,34 @@ def test_decf34_round_trips(coefficient: int, exponent: int) -> None:
     if len(value.as_tuple().digits) > 34:
         return
     assert decode_decfloat(encode_decfloat(value, 16)) == value
+
+
+# --------------------------------------------------------------------------- #
+# Non-canonical declets (IEEE 754-2008 section 3.5.2)
+# --------------------------------------------------------------------------- #
+#
+# 24 of the 1024 ten-bit patterns are redundant encodings of digit triples that also
+# have a canonical declet. A conforming decoder accepts them; an encoder never emits
+# them. These follow from the standard alone: they change no byte this library sends.
+
+
+def test_every_declet_decodes_and_exactly_24_are_redundant() -> None:
+    from saprfclib.codec import _DPD_DECODE, _DPD_ENCODE
+
+    assert sorted(_DPD_DECODE) == list(range(1024))
+    assert all(0 <= d <= 9 for trio in _DPD_DECODE.values() for d in trio)
+    redundant = [d for d, trio in _DPD_DECODE.items() if _DPD_ENCODE[trio] != d]
+    assert len(redundant) == 24
+    assert len(_DPD_ENCODE) == 1000
+    assert all(_DPD_DECODE[declet] == trio for trio, declet in _DPD_ENCODE.items())
+
+
+def test_a_value_carrying_a_redundant_declet_decodes_like_its_canonical_form() -> None:
+    from saprfclib.codec import _DPD_DECODE, _DPD_ENCODE
+
+    redundant = next(d for d, trio in _DPD_DECODE.items() if _DPD_ENCODE[trio] != d)
+    canonical = _DPD_ENCODE[_DPD_DECODE[redundant]]
+    base = int.from_bytes(encode_decfloat(Decimal("0"), 8)[::-1], "big")
+    as_sent = (base | redundant).to_bytes(8, "big")[::-1]
+    as_canonical = (base | canonical).to_bytes(8, "big")[::-1]
+    assert decode_decfloat(as_sent) == decode_decfloat(as_canonical)

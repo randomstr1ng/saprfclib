@@ -60,6 +60,8 @@ from saprfclib.types import (
 # metadata reports for TABLE parameters (live: RFC_READ_TABLE's DATA, FIELDS and OPTIONS
 # on A4H, 2026-11-12).
 _RFCTYPE_TABLE = 5
+# rfctype constant for STRUCTURE (RFCTYPE_STRUCTURE = 17, codec.py).
+_RFCTYPE_STRUCTURE = 17
 
 __all__ = [
     "tlv_record",
@@ -303,6 +305,83 @@ def drop_unknown_parameters(desc: FunctionDesc, params: dict[str, Any]) -> dict[
     return {name: value for name, value in params.items() if name.upper() in known}
 
 
+def unknown_fields(desc: FunctionDesc, params: dict[str, Any]) -> list[str]:
+    """Return the structure and table-row keys the caller supplied that the layout lacks.
+
+    The encoder lays out a structure from its descriptor and never looks at a key the
+    descriptor does not name, so such a key would be dropped from the request with no
+    diagnostic. The reference client refuses one ("field 'X' not found",
+    RFC_INVALID_PARAMETER — behavioural probe with STFC_STRUCTURE).
+
+    Keys are matched exactly, as the encoder matches them. Each is reported once as a
+    path: ``PARAM-FIELD`` inside a structure, ``PARAM[]-FIELD`` inside table rows, so a
+    large table does not produce one entry per row.
+    """
+    params_upper = {k.upper(): v for k, v in params.items()}
+    found: dict[str, None] = {}
+    for field in desc.parameters:
+        if field.direction == RFC_EXPORT or field.name.upper() not in params_upper:
+            continue
+        _collect_unknown_fields(field, params_upper[field.name.upper()], field.name, found)
+    return list(found)
+
+
+def drop_unknown_fields(desc: FunctionDesc, params: dict[str, Any]) -> dict[str, Any]:
+    """Return ``params`` with the keys ``unknown_fields`` reports removed (copies as needed)."""
+    by_name = {f.name.upper(): f for f in desc.parameters}
+    out: dict[str, Any] = {}
+    for name, value in params.items():
+        field = by_name.get(name.upper())
+        out[name] = value if field is None else _strip_unknown_fields(field, value)
+    return out
+
+
+def _collect_unknown_fields(
+    field: FieldDesc, value: Any, path: str, found: dict[str, None]
+) -> None:
+    type_desc = field.type_desc
+    if type_desc is None:
+        return
+    children = {c.name: c for c in type_desc.fields}
+    if field.rfctype == _RFCTYPE_STRUCTURE and isinstance(value, dict):
+        rows, prefix = [value], path
+    elif field.rfctype == _RFCTYPE_TABLE and isinstance(value, list):
+        rows, prefix = value, f"{path}[]"
+    else:
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key, child_value in row.items():
+            child = children.get(key)
+            if child is None:
+                found.setdefault(f"{prefix}-{key}")
+            else:
+                _collect_unknown_fields(child, child_value, f"{prefix}-{key}", found)
+
+
+def _strip_unknown_fields(field: FieldDesc, value: Any) -> Any:
+    type_desc = field.type_desc
+    if type_desc is None:
+        return value
+    children = {c.name: c for c in type_desc.fields}
+
+    def strip_row(row: Any) -> Any:
+        if not isinstance(row, dict):
+            return row
+        return {
+            key: _strip_unknown_fields(children[key], child_value)
+            for key, child_value in row.items()
+            if key in children
+        }
+
+    if field.rfctype == _RFCTYPE_STRUCTURE and isinstance(value, dict):
+        return strip_row(value)
+    if field.rfctype == _RFCTYPE_TABLE and isinstance(value, list):
+        return [strip_row(row) for row in value]
+    return value
+
+
 def dm_table_ids(desc: FunctionDesc, params: dict[str, Any]) -> dict[int, str]:
     """Return ``{dm_table_id: param_name}`` for the tables this call sends with rows.
 
@@ -408,6 +487,13 @@ def build_invoke_request(
             f"{func_name}: parameter(s) {', '.join(unknown)} are not in the function "
             f"interface; known parameters are "
             f"{', '.join(sorted(f.name for f in desc.parameters)) or '(none)'}"
+        )
+    # The same for keys inside a structure or table row: the encoder would skip them.
+    unknown_nested = unknown_fields(desc, params)
+    if unknown_nested:
+        raise ValueError(
+            f"{func_name}: field(s) {', '.join(unknown_nested)} are not in the "
+            f"structure or table row type"
         )
     # DM table IDs assigned by the shared helper so the response parser can map
     # tag 0x0335 back to a parameter name (see dm_table_ids).

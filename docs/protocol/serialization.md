@@ -169,6 +169,16 @@ reference client sent −0.01 and −98765.43 with `0x0D`. On decode saprfclib a
 (`0x0D` for a negative value, else `0x0C`) and packs two nibbles per byte, most significant
 first. 123.45 at 3 bytes with 2 decimals encodes as `12 34 5C`.
 
+**More fraction digits than the field holds** are rounded **half away from zero**, as the
+reference client does: 1.005 → 1.01, −1.005 → −1.01, 0.125 → 0.13, 1.004 → 1.00 at two
+decimals. A value that rounds to zero keeps its sign: −0.004 is sent as `…00 0D`. Source: live
+capture 2026-11-25, fixture `bcd_rounding.json` (the reference client's bytes for nine inputs,
+with the server's echo).
+
+**Every digit is kept.** A packed field holds up to 31 digits, more than the 28 of Python's
+default decimal context, so both directions work on the digit tuple in integer arithmetic
+rather than through `Decimal.scaleb`, which would round to the context precision.
+
 > The fixture `type_bcd` is synthetic and inconsistent: its bytes `01 23 4C` decode (digits
 > `01234`, decimals 2) to **12.34**, while its JSON claims 123.45. Its replay passes only
 > because decode→encode reproduces whatever bytes it is handed; it is not evidence.
@@ -399,9 +409,14 @@ are `G2G3`, and in every other case the leading digit is `G2G3G4` with exponent 
 #### Implementation notes
 
 `decode_decfloat` / `encode_decfloat` in `src/saprfclib/codec.py`. The declet tables are
-generated from the IEEE encoding rules at import rather than transcribed as 1024 literal
-entries — eight rules keyed on the high bit of each digit are checkable by eye in a way
-a table of magic numbers is not.
+generated from the IEEE encoding and decoding rules at import rather than transcribed as 1024
+literal entries — a handful of rules per direction is checkable by eye in a way a table of
+magic numbers is not.
+
+The decoder accepts all 1024 ten-bit declets, including the 24 non-canonical (redundant)
+encodings that IEEE 754-2008 section 3.5.2 requires a decoder to accept; each decodes to the
+same digits as its canonical form. The encoder emits canonical declets only. This follows from
+the standard and changes no byte the library sends.
 
 Values are `decimal.Decimal` throughout, never `float`. Encoding refuses rather than
 rounds: more significant digits than the width holds, or an out-of-range exponent, raises
