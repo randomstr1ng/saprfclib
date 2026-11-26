@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CHANGING parameter, is now sent and read as XML (`0x3c02`/`0x3c05`), as the reference client
   does, with values typed as on the binary path. Nested components come back as nested dicts.
   Captured against ABAP Platform 2025 for every scalar type, nested flat and deep structures and
-  nested tables (`tests/golden/serialization/deep/`). The RFC server, tRFC units and namespaced
-  component names refuse deep values with `NotImplementedError` until they are captured.
+  nested tables (`tests/golden/serialization/deep/`). `RfcServer` handlers receive and return
+  them the same way; its replies match the reference SDK's server byte for byte. tRFC units and
+  namespaced component names refuse deep values with `NotImplementedError` until captured.
 - **`invalidate_metadata(name=None)`** on `Connection`, `AsyncConnection`, both pools and
   `MetadataCache` (#80) forgets cached function interfaces and the DDIC layouts cached with
   them, so the next call fetches them again. A live probe showed why it is needed and why it is

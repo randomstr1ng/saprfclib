@@ -532,6 +532,21 @@ def dm_table_ids(desc: FunctionDesc, params: dict[str, Any]) -> dict[int, str]:
     return assigned
 
 
+def xml_parameter_records(field: FieldDesc, value: Any) -> list[bytes]:
+    """The TLV records of one deep parameter: 0x3c02, the XML in 0x3c05 pieces, 0x3c02.
+
+    The same in a client's request and a server's reply (live captures 2026-11-26: the
+    reference client calling, and the reference SDK's server answering, both write one
+    bracket per parameter; the client cuts the XML into 16384-byte records).
+    """
+    document = encode_xml_parameter(field, value)
+    records = [tlv_record(_TAG_BASXML_MARKER)]
+    for at in range(0, len(document), XML_CHUNK_BYTES):
+        records.append(tlv_record(_TAG_BASXML_DATA, document[at : at + XML_CHUNK_BYTES]))
+    records.append(tlv_record(_TAG_BASXML_MARKER))
+    return records
+
+
 def build_invoke_request(
     func_name: str,
     desc: FunctionDesc,
@@ -641,11 +656,7 @@ def build_invoke_request(
                     f"{func_name}: deep parameter {field.name!r} in a tRFC/qRFC call; "
                     "how it is serialized inside a unit has not been captured"
                 )
-            document = encode_xml_parameter(field, value)
-            parts.append(tlv_record(_TAG_BASXML_MARKER))
-            for at in range(0, len(document), XML_CHUNK_BYTES):
-                parts.append(tlv_record(_TAG_BASXML_DATA, document[at : at + XML_CHUNK_BYTES]))
-            parts.append(tlv_record(_TAG_BASXML_MARKER))
+            parts.extend(xml_parameter_records(field, value))
         elif field.rfctype == _RFCTYPE_TABLE:
             # TABLE protocol: 0x0301(name) + 0x0330(dm_id) + 0x0302(info) + 0x0303*(rows) + 0x0306
             # Empty tables: 0x0205 decl (already emitted above) suffices; no 0x0301 block.

@@ -90,9 +90,11 @@ A component you leave out is sent with its initial value. Each component comes b
 type of the binary path: a NUMC as its zero-padded digits, a RAW as its full width, a date as
 `YYYYMMDD` (`""` when initial).
 
-Not supported yet, and refused with a clear error: deep parameters in an `RfcServer` handler
-and inside tRFC/qRFC/bgRFC units, components with namespaced names (`/ABC/FIELD`), and tables
-whose rows are not structures.
+An `RfcServer` handler receives and returns them in the same shape.
+
+Not supported yet, and refused with a clear error: deep parameters inside tRFC/qRFC/bgRFC
+units, components with namespaced names (`/ABC/FIELD`), and tables whose rows are not
+structures.
 
 ## Tips
 

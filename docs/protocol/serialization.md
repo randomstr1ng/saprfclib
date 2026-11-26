@@ -439,6 +439,14 @@ the server and came back unchanged through the echo module (behavioural probe, 2
 - a DECFLOAT with an exponent as Python writes it: `1E+5` and `1.20E-7` came back with their
   scale, as on the binary path, where the plain form turned `1E+5` into `100000`.
 
+**The RFC server side.** ABAP calling a registered server sends deep parameters the same way,
+and expects them back the same way. Captured 2026-11-26 through a TCP/IP destination for a
+registered program, calling `STFC_DEEP_TABLE` and `STFC_DEEP_STRUCTURE`: the call arrived with
+`IMPORT_TAB` / `IMPORTSTRUCT` as XML brackets and flat values binary, and the reference SDK's
+server answered with `EXPORT_TAB` / `ECHOSTRUCT` as XML brackets and `RESPTEXT` binary.
+saprfclib's `RfcServer` writes the same XML byte for byte, and ABAP read the rows back
+(`server_deep_*` fixtures).
+
 **Metadata.** `RFC_GET_FUNCTION_INTERFACE` reports a deep structure parameter with EXID `v`, a
 flat one with `u` and a table-typed one with `h` (`gfi_response.bin`). The component layout
 comes from `DDIF_FIELDINFO_GET`; how named components and table types appear there is in
@@ -768,10 +776,6 @@ probe module would settle it with one more case writing such a byte pattern.
 
 ### Deep parameters: what is not captured
 
-- **The RFC server side.** How an ABAP caller sends a deep parameter to a registered server,
-  and what it expects back, has not been captured. `RfcServer` refuses such a parameter with
-  `NotImplementedError` instead of laying it into a binary buffer. A destination pointing at
-  `RfcServer` and a capture of the call would settle it.
 - **tRFC, qRFC and bgRFC units.** No capture of a deep parameter inside a unit; refused with
   `NotImplementedError`.
 - **Namespaced component names** (`/ABC/FIELD`). How such a name is written as an element
@@ -779,7 +783,10 @@ probe module would settle it with one more case writing such a byte pattern.
 - **Tables whose line type is not a structure** (a table of STRING, for example). No capture
   of the row form; the layout stays unresolved and a value is refused with
   `IncompleteDescriptorError`.
-- **SAP's binary BASXML** (`BXML` magic), issue #18: a different format, still refused.
+- **SAP's binary BASXML** (`BXML` magic), issue #18: a different format, still refused and
+  still never seen. Switching basXML on in the destination (`BASXML_ACTIVE='1'`) did not
+  produce it: the registered server, whether the reference SDK's or saprfclib's, received the
+  same plain XML as above (2026-11-26, kernel 916).
 
 ### STRUCTURE non-Unicode offsets
 

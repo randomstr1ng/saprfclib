@@ -488,9 +488,94 @@ def test_a_mutated_reply_raises_only_typed_errors(data: st.DataObject) -> None:
         pass
 
 
-def test_the_rfc_server_refuses_deep_parameters_rather_than_corrupt_them() -> None:
+# --------------------------------------------------------------------------- #
+# The RFC server side
+# --------------------------------------------------------------------------- #
+# ABAP calling STFC_DEEP_TABLE / STFC_DEEP_STRUCTURE through a registered
+# destination, answered once by the reference SDK's server and once by
+# saprfclib's (deep.json, "server_side").
+
+
+def _resptext() -> FieldDesc:
+    return FieldDesc("RESPTEXT", RFCTYPE_CHAR, 255, 0, 510, 0, 0, direction=2)
+
+
+def _server_descs() -> dict[str, FunctionDesc]:
+    row = _param("IT_CPLX").type_desc
+
+    def tab(name: str, direction: int) -> FieldDesc:
+        return FieldDesc(name, RFCTYPE_TABLE, 0, 0, 40, 0, 0, type_desc=row, direction=direction)
+
+    def struct_(name: str, direction: int) -> FieldDesc:
+        return FieldDesc(
+            name, RFCTYPE_STRUCTURE, 0, 0, 40, 0, 0, type_desc=row, direction=direction
+        )
+
+    return {
+        "STFC_DEEP_TABLE": FunctionDesc(
+            "STFC_DEEP_TABLE", [tab("EXPORT_TAB", 2), _resptext(), tab("IMPORT_TAB", 1)]
+        ),
+        "STFC_DEEP_STRUCTURE": FunctionDesc(
+            "STFC_DEEP_STRUCTURE",
+            [struct_("ECHOSTRUCT", 2), _resptext(), struct_("IMPORTSTRUCT", 1)],
+        ),
+    }
+
+
+def _echo_server() -> tuple[Any, list[dict[str, Any]]]:
     from saprfclib.server import RfcServer
 
-    desc = FunctionDesc("Z_SAPRFCLIB_DEEP", [_param("ES_DEEP")])
-    with pytest.raises(NotImplementedError, match="ES_DEEP"):
-        RfcServer._build_response(None, desc, {"ES_DEEP": {"ID": 1}})  # type: ignore[arg-type]
+    server = RfcServer({"program_id": "ZTEST", "gwhost": "gw.example", "gwserv": "sapgw00"})
+    seen: list[dict[str, Any]] = []
+    descs = _server_descs()
+
+    @server.function("STFC_DEEP_TABLE", descs["STFC_DEEP_TABLE"])
+    def _table(req: dict[str, Any]) -> dict[str, Any]:
+        seen.append(req)
+        return {"EXPORT_TAB": req["IMPORT_TAB"], "RESPTEXT": "x"}
+
+    @server.function("STFC_DEEP_STRUCTURE", descs["STFC_DEEP_STRUCTURE"])
+    def _struct(req: dict[str, Any]) -> dict[str, Any]:
+        seen.append(req)
+        return {"ECHOSTRUCT": req["IMPORTSTRUCT"], "RESPTEXT": "x"}
+
+    return server, seen
+
+
+@pytest.mark.parametrize(
+    ("request_frame", "reference_reply", "expected"),
+    [
+        (
+            "server_deep_table_request.bin",
+            "server_deep_table_reference_reply.bin",
+            {
+                "IMPORT_TAB": [
+                    {"I": 3, "C": "deep", "STR": "string value <&>", "XSTR": b"\x01\x02\xff"},
+                    {"I": 4, "C": "deep", "STR": "string value <&>", "XSTR": b"\x01\x02\xff"},
+                ]
+            },
+        ),
+        (
+            "server_deep_structure_request.bin",
+            "server_deep_structure_reference_reply.bin",
+            {"IMPORTSTRUCT": {"I": 5, "C": "ds", "STR": "deep struct", "XSTR": b"\xca\xfe"}},
+        ),
+    ],
+)
+def test_the_rfc_server_reads_and_answers_deep_parameters_as_the_reference_server(
+    request_frame: str, reference_reply: str, expected: dict[str, Any]
+) -> None:
+    server, seen = _echo_server()
+    reply = server.dispatch_inbound(_frame(request_frame))
+    assert seen == [expected]
+    # The XML saprfclib answers with is the reference server's, byte for byte.
+    assert _xml_params(reply) == _xml_params(_frame(reference_reply))
+
+
+def test_the_live_saprfclib_server_replies_are_what_the_code_writes() -> None:
+    server, _ = _echo_server()
+    for request, live in (
+        ("server_deep_table_request.bin", "server_deep_table_saprfclib_reply.bin"),
+        ("server_deep_structure_request.bin", "server_deep_structure_saprfclib_reply.bin"),
+    ):
+        assert _xml_params(server.dispatch_inbound(_frame(request))) == _xml_params(_frame(live))
