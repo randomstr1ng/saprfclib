@@ -1007,9 +1007,47 @@ so the next borrower starts with a clean session; a connection whose reset fails
 instead of lent again. Over WebSocket RFC no reset was captured, and `reset_server_context()`
 refuses rather than sends one.
 
+### Metadata and the server's loaded version
+
+saprfclib learns a function's interface with `RFC_GET_FUNCTION_INTERFACE` and the layout of
+each DDIC type it uses with `DDIF_FIELDINFO_GET`, then caches both for the life of the process.
+A behavioural probe on ABAP Platform 2025 (kernel 916, 2026-11-26) changed a probe function
+module's interface and activated it while connections that had already called it stayed open.
+It established:
+
+- **Nothing on the wire says a cached descriptor is stale.** `RFC_GET_FUNCTION_INTERFACE`'s
+  interface has no change date. A call made with the old descriptor after the change raised no
+  error: a structure parameter that had grown (`BAPIRET1` to `BAPIRET2`) came back decoded with
+  the old, shorter layout, and the new fields were simply missing.
+- **A server session keeps running the version it loaded.** After `IV_A` was widened from
+  `CHAR20` to `CHAR30`, a connection that had called the module before the change and was then
+  sent a 30-character value with a refreshed descriptor had it read as 20 characters
+  (`strlen` 20), with no error. The same connection after `reset_server_context()`, and a new
+  connection, ran the new version (`strlen` 30). With a grown structure, the old session's reply
+  still carried the old width, so the refreshed descriptor could not decode it; saprfclib
+  refused the reply and retired the connection.
+- **`RFC_METADATA_GET` reports a change date.** Called with `GET_TIMESTAMPS='X'`, its
+  `FUNCTIONNAMES` table returns `UDAT` and `UTIME` per function; without the flag both come back
+  blank. Both moved when the probe module's interface was changed and activated.
+
+What the library does with this: `invalidate_metadata()` on a connection, a pool or a
+`MetadataCache` forgets the cached descriptors and the DDIC layouts cached alongside, so the
+next call fetches them again. A pool also resets every connection loaded before the invalidate
+(`reset_server_context()`, in place of its health check) before it lends it again. A single
+connection does not reset itself, because that would drop session state the caller may still
+need: call `reset_server_context()` after `invalidate_metadata()`, or open a new connection.
+Staleness is not detected automatically; see Open Questions.
+
 ---
 
 ## Open Questions
+
+!!! note "MEDIUM: detecting a stale descriptor automatically"
+    `RFC_METADATA_GET` returns a function's `UDAT`/`UTIME` (above), and they moved when the
+    function's own interface changed. Not tested: whether they also move when only a DDIC
+    structure the function uses is changed, and what `DATATYPESCONT-TIMESTAMP` reports for a
+    type. Until a probe settles both, a check built on the function's date alone would miss a
+    changed structure, so saprfclib does not offer one; invalidation is explicit.
 
 !!! note "LOW: client attributes after a context reset"
     In its first call after a reset, the reference client sends its client attributes again

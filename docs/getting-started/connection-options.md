@@ -224,6 +224,44 @@ connection is opened, because reading such a value by truthiness would turn `"0"
 - `trace=` — an `RfcTrace`, which writes every frame in the NW RFC SDK's trace format with
   credentials redacted.
 - `metadata_cache=` — share function descriptions between connections.
+- `call_limits=` — bound what one call may send; see [Limiting call arguments](#limiting-call-arguments).
+
+## Limiting call arguments
+
+Every call copies its arguments first, so changing your objects while an async call waits,
+or after adding a call to a unit, does not change what is sent. A generator of table rows is
+read once, at that point. Arguments that cannot be sent are refused with
+`CallParameterError` before anything is encoded: a value that contains itself, or nesting
+deeper than any function interface allows.
+
+A service that passes on input it did not write itself can also bound the size:
+
+```python
+limits = saprfclib.CallLimits(max_table_rows=100_000, max_value_bytes=50_000_000)
+conn = saprfclib.connect(..., call_limits=limits)
+```
+
+- `max_table_rows` — rows in any one table, nested tables included.
+- `max_value_bytes` — total size of all text (counted as UTF-16, as it is sent) and binary
+  values in one call.
+
+Both are off by default. What a system accepts depends on its configuration and memory, and
+no single number would be right for every caller, so the library does not pick one.
+
+## When a function module changes
+
+Function interfaces are cached in-process. After a function module, or a structure or table
+type it uses, is changed and activated in SAP:
+
+```python
+conn.invalidate_metadata("Z_MY_FUNCTION")   # or invalidate_metadata() for all of this system
+conn.reset_server_context()                 # the session still runs the old version until reset
+```
+
+Without the reset, the server session keeps the version it loaded before the change; a live
+probe showed a widened `CHAR` parameter still read at its old length, with no error. A pool
+does both for its connections (`pool.invalidate_metadata()`). See
+`docs/protocol/framing.md`, "Metadata and the server's loaded version".
 
 ## Unknown keyword arguments
 

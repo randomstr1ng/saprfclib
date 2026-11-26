@@ -225,6 +225,7 @@ async def test_async_pool_timeout_reports_the_discards_it_made() -> None:
     from collections import deque
 
     from saprfclib.exceptions import PoolTimeoutError
+    from saprfclib.metadata import MetadataCache
     from saprfclib.pool import AsyncConnectionPool, PoolMetrics
 
     class _DeadConn:
@@ -242,6 +243,10 @@ async def test_async_pool_timeout_reports_the_discards_it_made() -> None:
     # One idle connection that fails its health check, and an open() that never
     # completes — so the wait times out after the pool has discarded something.
     pool._idle = deque([_DeadConn()])
+    pool._waiters = deque()
+    pool._max_waiters = None
+    pool._loaded = {}
+    pool._metadata_cache = MetadataCache()
     pool._in_use = set()
     pool._created = 1
     pool._max_size = 1
@@ -261,9 +266,12 @@ async def test_async_pool_timeout_reports_the_discards_it_made() -> None:
 
 
 def test_pool_logs_the_health_check_it_failed(caplog: pytest.LogCaptureFixture) -> None:
+    from saprfclib.metadata import MetadataCache
     from saprfclib.pool import ConnectionPool
 
     pool = ConnectionPool.__new__(ConnectionPool)
+    pool._metadata_cache = MetadataCache()
+    pool._loaded = {}
 
     class _Broken:
         def ping(self) -> bool:

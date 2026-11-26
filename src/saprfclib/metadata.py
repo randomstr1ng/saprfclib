@@ -158,21 +158,66 @@ class MetadataCache:
     the second simply overwrites with an equal value. Holding the lock across a
     network round-trip would serialise every first call in the pool behind one
     connection, which is a worse trade than a rare duplicate fetch.
+
+    Nothing expires on its own. When a function module or a DDIC type it uses is
+    changed and activated in the system, the cached descriptor still describes the
+    old layout, and values are encoded at the old offsets. Call :meth:`invalidate`
+    (or ``invalidate_metadata()`` on a connection or pool) after such a change (#80).
     """
 
     def __init__(self) -> None:
         # {sys_id: {func_name_upper: FunctionDesc}}
         self._cache: dict[str, dict[str, FunctionDesc]] = {}
         self._lock = threading.Lock()
+        # Bumped by every invalidate(). Connections keep a cache of DDIC type layouts
+        # of their own, filled while a descriptor is fetched; they compare this number
+        # before using it and drop it when it moved. That reaches connections a pool
+        # has lent to other threads without touching them.
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """A counter that changes whenever anything in the cache is invalidated."""
+        return self._generation
+
+    def invalidate(self, name: str | None = None, *, sys_id: str | None = None) -> int:
+        """Forget cached descriptors; return how many were dropped.
+
+        ``name`` limits it to one function module (case-insensitive); ``sys_id``
+        limits it to one system's bucket. With neither, the cache is emptied. The
+        DDIC type layouts connections cached alongside are dropped in every case,
+        because a function's descriptor embeds them and a changed structure is just
+        as stale as a changed function.
+        """
+        with self._lock:
+            buckets = (
+                list(self._cache.values()) if sys_id is None else [self._cache.get(sys_id, {})]
+            )
+            dropped = 0
+            for bucket in buckets:
+                if name is None:
+                    dropped += len(bucket)
+                    bucket.clear()
+                elif bucket.pop(name.upper(), None) is not None:
+                    dropped += 1
+            self._generation += 1
+            return dropped
 
     def get(self, sys_id: str, name: str) -> FunctionDesc | None:
         """Return the cached descriptor or None on miss (never raises KeyError)."""
         with self._lock:
             return self._cache.get(sys_id, {}).get(name.upper())
 
-    def put(self, sys_id: str, desc: FunctionDesc) -> None:
-        """Cache a descriptor under (sys_id, desc.name.upper())."""
+    def put(self, sys_id: str, desc: FunctionDesc, *, generation: int | None = None) -> None:
+        """Cache a descriptor under (sys_id, desc.name.upper()).
+
+        ``generation`` is :attr:`generation` as read before the descriptor was
+        fetched. If an invalidate() happened since, the descriptor may predate the
+        change it was meant to forget, so it is not stored.
+        """
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             self._cache.setdefault(sys_id, {})[desc.name.upper()] = desc
 
     def get_or_fetch(
@@ -188,8 +233,9 @@ class MetadataCache:
         hit = self.get(sys_id, name)
         if hit is not None:
             return hit
+        generation = self._generation
         desc = fetch(name)
-        self.put(sys_id, desc)
+        self.put(sys_id, desc, generation=generation)
         return desc
 
 
@@ -496,11 +542,12 @@ def get_function_desc(
             "connection does not implement _call_bootstrap — "
             "use a Connection instance (Phase 4) or pre-populate the MetadataCache"
         )
+    generation = cache.generation if cache is not None else None
     desc: FunctionDesc = bootstrap_fn(name)
 
     # Cache the result (META-03): subsequent calls for (cache_key, name) are served
     # from the cache with no second round-trip.
     if cache is not None and cache_key is not None:
-        cache.put(cache_key, desc)
+        cache.put(cache_key, desc, generation=generation)
 
     return desc

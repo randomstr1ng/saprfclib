@@ -49,7 +49,7 @@
   },
   "connect": {
    "kind": "function",
-   "signature": "(ashost: 'str', sysnr: 'str | int', client: 'str', user: 'str | None' = None, passwd: 'str | None' = None, *, lang: 'str' = 'E', strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, timeout: 'float | None' = None, connect_timeout: 'float | None' = 10.0, read_timeout: 'float | None' = None, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None, saprouter: 'str | None' = None, mshost: 'str | None' = None, msserv: 'int | str | None' = None, ms_http_port: 'int | str | None' = None, ms_use_http: 'bool' = True, sysid: 'str | None' = None, group: 'str | None' = None, port: 'int | None' = None, wshost: 'str | None' = None, wsport: 'int | None' = None, ws_path: 'str | None' = None, ws_proxy_host: 'str | None' = None, ws_proxy_port: 'int | None' = None, ws_proxy_user: 'str | None' = None, ws_proxy_pass: 'str | None' = None, ws_tls_verify: 'bool' = True, proxy_type: 'str | None' = None, proxy_host: 'str | None' = None, proxy_port: 'int | None' = None, proxy_jwt: 'str | None' = None, proxy_scc_location_id: 'str | None' = None, proxy_client_id: 'str | None' = None, proxy_client_secret: 'str | None' = None, proxy_token_url: 'str | None' = None, socket_factory: 'Callable[[str, int], socket.socket] | None' = None, gwhost: 'str | None' = None, trace: 'RfcTrace | None' = None, snc_lib: 'str | None' = None, snc_partnername: 'str | None' = None, snc_myname: 'str | None' = None, snc_qop: 'int | None' = None, snc_sso: 'bool | None' = None, snc_pse: 'str | os.PathLike[str] | None' = None, snc_pse_pin: 'str | None' = None, snc_credential: 'SncCredential | None' = None, snc_kerberos: 'bool | KerberosLogin | None' = None, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None) -> 'Connection'",
+   "signature": "(ashost: 'str', sysnr: 'str | int', client: 'str', user: 'str | None' = None, passwd: 'str | None' = None, *, lang: 'str' = 'E', strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, call_limits: 'CallLimits | None' = None, timeout: 'float | None' = None, connect_timeout: 'float | None' = 10.0, read_timeout: 'float | None' = None, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None, saprouter: 'str | None' = None, mshost: 'str | None' = None, msserv: 'int | str | None' = None, ms_http_port: 'int | str | None' = None, ms_use_http: 'bool' = True, sysid: 'str | None' = None, group: 'str | None' = None, port: 'int | None' = None, wshost: 'str | None' = None, wsport: 'int | None' = None, ws_path: 'str | None' = None, ws_proxy_host: 'str | None' = None, ws_proxy_port: 'int | None' = None, ws_proxy_user: 'str | None' = None, ws_proxy_pass: 'str | None' = None, ws_tls_verify: 'bool' = True, proxy_type: 'str | None' = None, proxy_host: 'str | None' = None, proxy_port: 'int | None' = None, proxy_jwt: 'str | None' = None, proxy_scc_location_id: 'str | None' = None, proxy_client_id: 'str | None' = None, proxy_client_secret: 'str | None' = None, proxy_token_url: 'str | None' = None, socket_factory: 'Callable[[str, int], socket.socket] | None' = None, gwhost: 'str | None' = None, trace: 'RfcTrace | None' = None, snc_lib: 'str | None' = None, snc_partnername: 'str | None' = None, snc_myname: 'str | None' = None, snc_qop: 'int | None' = None, snc_sso: 'bool | None' = None, snc_pse: 'str | os.PathLike[str] | None' = None, snc_pse_pin: 'str | None' = None, snc_credential: 'SncCredential | None' = None, snc_kerberos: 'bool | KerberosLogin | None' = None, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None) -> 'Connection'",
    "members": {},
    "stability": "stable",
    "reason": "direct, message-server, SAProuter, SNC and WebSocket logon verified live; route-specific previews are listed in README.md"
@@ -61,32 +61,42 @@
    "stability": "preview",
    "reason": "SOCKS5 without proxy authentication is verified live; the JWT method 0x80 it configures is [ASSUMED] (docs/protocol/socks5.md)"
   },
+  "CallLimits": {
+   "kind": "class",
+   "signature": "(max_table_rows: 'int | None' = None, max_value_bytes: 'int | None' = None) -> None",
+   "members": {},
+   "stability": "stable",
+   "reason": "caller-side bounds checked before encoding; nothing of it reaches the wire (tests/test_call_parameters.py)"
+  },
   "ConnectionPool": {
    "kind": "class",
-   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False) -> 'None'",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False, max_waiters: 'int | None' = None) -> 'None'",
    "members": {
     "acquire": "(self, timeout: 'float' = 30.0) -> 'Iterator[Any]'",
     "close": "(self) -> 'None'",
     "idle": "property",
     "in_use": "property",
+    "invalidate_metadata": "(self, name: 'str | None' = None) -> 'int'",
     "max_size": "property",
+    "max_waiters": "property",
     "release": "(self, conn: 'Any') -> 'None'",
     "size": "property",
-    "stats": "(self) -> 'dict[str, float | int]'"
+    "stats": "(self) -> 'dict[str, float | int]'",
+    "waiting": "property"
    },
    "stability": "stable",
-   "reason": "live acquire/call/release (tests/test_phase05_integration.py); reset_on_release verified with a live context reset (#68)"
+   "reason": "live acquire/call/release (tests/test_phase05_integration.py); reset_on_release verified with a live context reset (#68); FIFO waiters and max_waiters offline (tests/test_pool_fairness.py); invalidate_metadata() reset-before-lend follows a live probe (#80)"
   },
   "connect_async": {
    "kind": "function",
-   "signature": "(ashost: 'str', sysnr: 'str | int', client: 'str', user: 'str | None' = None, passwd: 'str | None' = None, *, lang: 'str' = 'E', strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, timeout: 'float | None' = None, connect_timeout: 'float | None' = 10.0, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None, saprouter: 'str | None' = None, mshost: 'str | None' = None, msserv: 'int | str | None' = None, ms_http_port: 'int | str | None' = None, ms_use_http: 'bool' = True, sysid: 'str | None' = None, group: 'str | None' = None, port: 'int | None' = None, snc_lib: 'str | None' = None, snc_partnername: 'str | None' = None, snc_myname: 'str | None' = None, snc_qop: 'int | None' = None, snc_sso: 'bool | None' = None, snc_pse: 'str | os.PathLike[str] | None' = None, snc_pse_pin: 'str | None' = None, snc_credential: 'SncCredential | None' = None, snc_kerberos: 'bool | KerberosLogin | None' = None, wshost: 'str | None' = None, wsport: 'int | None' = None, ws_path: 'str | None' = None, ws_proxy_host: 'str | None' = None, ws_proxy_port: 'int | None' = None, ws_proxy_user: 'str | None' = None, ws_proxy_pass: 'str | None' = None, ws_tls_verify: 'bool' = True, read_timeout: 'float | None' = None, proxy_type: 'str | None' = None, proxy_host: 'str | None' = None, proxy_port: 'int | None' = None, proxy_jwt: 'str | None' = None, proxy_scc_location_id: 'str | None' = None, proxy_client_id: 'str | None' = None, proxy_client_secret: 'str | None' = None, proxy_token_url: 'str | None' = None, socket_factory: 'Callable[[str, int], socket.socket] | None' = None, gwhost: 'str | None' = None, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None) -> 'AsyncConnection'",
+   "signature": "(ashost: 'str', sysnr: 'str | int', client: 'str', user: 'str | None' = None, passwd: 'str | None' = None, *, lang: 'str' = 'E', strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, call_limits: 'CallLimits | None' = None, timeout: 'float | None' = None, connect_timeout: 'float | None' = 10.0, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None, saprouter: 'str | None' = None, mshost: 'str | None' = None, msserv: 'int | str | None' = None, ms_http_port: 'int | str | None' = None, ms_use_http: 'bool' = True, sysid: 'str | None' = None, group: 'str | None' = None, port: 'int | None' = None, snc_lib: 'str | None' = None, snc_partnername: 'str | None' = None, snc_myname: 'str | None' = None, snc_qop: 'int | None' = None, snc_sso: 'bool | None' = None, snc_pse: 'str | os.PathLike[str] | None' = None, snc_pse_pin: 'str | None' = None, snc_credential: 'SncCredential | None' = None, snc_kerberos: 'bool | KerberosLogin | None' = None, wshost: 'str | None' = None, wsport: 'int | None' = None, ws_path: 'str | None' = None, ws_proxy_host: 'str | None' = None, ws_proxy_port: 'int | None' = None, ws_proxy_user: 'str | None' = None, ws_proxy_pass: 'str | None' = None, ws_tls_verify: 'bool' = True, read_timeout: 'float | None' = None, proxy_type: 'str | None' = None, proxy_host: 'str | None' = None, proxy_port: 'int | None' = None, proxy_jwt: 'str | None' = None, proxy_scc_location_id: 'str | None' = None, proxy_client_id: 'str | None' = None, proxy_client_secret: 'str | None' = None, proxy_token_url: 'str | None' = None, socket_factory: 'Callable[[str, int], socket.socket] | None' = None, gwhost: 'str | None' = None, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None) -> 'AsyncConnection'",
    "members": {},
    "stability": "stable",
    "reason": "live async call (tests/test_phase09_integration.py)"
   },
   "AsyncConnection": {
    "kind": "class",
-   "signature": "(transport: 'AsyncTransport', *, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None, strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None) -> 'None'",
+   "signature": "(transport: 'AsyncTransport', *, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None, strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, call_limits: 'CallLimits | None' = None, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None) -> 'None'",
    "members": {
     "call": "(self, func_name: 'str', **params: 'object') -> 'dict[str, Any]'",
     "call_transactional": "(self, func_name: 'str', *, tid: 'str', queue: 'str | None' = None, **params: 'object') -> 'None'",
@@ -96,6 +106,7 @@
     "create_unit": "(self, uid: 'str | None' = None, queues: 'list[str] | None' = None) -> '_AsyncUnitHandle'",
     "get_connection_attributes": "(self) -> 'ConnectionAttributes'",
     "get_unit_state": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'UnitState'",
+    "invalidate_metadata": "(self, name: 'str | None' = None) -> 'int'",
     "ping": "(self) -> 'bool'",
     "reset_server_context": "(self) -> 'None'",
     "retry_parked": "(self, tid: 'str') -> 'None'",
@@ -151,17 +162,20 @@
   },
   "AsyncConnectionPool": {
    "kind": "class",
-   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False) -> 'None'",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False, max_waiters: 'int | None' = None) -> 'None'",
    "members": {
     "acquire": "(self, timeout: 'float' = 30.0) -> 'AsyncIterator[Any]'",
     "close": "(self) -> 'None'",
     "idle": "property",
     "in_use": "property",
+    "invalidate_metadata": "(self, name: 'str | None' = None) -> 'int'",
     "max_size": "property",
+    "max_waiters": "property",
     "release": "(self, conn: 'Any') -> 'None'",
     "size": "property",
     "start": "(self) -> 'None'",
-    "stats": "(self) -> 'dict[str, float | int]'"
+    "stats": "(self) -> 'dict[str, float | int]'",
+    "waiting": "property"
    },
    "stability": "stable",
    "reason": "pool semantics shared with ConnectionPool; live async calls"
@@ -216,6 +230,13 @@
    "stability": "stable",
    "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
   },
+  "CallParameterError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
   "CommunicationError": {
    "kind": "exception",
    "signature": null,
@@ -231,6 +252,13 @@
    "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
   },
   "LogonError": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "PoolOverloadedError": {
    "kind": "exception",
    "signature": null,
    "members": {},

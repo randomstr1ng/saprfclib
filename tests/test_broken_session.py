@@ -209,7 +209,11 @@ def test_pool_discards_a_retired_connection_without_pinging_it() -> None:
     healthy = FakeConn(SessionState.READY)
     assert _is_retired(healthy) is False
 
+    from saprfclib.metadata import MetadataCache
+
     pool = object.__new__(__import__("saprfclib.pool", fromlist=["ConnectionPool"]).ConnectionPool)
+    pool._metadata_cache = MetadataCache()
+    pool._loaded = {}
     assert pool._ping_ok(broken) is False
     assert broken.pinged is False, "a known-dead stream must not be written to"
     assert pool._ping_ok(healthy) is True

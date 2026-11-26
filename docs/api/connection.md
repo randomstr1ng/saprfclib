@@ -6,6 +6,7 @@
         - call
         - ping
         - reset_server_context
+        - invalidate_metadata
         - transaction
         - close
         - get_connection_attributes
@@ -16,3 +17,5 @@
         - confirm_unit
         - get_unit_state
         - rollback_unit
+
+::: saprfclib.invoke.CallLimits

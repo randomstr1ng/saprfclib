@@ -18,7 +18,9 @@ SapRfcError
 ├── SncError                   — SNC GSS-API handshake or frame error
 ├── WebSocketError             — WebSocket upgrade, framing, or TLS error
 ├── ProxyError                 — SOCKS5 proxy negotiation, authentication or CONNECT failed
-└── PoolTimeoutError           — ConnectionPool.acquire() timed out
+├── CallParameterError         — call arguments refused before sending (also a ValueError)
+├── PoolTimeoutError           — ConnectionPool.acquire() timed out
+└── PoolOverloadedError        — ConnectionPool.acquire() refused: max_waiters already waiting
 ```
 
 ## Exception details
@@ -136,6 +138,32 @@ timeout elapses. Carries diagnostic counters for debugging pool exhaustion.
 | `idle` | `int` | Connections sitting idle |
 | `max_size` | `int` | Pool's hard ceiling on total connections |
 
+### PoolOverloadedError
+
+Raised by `acquire()` on a pool created with `max_waiters=N` when no connection is free and
+`N` callers are already waiting. It is raised at once, without waiting, so a service under
+more load than its pool can take sheds the excess instead of queueing everyone into a
+`PoolTimeoutError`. Nothing was borrowed; retrying later is safe.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `waiters` | `int` | Callers already waiting |
+| `max_waiters` | `int` | The configured limit |
+| `active`, `idle`, `max_size` | `int` | As for `PoolTimeoutError` |
+
+### CallParameterError
+
+Raised by `call()`, `call_transactional()` and a unit's `call()` when the arguments cannot be
+sent: a value that contains itself, nesting deeper than any function interface allows, or a
+limit set with `CallLimits` exceeded. It is raised before anything is encoded or sent, so the
+connection stays usable. It is also a `ValueError`.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `path` | `str` | The offending value, e.g. `IT_ROWS[3]-FIELD` (field `FIELD` of row 3 of `IT_ROWS`) |
+
+The message names the path and the limit, never the value.
+
 ## Argument errors are not `SapRfcError`
 
 Some failures happen **before** anything reaches the server, so they are plain
@@ -147,6 +175,9 @@ example:
 - an invalid `lang` code or `snc_qop` level (`ValueError`)
 - only one of `user` and `passwd` (`ValueError`)
 - a yes/no parameter that is not `True`/`False`, `1`/`0` or `"1"`/`"0"` (`TypeError`)
+
+`CallParameterError` is the exception: it is raised before sending too, but is both a
+`SapRfcError` and a `ValueError`, so either `except` catches it.
 
 ```python
 try:
