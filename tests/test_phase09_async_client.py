@@ -103,7 +103,7 @@ async def _stub_bootstrap(func_name: str) -> FunctionDesc:
 # Every real response ends with the 0xFFFF terminator; without it a buffer that
 # parses at least one record and then ends on a record boundary now reads as a
 # continuation (issue #44), so the terminator is part of a realistic single frame.
-_TLV_TERM: bytes = struct.pack(">HH", 0xFFFF, 0)
+_TLV_TERM: bytes = struct.pack(">HHH", 0xFFFF, 0, 0xFFFF)  # FF FF 00 00 FF FF, as on the wire
 _EMPTY_OK_RESP: bytes = struct.pack(">HHI", 0x0420, 4, 0) + _TLV_TERM
 
 

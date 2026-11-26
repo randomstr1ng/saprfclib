@@ -111,7 +111,7 @@ carries the same labels (`tests/api/public_api.json`).
 | XML table text (`ET_DATA` with `USE_ET_DATA_4_RETURN`) | |
 | Deep structures (STRING, XSTRING, nested structures and tables) and table-typed IMPORTING/EXPORTING/CHANGING parameters | Kernel 916: calls, `RfcServer`, tRFC and qRFC units; tables of elementary rows; namespaced component names. Sent and read as XML like the reference SDK (`docs/protocol/serialization.md`) |
 | Connection pool, sync and async; `connect_async()` | `reset_on_release=True` resets ABAP session state between borrowers; waiters served in arrival order, `max_waiters` sheds overload |
-| `invalidate_metadata()` on a connection, a pool or a `MetadataCache` | Explicit only: nothing on the wire marks a cached interface as stale (`docs/protocol/framing.md`) |
+| `invalidate_metadata()` on a connection, a pool or a `MetadataCache`; `check_metadata()` and the pool's `metadata_check_interval` | A check asks the server for change timestamps; the first one only records (`docs/protocol/framing.md`) |
 | Call arguments copied before sending; `CallLimits` bounds on rows and value size | Checked before anything is encoded |
 | `reset_server_context()` and `conn.transaction()` (BAPI commit / rollback) | |
 | Message server / group logon (`mshost`) | Binary and HTTP resolution |
@@ -123,7 +123,7 @@ carries the same labels (`tests/api/public_api.json`).
 | SNC through an external GSS-API library (`snc_lib`) | |
 | SNC single sign-on (`snc_sso=True`) | |
 | RFC server: registration and inbound calls (`RfcServer`, `AsyncRfcServer`) | Plain TCP |
-| tRFC and qRFC submit, with durable TID stores | A retry resends on the same connection (#75) |
+| tRFC and qRFC submit, with durable TID stores | `retry_parked` re-sends a parked request on any connection, run at most once per TID |
 
 **Preview**
 

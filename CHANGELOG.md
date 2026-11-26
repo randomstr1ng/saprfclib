@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`check_metadata()`** on `Connection` and `AsyncConnection`, and
+  **`metadata_check_interval`** on both pools (#112). The check asks `RFC_METADATA_GET`, per
+  cached function, for its change date and the timestamps of the DDIC types it uses, and
+  invalidates the functions whose stamp moved or that no longer exist. Both parts are needed: a
+  live probe changed only a structure a function uses, and the function's own date did not move
+  while the structure's timestamp did. The first check of a function only records. A pool runs
+  the check at most once per interval and resets the connection it then lends; off by default.
+
 - **Deep structures and table-typed parameters** (#85). A structure with a STRING, XSTRING,
   nested structure or nested table component, and every table-typed IMPORTING, EXPORTING or
   CHANGING parameter, is now sent and read as XML (`0x3c02`/`0x3c05`), as the reference client
@@ -72,6 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md`.
 
 ### Fixed
+
+- **`retry_parked()` could never succeed on a new connection** (#115). The parked frame carried
+  the GW handle and index of the connection that built it, and the gateway refused it on any
+  other ("Conversation not found"), whether or not the first send had reached the server. The
+  stored request is now framed for the connection it is re-sent on. Probe: a call that had
+  never arrived ran once, one that had already run was not run again. `retry_parked_unit()`
+  frames the same way.
+- **A reply split inside its terminator was read as complete** (#114). If a frame boundary fell
+  between the first four bytes of `FF FF 00 00 FF FF` and the last two, the reply was accepted
+  and those two bytes were left for the next call to misread. Found by a new property test that
+  re-splits captured multi-frame replies at random offsets.
+- **The logon TLV parser read the extended length form as a literal `0xFFFF`** (#113). The
+  reference client writes a logon value over 65534 bytes in that form (live capture), as on
+  the call path; the parser now reads it.
 
 - **A deep structure parameter was typed as DECFLOAT16** (#85). Its metadata code `v` was mapped
   from an `[ASSUMED]` guess, so such a parameter had no layout and any value for it failed or was

@@ -2335,6 +2335,14 @@ def tlv_stream_status(tlv: bytes) -> str:
         tag, length = struct.unpack_from(">HH", tlv, pos)
         pos += 4
         if tag == _TAG_TERMINATOR:
+            # The terminator is six bytes, FF FF 00 00 FF FF, in every captured
+            # stream (57 of them under tests/golden). A frame boundary can fall
+            # before its closing FF FF; calling the stream complete then would
+            # leave those two bytes in the socket for the next call to misread
+            # (found by the split property in tests/test_multiframe_split_property.py,
+            # #114). So it is complete only once the closing tag has arrived too.
+            if pos + 2 > n:
+                return _TLV_TRUNCATED if records else _TLV_NOT_TLV
             return _TLV_COMPLETE
         if length == 0xFFFF:
             if pos + 4 > n:

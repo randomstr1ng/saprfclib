@@ -576,6 +576,17 @@ by a live logon. Behaviour for non-ASCII passwords is untested — treat it as a
 | A 7.52 server sends no 0x0450/0x0452/0x0453 at all; sys_id is legitimately empty | `signon_incomplete_752_response.bin` | HIGH — live capture |
 | Logon always calls RFCPING as its probe (tag 0x0102 in the logon TLV) | Frame 14 | HIGH — live capture |
 
+### Extended TLV length in the logon
+
+A logon value of 65535 bytes or more is written in the extended length form, as on the call
+path: `0xFFFF` in the length field, then the length as a 4-byte BE integer, then the value and
+the closing tag. Live capture, ABAP Platform 2025, 2026-11-26: the reference client, given a
+70000-character logon ticket, sent it as `06 70 FF FF 00 01 11 70`, the value and `06 70`,
+across three request frames, and the server read it and answered with an ordinary logon refusal
+(`RFC_LOGON_FAILURE`). `Session._parse_tlv` reads the form (`tests/test_handshake_extended_length.py`).
+**[ASSUMED]** that a server writes it in a logon reply too: no logon reply that long has been
+seen, and none is likely, since every value in one is short.
+
 ---
 
 ## Open Questions
@@ -586,7 +597,6 @@ by a live logon. Behaviour for non-ASCII passwords is untested — treat it as a
 | OQ-C03 | Tag 0x0101 (8 bytes): bytes 1–2 of the response, and the meaning of the client's value `0301010101010000` | MEDIUM | Response bytes 0, 3, 4–7 are decoded under "The `0x0101` encoding header"; bytes 1–2 need a big-endian capture |
 | OQ-C07 | Tag 0x0011 in the logon request | LOW | The reference client sends `E` there whatever the logon language; saprfclib sends the logon language. A logon where the two lead to different results would show what it controls |
 | OQ-C06 | Tag 0x0161 (1 byte) in the logon reply | LOW | Always `00` so far (kernels 793 and 916); a system where it differs would show what it means |
-| OQ-C08 | Extended TLV length (`0xFFFF` + 4-byte length) during the handshake | LOW | The call path reads that form (`docs/protocol/framing.md`); the handshake parser (`Session._parse_tlv`) does not, because no handshake capture contains one. It reads `0xFFFF` as a literal length, so such a record would be refused or misread, never crash (`tests/test_fuzz_decoders.py`). A logon frame with a value over 65534 bytes would settle it |
 
 ---
 

@@ -263,6 +263,11 @@ probe showed a widened `CHAR` parameter still read at its old length, with no er
 does both for its connections (`pool.invalidate_metadata()`). See
 `docs/protocol/framing.md`, "Metadata and the server's loaded version".
 
+To find out instead of knowing, `conn.check_metadata()` asks the server whether any cached
+interface, or a type it uses, changed since the previous check, invalidates those and returns
+their names (call `reset_server_context()` next). The first check only records; a pool can
+run it on an interval (`metadata_check_interval`).
+
 ## Unknown keyword arguments
 
 `Connection.call()` matches keyword arguments against the function module's

@@ -60,7 +60,7 @@ def _rfcping_ok() -> bytes:
     return b"".join(
         [
             _tlv(0x0420, struct.pack(">I", 0)),
-            _tlv(0xFFFF, b""),
+            _tlv_closed(0xFFFF, b""),  # FF FF 00 00 FF FF, as on the wire
         ]
     )
 
@@ -243,7 +243,7 @@ def _system_failure_response() -> bytes:
     return (
         _tr(0x0500, b"")
         + _tr(0x0420, _struct.pack(">I", 3))  # rc=3, no exception key
-        + _struct.pack(">HH", 0xFFFF, 0)
+        + _struct.pack(">HHH", 0xFFFF, 0, 0xFFFF)
         + b"\xff\xff"
     )
 
@@ -270,7 +270,7 @@ def _invoke_response_for_stfc(echo: str = "hi", resp: str = "SAP test") -> bytes
         + _tr(0x0203, _pad255(echo))
         + _tr(0x0201, "RESPTEXT".encode("utf-16-le"))
         + _tr(0x0203, _pad255(resp))
-        + _struct.pack(">HH", 0xFFFF, 0)
+        + _struct.pack(">HHH", 0xFFFF, 0, 0xFFFF)
         + b"\xff\xff"
     )
 
@@ -392,7 +392,7 @@ def test_call_date_time_conversion() -> None:
         + _tr(0x0203, time_val)
         + _tr(0x0201, "EMPTY_DATE".encode("utf-16-le"))
         + _tr(0x0203, empty_date)
-        + _struct.pack(">HH", 0xFFFF, 0)
+        + _struct.pack(">HHH", 0xFFFF, 0, 0xFFFF)
         + b"\xff\xff"
     )
     transport._responses.append(invoke_resp)

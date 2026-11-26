@@ -1032,6 +1032,17 @@ It established:
 - **`RFC_METADATA_GET` reports a change date.** Called with `GET_TIMESTAMPS='X'`, its
   `FUNCTIONNAMES` table returns `UDAT` and `UTIME` per function; without the flag both come back
   blank. Both moved when the probe module's interface was changed and activated.
+- **A structure change moves the type's timestamp, not the function's date.** Probe,
+  2026-11-26: a component was added to a flat structure that a deep structure contains and a
+  module uses, and nothing else was touched. The module's `UDAT`/`UTIME` stayed where they
+  were (11:55:30). `DATATYPESCONT-TIMESTAMP`, returned for the types named in `DATATYPES`
+  (nested types included, as the server resolves them), moved for the changed structure and for
+  the structure containing it (both to 14:52:33). Without `DATATYPES` no type timestamps come
+  back. A function that no longer exists comes back in `FUNC_ERRORS` (`FU_NOT_FOUND`).
+- **`RFC_GET_FUNCTION_INTERFACE` kept the old length.** After that change it still reported the
+  structure parameter at 144 bytes, while `DDIF_FIELDINFO_GET` already listed the new component;
+  a call through a fresh connection, which takes the layout from `DDIF_FIELDINFO_GET`, sent and
+  read the new component.
 
 What the library does with this: `invalidate_metadata()` on a connection, a pool or a
 `MetadataCache` forgets the cached descriptors and the DDIC layouts cached alongside, so the
@@ -1039,18 +1050,20 @@ next call fetches them again. A pool also resets every connection loaded before 
 (`reset_server_context()`, in place of its health check) before it lends it again. A single
 connection does not reset itself, because that would drop session state the caller may still
 need: call `reset_server_context()` after `invalidate_metadata()`, or open a new connection.
-Staleness is not detected automatically; see Open Questions.
+
+Change detection is opt-in. `check_metadata()` asks `RFC_METADATA_GET`, for every function
+cached for the system, for its date and the timestamps of the types its descriptor uses (one
+round trip per function), compares them with what the previous check recorded, and invalidates
+the functions whose stamp moved or that are gone. The first check of a function only records:
+a change before it is not seen. A pool with `metadata_check_interval` runs it at most once per
+interval on the connection it is about to lend, and that connection is then reset by the
+staleness rule above. Probe, 2026-11-26: a baseline check reported nothing, the structure
+change above was then reported for the module that uses it, and after the reset the call used
+the new layout.
 
 ---
 
 ## Open Questions
-
-!!! note "MEDIUM: detecting a stale descriptor automatically"
-    `RFC_METADATA_GET` returns a function's `UDAT`/`UTIME` (above), and they moved when the
-    function's own interface changed. Not tested: whether they also move when only a DDIC
-    structure the function uses is changed, and what `DATATYPESCONT-TIMESTAMP` reports for a
-    type. Until a probe settles both, a check built on the function's date alone would miss a
-    changed structure, so saprfclib does not offer one; invalidation is explicit.
 
 !!! note "LOW: client attributes after a context reset"
     In its first call after a reset, the reference client sends its client attributes again
@@ -1441,7 +1454,11 @@ confirmed structure and answers exactly the question being asked.
 `invoke.tlv_stream_status` classifies a buffer three ways, and only the middle one
 reads another frame:
 
-- **complete** — the walk reached the terminator.
+- **complete** — the walk reached the terminator, all six bytes of it (`FF FF 00 00 FF FF`,
+  the form in every one of the 57 captured streams). A frame boundary between its first four
+  bytes and its closing `FF FF` reads on: calling the stream complete there left the last two
+  bytes in the socket for the next call to misread. Found by a property test that re-splits
+  captured replies at every kind of offset (`tests/test_multiframe_split_property.py`, #114).
 - **truncated** — at least one record parsed, and then either a record ran past the end
   or the buffer ended exactly on a record boundary with no terminator. The second case is
   a gateway chunk that happened to end between two fixed-width `0x0305` records (issue #44;
