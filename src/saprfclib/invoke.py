@@ -37,10 +37,11 @@ import re
 import struct
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from saprfclib.codec import decode, encode
-from saprfclib.compress import DecompressError, sapcompress_decompress
+from saprfclib.compress import DecompressError, sapcompress_compress_lzh, sapcompress_decompress
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
@@ -81,7 +82,8 @@ __all__ = [
     "build_trfc_call",
     "build_trfc_request",
     "build_trfc_confirm_request",
-    "build_bgrfc_request",
+    "bgrfc_ship_params",
+    "build_bgrfc_sdata",
     "build_bgrfc_confirm_request",
     "build_bgrfc_state_request",
     "bgrfc_unit_id_bytes",
@@ -1028,74 +1030,129 @@ def _validate_unit_id(uid: str) -> None:
         )
 
 
-def build_bgrfc_request(
+# --------------------------------------------------------------------------- #
+# bgRFC submit: BGRFC_DEST_SHIP's SDATA (#34)
+# --------------------------------------------------------------------------- #
+#
+# SDATA carries the unit's calls. From live captures of the reference client
+# submitting six units that differ in one way each (one call, two calls, a function
+# with no parameters, a longer value, a deep parameter, a queued unit; ABAP Platform
+# 2025, 2026-11-26, tests/golden/trfc/bgrfc_reference.json):
+#
+#   container  FF 06 02 01 02 02 80 00 | codepage, 4 ASCII digits | 00 00 00 00 |
+#              a SAPCOMPRESS LZH block of the plaintext below
+#   plaintext  06 0F 00 00 00 00 50 | total length - 120, BE uint32 |
+#              113 constant bytes naming SER_UNIT_TAB | number of calls, BE uint32 |
+#              per call: BC, 60, the function name blank-padded to 30 characters in
+#              UTF-16LE, 55 constant bytes (they carry the option string basxml=0,),
+#              the record length BE uint32, the record, CB BF |
+#              BF 04
+#   record     exactly what a tRFC submit's DATA rows carry for the call
+#              (build_trfc_call): the logon header, then the call without 0x0512,
+#              0x0205 declarations or table ids.
+#
+# Built this way, every one of the six plaintexts is reproduced byte for byte. The
+# constant parts are constant across all of them; what they mean field by field is
+# not needed to write them and is not claimed here.
+_BGRFC_SDATA_HEAD = bytes.fromhex("ff06020102028000")
+_BGRFC_SER_HEAD_A = bytes.fromhex("060f0000000050")
+_BGRFC_SER_HEAD_B = bytes.fromhex(
+    "0c00000000000000000000000000000000000000005300450052005f0055004e00490054005f005400"
+    "41004200ad0f0000000050aa00000000003caa130000000008af040000000004ad0f000000000caa08"
+    "0000000004aa140000000008ae0f000000000cae0f0000000050be00000050"
+)
+_BGRFC_ROW_NAME = b"\xbc" + struct.pack(">I", 60)
+_BGRFC_ROW_MID = bytes.fromhex(
+    "bdca0000001262006100730078006d006c003d0030002c00cbbc0000000400000000bdbe0000000c"
+    "00000001bc0000000400000001bdca"
+)
+_BGRFC_ROW_END = b"\xcb\xbf"
+_BGRFC_UNIT_END = b"\xbf\x04"
+_BGRFC_LENGTH_BIAS = 120  # the plaintext length field counts from here
+
+
+def build_bgrfc_sdata(calls: list[tuple[str, bytes]], codepage: str = "4103") -> bytes:
+    """SDATA of a bgRFC unit: ``calls`` are (function name, build_trfc_call record)."""
+    if not calls:
+        # The server deserializes SDATA and runs the unit inside the submit; an empty
+        # one fails an ABAP assertion and takes the session with it (trfc.md).
+        raise ValueError("a bgRFC unit needs at least one call")
+    if len(codepage) != 4 or not codepage.isdigit():
+        raise ValueError(f"codepage {codepage!r} is not four digits")
+    rows = []
+    for name, record in calls:
+        if not name or len(name) > 30:
+            raise ValueError(f"function name {name!r} does not fit 30 characters")
+        rows.append(
+            _BGRFC_ROW_NAME
+            + name.upper().ljust(30).encode("utf-16-le")
+            + _BGRFC_ROW_MID
+            + struct.pack(">I", len(record))
+            + record
+            + _BGRFC_ROW_END
+        )
+    body = b"".join(rows)
+    total = len(_BGRFC_SER_HEAD_A) + 4 + len(_BGRFC_SER_HEAD_B) + 4 + len(body) + 2
+    plain = (
+        _BGRFC_SER_HEAD_A
+        + struct.pack(">I", total - _BGRFC_LENGTH_BIAS)
+        + _BGRFC_SER_HEAD_B
+        + struct.pack(">I", len(calls))
+        + body
+        + _BGRFC_UNIT_END
+    )
+    return _BGRFC_SDATA_HEAD + codepage.encode("ascii") + bytes(4) + sapcompress_compress_lzh(plain)
+
+
+def bgrfc_ship_params(
     unit_id: str,
     unit_type: str,
     queue_names: list[str],
-    buffered_calls: list[bytes] | None = None,
+    sdata: bytes,
     *,
-    version: bytes = _RFC_VERSION,
-) -> bytes:
-    """Build the RFC invoke TLV payload for a BGRFC_DEST_SHIP (bgRFC submit) call.
+    caller_user: str,
+    caller_program: str,
+    caller_host: str,
+    sending_time: str,
+) -> dict[str, Any]:
+    """The parameters of a BGRFC_DEST_SHIP submit, for build_invoke_request.
 
-    This is a standard invoke frame with function name BGRFC_DEST_SHIP in TLV
-    0x0102 (the call-type discriminator per). The UnitID and
-    unit_type are encoded as named CHAR parameters (UTF-16LE).
-
-    Open gap OG-06-02: the exact BGRFC_DEST_SHIP parameter byte layout is deferred
-    to the D-08 live-capture gate. UnitID and unit_type are encoded as standalone
-    CHAR params (BGRFC_UNIT_ID, BGRFC_UNIT_TYPE) until the exact structure is known.
-
-    Security: validates UnitID length and hex charset before encoding (T-06-U02 / V5).
-
-    Args:
-        unit_id:        32-char uppercase hex UnitID.
-        unit_type:      'T' (no queues) or 'Q' (queues given).
-        queue_names:    List of queue names (empty for type 'T').
-        buffered_calls: Optional list of pre-serialized call TLV bytes to embed.
-        version:        RFC version string bytes (default b"754").
-
-    Returns:
-        Raw TLV payload bytes (not the full GW frame).
+    What the reference client fills (live capture, 2026-11-26): SSTATE's UNIT_ID (16
+    raw bytes) and UNIT_KIND, CALLER_CLIENT "000", the caller's user, program and
+    host, the sending time, and SUPPORTABILITY_INFO's UNIT_ID and UNIT_KIND; the rest
+    blank. The queue names go in OUT_IN_QUEUE_NAME_TAB (empty for a 'T' unit), not in
+    SSTATE-QUEUE_NAME. Where saprfclib's values differ from the reference client's,
+    they are informational fields the server stores for monitoring: CALLER_TCODE names
+    this library instead of "NW RFC Library 754", CALLER_USER is the logon user rather
+    than the operating-system user, DESTINATION is the client host (as the reference
+    client sent on kernel 793), and SENDING_TIME is the current UTC time (the reference
+    client's was a month behind in every capture). A unit submitted with these ran
+    (live, 2026-11-26).
     """
     _validate_unit_id(unit_id)
     if unit_type not in (_UNIT_TYPE_T, _UNIT_TYPE_Q):
         raise ValueError(f"unit_type must be 'T' or 'Q', got {unit_type!r}")
-
-    version_bytes: bytes
-    if isinstance(version, str):
-        version_bytes = version.encode("utf-16-le")
-    else:
-        version_bytes = version.decode("ascii").encode("utf-16-le")
-
-    parts: list[bytes] = [
-        tlv_record(_TAG_CALL_START),
-        tlv_record(_TAG_RFC_VERSION, version_bytes),
-        tlv_record(_TAG_FUNC_NAME, _BGRFC_DEST_SHIP.encode("utf-16-le")),
-        tlv_record(_TAG_PARAM_SECTION),
-        # UnitID — 32 chars → 64 bytes UTF-16LE (Pitfall 4: 2 bytes per code unit)
-        tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_ID".encode("utf-16-le")),
-        tlv_record(_TAG_PARAM_VALUE, unit_id.encode("utf-16-le")),
-        # Unit type — 'T' or 'Q'
-        tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_TYPE".encode("utf-16-le")),
-        tlv_record(_TAG_PARAM_VALUE, unit_type.encode("utf-16-le")),
-    ]
-    # Embed queue names (one param per queue — informational until OG-06-02 resolved).
-    for i, qname in enumerate(queue_names):
-        if qname:
-            parts.append(tlv_record(_TAG_PARAM_NAME, f"BGRFC_QUEUE_{i}".encode("utf-16-le")))
-            parts.append(tlv_record(_TAG_PARAM_VALUE, qname.encode("utf-16-le")))
-    # Embed buffered call payloads (each is a serialized TLV fragment from unit.call).
-    if buffered_calls:
-        # Encode the count so the server knows how many calls to expect
-        parts.append(tlv_record(_TAG_PARAM_NAME, "BGRFC_CALL_COUNT".encode("utf-16-le")))
-        parts.append(tlv_record(_TAG_PARAM_VALUE, str(len(buffered_calls)).encode("utf-16-le")))
-        for idx, call_bytes in enumerate(buffered_calls):
-            # Each buffered call is its own TLV payload embedded as raw bytes
-            parts.append(tlv_record(_TAG_PARAM_NAME, f"BGRFC_CALL_{idx}".encode("utf-16-le")))
-            parts.append(tlv_record(_TAG_PARAM_VALUE, call_bytes))
-    parts.append(tlv_record(_TAG_TERMINATOR))
-    return b"".join(parts)
+    if unit_type == _UNIT_TYPE_Q and not queue_names:
+        raise ValueError("a 'Q' unit needs at least one queue name")
+    raw_id = bgrfc_unit_id_bytes(unit_id)
+    kind = bgrfc_unit_kind(unit_type)
+    return {
+        "SDATA": sdata,
+        "SSTATE": {
+            "UNIT_ID": raw_id,
+            "UNIT_KIND": kind,
+            "DESTINATION": caller_host,
+            "CALLER_CLIENT": "000",
+            "CALLER_USER": caller_user,
+            "CALLER_TCODE": "saprfclib",
+            "CALLER_PROGRAM": caller_program,
+            "SENDING_TIME": Decimal(sending_time),
+            "SENDING_INSTANCE": caller_host,
+        },
+        "SUPPORTABILITY_INFO": {"UNIT_ID": raw_id, "UNIT_KIND": kind},
+        "SHUTDOWN_ACTIVE": " ",
+        "OUT_IN_QUEUE_NAME_TAB": list(queue_names),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1136,11 +1193,14 @@ BGRFC_UNIT_KIND_TRFC_INBOUND = 1409196106
 # reports a real unit as missing -- which reads exactly like a unit that was
 # never submitted.
 #
-# 'Q' is [ASSUMED] to be the queued counterpart by symmetry; only the 'T' case
-# has been captured. A capture of a submit carrying queue names would settle it.
+# A queued ('Q') unit travels as 1409196103, in its submit, state query and confirm
+# (reference client, live capture on ABAP Platform 2025, 2026-11-26). That is none
+# of the four values above: 1409196101, used here by symmetry until then, was an
+# [ASSUMED] guess, and a state query with it reported a real queued unit as missing.
+BGRFC_UNIT_KIND_QUEUED = 1409196103
 _UNIT_KIND_BY_TYPE = {
     _UNIT_TYPE_T: BGRFC_UNIT_KIND_TRFC_OUTBOUND,
-    _UNIT_TYPE_Q: BGRFC_UNIT_KIND_QRFC_OUTBOUND,
+    _UNIT_TYPE_Q: BGRFC_UNIT_KIND_QUEUED,
 }
 
 

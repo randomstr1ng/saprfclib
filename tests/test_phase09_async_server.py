@@ -27,11 +27,9 @@ _SKIP_SERVER = pytest.mark.skipif(
     reason="AsyncRfcServer not yet in saprfclib.server (09-05 not landed)",
 )
 
-from saprfclib.invoke import (  # noqa: E402
-    build_bgrfc_request,
-    build_invoke_request,
-)
+from saprfclib.invoke import build_invoke_request  # noqa: E402
 from saprfclib.types import RFC_EXPORT, RFC_IMPORT, FieldDesc, FunctionDesc  # noqa: E402
+from tests._bgrfc_legacy import build_bgrfc_request  # noqa: E402
 from tests._trfc_fixture import forged_inbound_trfc  # noqa: E402
 
 # --------------------------------------------------------------------------- #

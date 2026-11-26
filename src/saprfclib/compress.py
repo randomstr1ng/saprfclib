@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import struct
+import zlib
 from typing import Any
 
 __all__ = [
@@ -534,6 +535,83 @@ def sapcompress_compress_lzc(
     LZC; the one bgRFC payload captured uses LZH.
     """
     return _LZCCompress(data, code_len_limit, block_mode).compress()
+
+
+# ---------------------------------------------------------------------------
+# LZH compressor
+# ---------------------------------------------------------------------------
+#
+# What the reference client sends a bgRFC unit in: SAPCOMPRESS LZH (live captures of
+# bgRFC submits, ABAP Platform 2025, 2026-11-26). The block is the 8-byte header --
+# uncompressed length LE uint32, 0x12 (algorithm 2 = LZH, version 1), the magic
+# 1F 9D, then 02 as in every captured block -- followed by a bit stream that is the
+# 2-bit noise count the decoder skips (0 here) and then DEFLATE blocks with a
+# 16 KB window (_LZH_WINDOW_SIZE). zlib writes those blocks; stdlib, C-backed like
+# ssl and hashlib. The decoder knows only fixed and dynamic Huffman blocks, not
+# DEFLATE's stored blocks, which zlib emits for data it cannot shrink; for those the
+# data is written as one fixed-Huffman block of literals instead. Every block made
+# here is read back by _LZHDecompress before it is returned.
+
+_LZH_HEADER_TAIL = b"\x12\x1f\x9d\x02"  # algorithm/version, magic, config: captured
+
+
+def _shift_in_zero_bits(stream: bytes, count: int) -> bytes:
+    """Prepend ``count`` (< 8) zero bits to an LSB-first bit stream."""
+    out = bytearray()
+    carry = 0
+    for byte in stream:
+        out.append(((byte << count) & 0xFF) | carry)
+        carry = byte >> (8 - count)
+    out.append(carry)
+    return bytes(out)
+
+
+def _lzh_literal_block(data: bytes) -> bytes:
+    """One final fixed-Huffman block of literals (DEFLATE codes), noise count 0."""
+    acc = 0
+    nbits = 0
+    out = bytearray()
+
+    def put(value: int, length: int) -> None:
+        nonlocal acc, nbits
+        acc |= value << nbits
+        nbits += length
+        while nbits >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            nbits -= 8
+
+    def put_code(code: int, length: int) -> None:  # Huffman codes go MSB first
+        put(_reverse_int(code, length), length)
+
+    put(0, 2)  # noise count
+    put(1, 1)  # last block
+    put(_LZH_TREETYPE_STATIC, 2)
+    for byte in data:
+        if byte < 144:
+            put_code(0x30 + byte, 8)
+        else:
+            put_code(0x190 + byte - 144, 9)
+    put_code(0, 7)  # end of block (256)
+    if nbits:
+        out.append(acc & 0xFF)
+    return bytes(out)
+
+
+def sapcompress_compress_lzh(data: bytes) -> bytes:
+    """Compress ``data`` into a SAPCOMPRESS LZH block, the form a bgRFC unit uses."""
+    header = struct.pack("<I", len(data)) + _LZH_HEADER_TAIL
+    packer = zlib.compressobj(9, zlib.DEFLATED, -14)  # 2**14 = _LZH_WINDOW_SIZE
+    block = header + _shift_in_zero_bits(packer.compress(data) + packer.flush(), 2)
+    try:
+        if sapcompress_decompress(block, len(data)) == data:
+            return block
+    except DecompressError:
+        pass  # a stored block: see above
+    block = header + _lzh_literal_block(data)
+    if sapcompress_decompress(block, len(data)) != data:  # pragma: no cover - defensive
+        raise DecompressError("LZH encoding did not read back")
+    return block
 
 
 # ---------------------------------------------------------------------------

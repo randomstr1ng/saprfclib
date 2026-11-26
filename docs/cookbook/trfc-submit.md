@@ -105,3 +105,24 @@ The function module's parameters are passed as for `call()`: importing, changing
 parameters, checked against the server's metadata. Nothing comes back — a tRFC call has no
 result — and success is the absence of an exception. The wire format is described in
 [tRFC / qRFC / bgRFC](../protocol/trfc.md).
+
+## bgRFC units
+
+A bgRFC unit groups calls that the server runs together, once:
+
+```python
+with conn.create_unit() as unit:                 # type 'T'
+    unit.call("Z_POST_DOCUMENT", IS_HEADER=header, IT_ITEMS=items)
+    unit.call("Z_LOG_POSTING", IV_ID=header["ID"])
+# the unit is submitted when the block ends without an exception
+
+state = conn.get_unit_state(unit.unit_id, unit.unit_type)   # e.g. UnitState.COMMITTED
+conn.confirm_unit(unit.unit_id, unit.unit_type)
+```
+
+`create_unit(queues=["Z_MY_QUEUE"])` makes a queued unit (type `'Q'`). An exception inside
+the block abandons the unit and nothing is sent; a unit with no calls is refused. Parameters,
+deep ones included, are passed as for `call()` and checked against the server's metadata when
+the unit is submitted. As with tRFC, a transport failure is retried over a new connection and
+the unit parked in `unit_store` once the retries run out; `conn.retry_parked_unit(unit_id,
+unit_type)` sends it again later.

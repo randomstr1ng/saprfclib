@@ -25,12 +25,15 @@ on the reply. These tests do, so the discard cannot come back.
 from __future__ import annotations
 
 import pathlib
+from typing import Any
 
 import pytest
 
 from saprfclib.connection import AsyncConnection
 from saprfclib.exceptions import AbapApplicationError
 from saprfclib.session import SessionState
+
+from ._bgrfc_fixture import descriptors
 
 GOLDEN = pathlib.Path(__file__).parent / "golden" / "framing"
 
@@ -79,7 +82,20 @@ def _conn(replies: list[bytes]) -> tuple[AsyncConnection, _ScriptedTransport]:
     transport = _ScriptedTransport(replies)
     conn = AsyncConnection(transport, max_retries=0, retry_delay=0.0)
     conn._session._state = SessionState.READY
+    descs = descriptors()
+    fetch = conn._desc_for
+
+    async def desc_for(name: str) -> Any:  # the bgRFC capture's interfaces, else as before
+        if name.upper() in descs:
+            return descs[name.upper()]
+        return await fetch(name)
+
+    conn._desc_for = desc_for  # type: ignore[method-assign]
     return conn, transport
+
+
+# A unit needs a call: an empty SDATA fails an ABAP assertion on the server (#34).
+CALLS = [("STFC_CONNECTION", {"REQUTEXT": "x"})]
 
 
 # --------------------------------------------------------------------------- #
@@ -92,7 +108,7 @@ async def test_submit_unit_raises_when_the_backend_refuses() -> None:
     """An ABAP exception to BGRFC_DEST_SHIP must not be reported as a submit."""
     conn, _ = _conn([EXCEPTION_REPLY])
     with pytest.raises(AbapApplicationError):
-        await conn._submit_unit(UNIT_ID, "T", [], [])
+        await conn._submit_unit(UNIT_ID, "T", [], CALLS)
 
 
 @pytest.mark.asyncio
@@ -146,7 +162,7 @@ async def test_a_multi_frame_reply_is_consumed_whole() -> None:
     hope", which is why the earlier version of this test proved nothing.
     """
     conn, transport = _conn([*MULTIFRAME])
-    await conn._submit_unit(UNIT_ID, "T", [], [])
+    await conn._submit_unit(UNIT_ID, "T", [], CALLS)
     assert transport.recv_count == 2, (
         f"read {transport.recv_count} frame(s) of a two-frame reply; the remainder "
         "stays in the socket and the next call parses it as its own TLV stream"
@@ -163,8 +179,8 @@ async def test_the_call_after_a_multi_frame_submit_is_not_desynced() -> None:
     transport runs dry instead, which is the same fault made visible.
     """
     conn, transport = _conn([*MULTIFRAME, *MULTIFRAME])
-    await conn._submit_unit(UNIT_ID, "T", [], [])
-    await conn._submit_unit(UNIT_ID, "T", [], [])
+    await conn._submit_unit(UNIT_ID, "T", [], CALLS)
+    await conn._submit_unit(UNIT_ID, "T", [], CALLS)
     assert transport.unread == 0
     assert transport.recv_count == 4
 

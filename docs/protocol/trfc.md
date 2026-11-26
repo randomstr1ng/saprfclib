@@ -202,8 +202,10 @@ Two consequences for anything building this frame:
   and not in UTF-16LE. The hex form is a display convention.
 * `UNIT_KIND` is an **INT4**. The `'T'`/`'Q'` characters below are an API
   convention; the wire carries the integers in "What a reference client actually
-  sends" below (`1409196105` for a type `T` unit). The value for `'Q'` is
-  **[ASSUMED]** (`1409196101`, by symmetry; `invoke.py`).
+  sends" below: `1409196105` for a type `T` unit and `1409196103` for a type `Q` unit,
+  in the submit, the state query and the confirm alike (live captures, 2026-11-26). `'Q'` was
+  `[ASSUMED]` as `1409196101` by symmetry before that capture; a state query with that value
+  reports a real queued unit as missing.
 
 ### The two simple modules
 
@@ -253,8 +255,7 @@ the body, including the logon header of the serialized calls in it, and rebuild 
 around it from the connection they send on. Framed that way, the call that had never arrived
 ran once (one `ARFCRSTATE` entry, its values stored), and the one that had already run was
 accepted and not run again (its `ARFCRSTATE` entry unchanged, a value overwritten in between
-left as it was). bgRFC re-drives use the same framing; bgRFC submit itself has no payload yet
-(#34), so they are tested offline only.
+left as it was). bgRFC re-drives use the same framing; that path is tested offline only.
 
 ## Client-Side Orchestration
 
@@ -303,9 +304,9 @@ half-close).
 with conn.create_unit(uid, queues=["Q1"]) as unit:
     unit.call("FM1", ...)   # buffered, not sent yet
     unit.call("FM2", ...)   # buffered
-# __exit__ → build_bgrfc_request → BGRFC_DEST_SHIP. It still sends BGRFC_UNIT_ID /
-#   BGRFC_UNIT_TYPE / BGRFC_QUEUE_n / BGRFC_CALL_COUNT, which the module does not declare:
-#   the submit does not work (issue #34).
+# __exit__ → each call serialized as a tRFC call (build_trfc_call) → build_bgrfc_sdata
+#   → BGRFC_DEST_SHIP with SDATA, SSTATE, SUPPORTABILITY_INFO, SHUTDOWN_ACTIVE and
+#   OUT_IN_QUEUE_NAME_TAB, through the ordinary request builder (see "bgRFC SDATA").
 
 conn.confirm_unit(identifier)
     └─ build_invoke_request("BGRFC_DEST_CONFIRM", ...)
@@ -413,6 +414,66 @@ on the decoded function name before the normal handler lookup.
 
 ---
 
+## bgRFC SDATA
+
+`BGRFC_DEST_SHIP` takes the unit's calls in `SDATA`, an XSTRING. From live captures of the
+reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) submitting six units on ABAP
+Platform 2025 (kernel 916), 2026-11-26, that differ in one way each: one call, two calls, a
+function with no parameters, a longer value, a deep parameter, a queued unit
+(`tests/golden/trfc/bgrfc_reference.json`, sanitised). Each committed; the one with a deep
+parameter ran and stored the values sent.
+
+    container    FF 06 02 01 02 02 80 00 | codepage, 4 ASCII digits ("4103") |
+                 00 00 00 00 | SAPCOMPRESS LZH block of the plaintext
+    plaintext    06 0F 00 00 00 00 50 | total length - 120, BE uint32 |
+                 113 constant bytes naming SER_UNIT_TAB | number of calls, BE uint32 |
+                 per call:  BC 00 00 00 3C | function name, 30 characters blank-padded,
+                            UTF-16LE | 55 constant bytes carrying the option string
+                            basxml=0, | record length, BE uint32 | record | CB BF
+                 BF 04
+    record       the call exactly as a tRFC submit's DATA rows carry it
+                 (A serialized call, above): the logon header, then the call without
+                 0x0512, 0x0205 declarations or table ids; deep parameters in XML
+                 brackets as in an ordinary call
+
+Built from these parts, all six plaintexts are reproduced byte for byte, and every record but
+the deep ones equals `build_trfc_call`'s output for the same call (the deep ones differ only in
+writing an untouched nested component as its initial value, which the server reads the same;
+see Serialization). The constant parts are constant across all six; what their tags mean is not
+needed to write them and is not claimed here.
+
+**Compression.** The block is SAPCOMPRESS LZH: header `<length LE uint32> 12 1F 9D 02`, then a
+2-bit noise count (0) and DEFLATE blocks with a 16 KB window. saprfclib writes the blocks with
+the standard library's `zlib`, and falls back to a single fixed-Huffman block of literals for
+data DEFLATE would store (the decoder has no stored blocks). The reference client's blocks are
+within a few bytes of the same size.
+
+**The rest of the submit.** `SSTATE` carries `UNIT_ID` as 16 raw bytes and `UNIT_KIND`;
+`SUPPORTABILITY_INFO` the same two; `SHUTDOWN_ACTIVE` a blank; `OUT_IN_QUEUE_NAME_TAB` the
+queue names, as an XML table of elementary rows, empty for a `T` unit. `SSTATE-QUEUE_NAME`
+stays empty even for a `Q` unit. The reference client also fills these, all informational:
+
+| `SSTATE` field | Reference client | saprfclib |
+|----------------|------------------|-----------|
+| `DESTINATION` | `<unknown>` on kernel 916, the client host on 793 | the client host |
+| `CALLER_CLIENT` | `000` | `000` |
+| `CALLER_USER` | the operating-system user | the logon user |
+| `CALLER_TCODE` | `NW RFC Library 754` | `saprfclib` |
+| `CALLER_PROGRAM` | the executable name | the logon program name |
+| `SENDING_TIME` | local time one month behind, in every capture | current UTC time |
+| `SENDING_INSTANCE` | the client host | the client host |
+
+The unit id need not come from the server: the reference client asks `BGRFC_GET_UNIT_ID`,
+saprfclib generates 16 random bytes, and both were accepted.
+
+**Live, saprfclib, 2026-11-26.** A one-call, a two-call, a deep-parameter and a queued unit
+were submitted, read back as `COMMITTED` by `BGRFC_CHECK_UNIT_STATE_SERVER`, and confirmed; the
+deep-parameter unit ran and stored exactly the values sent. The system had no supervisor
+destination configured (`BGRFC_CUST_SUPER` empty): units still ran, inline in the submit, so
+the note under Backend tables below does not hold for direct submits on this release.
+
+---
+
 ## Known Gaps
 
 ### Inbound tRFC (SAP to a registered server)
@@ -430,126 +491,14 @@ sends one per TID.
 ### tRFC over WebSocket RFC
 No capture. `call_transactional` raises `NotImplementedError` on a WebSocket connection.
 
-### BGRFC_DEST_SHIP payload byte layout
-The live bgRFC test submitted a unit with empty parameters, so no payload bytes were captured
-for bgRFC function parameters. **Consequence:** the bgRFC payload encoding is inferred from the
-tRFC path rather than confirmed. **To close:** capture a bgRFC unit carrying real parameters.
-
-What is now established, by submitting against a live system (A4H kernel 793, 2026-09-04):
-
-* **`SSTATE` reaches the module intact.** An earlier submit answered "BGRFC_DEST_SHIP
-  called without unit ID"; filling `SSTATE.UNIT_ID` with the 16 raw bytes clears that
-  check, so the structure encoding itself works.
-* **The module executes the unit inline.** It is not a queue insert followed by
-  asynchronous execution — the submit deserializes `SDATA` and runs the calls in it
-  before returning, then updates the state row to "finished".
-* **Therefore `SDATA` cannot be isolated from `SSTATE`.** Submitting with an empty
-  payload to test the state record alone does not work: the empty xstring still goes
-  to the deserializer, which fails an assertion. Every attempt with an empty `SDATA`
-  ends in `ASSERTION_FAILED`, whichever `UNIT_KIND` is used and whether or not the
-  optional `SUPPORTABILITY_INFO` is supplied.
-
-So the remaining unknown is the whole of it: `SDATA` is a serialized container holding
-the buffered calls, and nothing can be submitted until its format is known. It is not
-what this library buffers today (per call, the function name in UTF-16LE and its
-`name=value` pairs joined by NUL characters).
-
-That capture has now been taken (SDK trace, A4H kernel 793, 2026-09-07: one type `T`
-unit carrying a single `STFC_CONNECTION` call with a marker string in `REQUTEXT`). The
-traces are not committed as fixtures; the values below and the `SDATA` layout come from
-them.
-
-### What a reference client actually sends
-
-| `SSTATE` field | Value observed | Note |
-|----------------|----------------|------|
-| `UNIT_ID` | 16 raw bytes | as issued by `BGRFC_GET_UNIT_ID` |
-| `UNIT_KIND` | `1409196105` | tRFC **outbound**, for a type `T` unit |
-| `DESTINATION` | the client's own hostname | *not* the inbound destination name |
-| `CALLER_CLIENT` | `"000"` | not the logon client |
-| `CALLER_USER` | the OS user | not the SAP user |
-| `CALLER_TCODE` | `"NW RFC Library 754"` | the library identifies itself here |
-| `CALLER_PROGRAM` | the executable name | |
-| `SENDING_TIME` | BCD `20260807082915` | as captured; a month before the trace date, unexplained |
-| `SENDING_INSTANCE` | the client hostname | |
-
-`UNIT_KIND` is the trap. An external client sends the **outbound** value even though the
-unit is going into the system, and a wrong choice is not reported: the state module
-accepts all four values and selects on `(unit_id, unit_kind)`, so the wrong kind makes a
-real unit read as `NOT_FOUND` — indistinguishable from one that was never submitted.
-
-### `SDATA` container
-
-    offset  size  content
-    0       8     FF 06 02 01 02 02 80 00      fixed header [ASSUMED constant]
-    8       4     "4103"                       codepage, single-byte ASCII
-    12      4     00 00 00 00
-    16      4     uncompressed length, LE uint32
-    20      1     0x12                         SAPCOMPRESS algorithm = LZH
-    21      ...   LZH-compressed payload
-
-The compressed block is ordinary SAPCOMPRESS: `sapcompress_decompress()` in `compress.py`
-decodes the captured payload exactly (410 bytes in, 1071 out). Inside is an RFC-recorder
-serialization — it opens with a `SER_UNIT_TAB` name, carries the called function name as
-`STFC_CONNECTION` blank-padded to 30 characters in UTF-16LE, a `basxml=0,` option string,
-and the call's parameter values.
-
-### Inside the compressed payload
-
-The plaintext is not a new format. Decoding the captured 1071 bytes by hand gives an
-ordinary RFC TLV stream — the same tags this library already builds — preceded by a
-logon-style preamble:
-
-    0514  16   session token
-    0007  18   client IP address, UTF-16LE
-    0011   2   logon language, "E"
-    0012   6   release, "754"
-    0013  32   kernel release and server address
-    0008  10   client hostname
-    0006  18   partner hostname
-    0130  26   caller program name
-    0502   0   request marker
-    000b   6   release, "754"
-    0102  30   function name, blank-padded to 30 characters
-    0201  16   parameter name, "REQUTEXT"
-    0203 510   parameter value, blank-padded to 255 characters
-
-Everything from `0502` onward is byte-for-byte what `build_invoke_request` emits for the
-same call. Ahead of the preamble sits an index section naming `SER_UNIT_TAB`, the called
-function blank-padded to 30 characters, and an option string `basxml=0,`.
-
-### The index section, by difference
-
-Three captures differing in one way each — one call, two calls, one call to a shorter
-function — separate the constants from the fields. What holds across all three:
-
-| Offset | Width | Meaning | Evidence |
-|--------|-------|---------|----------|
-| `0x09` | BE uint16 | total plaintext length − 120 | 951/1892/399 against totals 1071/2012/519 |
-| `0x7f` | uint8 | number of calls in the unit | 1 / 2 / 1 |
-| `0x85` | 60 bytes | function name, UTF-16LE, blank-padded to 30 chars | changes only with the function |
-| `0xc3` | 18 bytes | option string `basxml=0,` | constant across all three |
-| `0xfa` | BE uint16 | length of the first call record, which starts at `0x100` | 815/815/263; `256 + 815 = 1071` and `256 + 263 = 519` |
-
-The unit is a chain: the first call record runs from `0x100` for its declared length, and a
-second call follows immediately after it. In the two-call capture the first record ends at
-1071 — exactly where the second begins — and the second runs to 2012. Each record carries
-its own copy of the function name and its own invoke TLV stream (`0502` at 469 in the
-first record of every capture).
-
-**Still open:** the descriptor grammar between `0x20` and `0x100`. It is a tagged
-structure — a `SER_UNIT_TAB` name, then records shaped `<tag> <id> 00 00 00 00 <size>`
-with tags `0xaa`, `0xad`, `0xae`, `0xaf`, and two-byte tags around `0xbc`/`0xbd`/`0xbe` —
-but which of those are field descriptors of the container and which are values is not
-established, and the second call record uses a shorter prefix than the first. Building a
-submit needs that grammar; reading one does not.
-
-### Compression
-
-`sapcompress_compress_lzc()` encodes the LZC variant, round-tripping the captured payload
-and every code width. The reference client uses **LZH**, and whether a server accepts LZC
-in its place is untested — a submit is the only way to find out, and that is blocked on
-the descriptor grammar above.
+### Inbound bgRFC (SAP to a registered server)
+How an ABAP system sends a bgRFC unit to a registered server has not been captured. The
+RFC server's bgRFC dispatch reads the unit id, type and calls from parameters named
+`BGRFC_UNIT_ID`, `BGRFC_UNIT_TYPE` and `BGRFC_CALL_<n>` **[ASSUMED]**, a shape no server
+sends: it is what this library's own client sent before #34, and the tests that exercise the
+dispatch build frames in it (`tests/_bgrfc_legacy.py`). The submit below suggests the real
+form is a `BGRFC_DEST_SHIP` call with `SDATA`; a destination pointing at `RfcServer` and a
+capture would settle it.
 
 ### Backend tables (A4H, kernel 793, observed 2026-09-04)
 
@@ -558,7 +507,7 @@ matters because the obvious guess is wrong in a way that fails silently:
 
 | Table | Holds |
 |-------|-------|
-| `BGRFC_CUST_SUPER` | supervisor destination — bgRFC does not run without one |
+| `BGRFC_CUST_SUPER` | supervisor destination; empty on kernel 916, where directly submitted units still ran inline (2026-11-26) |
 | `BGRFC_MAIN_I_DST` | inbound destination definitions (name + RFC server group) |
 | `BGRFC_REG_I_DEST` | inbound queue-prefix registration |
 | `BGRFC_SRV_STATE` | live unit state: `UNIT_ID, UNIT_KIND, DESTINATION, QUEUE_NAME, STATE, ...` |

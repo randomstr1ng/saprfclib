@@ -292,16 +292,6 @@ def test_live_qrfc_submit_lands_in_the_inbound_queue() -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(not os.environ.get("SAPRFC_ASHOST"), reason=_LIVE_SKIP_REASON)
-@pytest.mark.xfail(
-    reason=(
-        "the bgRFC submit does not work (#34): BGRFC_DEST_SHIP answers 'called "
-        "without unit ID' because build_bgrfc_request sends BGRFC_UNIT_ID as a "
-        "named parameter and the module takes the id inside SSTATE. The confirm "
-        "and state-query half of the lifecycle is fixed and verified separately. "
-        "Not strict: a release that accepts this frame is worth knowing about."
-    ),
-    strict=False,
-)
 def test_live_bgrfc_unit_lifecycle() -> None:
     """bgRFC unit create/submit/confirm lifecycle passes end-to-end against live SAP.
 
@@ -364,31 +354,11 @@ def test_live_bgrfc_unit_lifecycle() -> None:
         passwd=passwd,
     )
     try:
-        # bgRFC has to be configured for anything below to mean anything. Read
-        # the customizing tables and skip rather than fail: an unconfigured
-        # system is a missing precondition, not a defect in the encoding.
-        # BGRFC_CUST_SUPER holds the supervisor destination and BGRFC_MAIN_I_DST
-        # the inbound destinations. Not BGRFC_CUST_I_SRV/BGRFC_CUST_I_DST, which
-        # look like the obvious pair and are per-server and per-destination
-        # scheduler tuning -- empty on a correctly configured system, so gating on
-        # them skips this test forever on exactly the systems it should run on.
-        for table, what in (
-            ("BGRFC_CUST_SUPER", "supervisor destination"),
-            ("BGRFC_MAIN_I_DST", "inbound destination"),
-        ):
-            try:
-                rows = conn.call(
-                    "RFC_READ_TABLE", QUERY_TABLE=table, DELIMITER="|", ROWCOUNT=1
-                ).get("DATA", [])
-            except Exception as exc:  # noqa: BLE001
-                pytest.skip(f"cannot read {table} ({type(exc).__name__}); bgRFC state unknown")
-            if not rows:
-                pytest.skip(
-                    f"bgRFC has no {what} ({table} is empty) — configure it in "
-                    "SBGRFCCONF. Without it a unit is never registered, so this "
-                    "test would pass without exercising the wire encoding."
-                )
-
+        # No customizing precondition: with no supervisor destination configured
+        # (BGRFC_CUST_SUPER empty), units submitted by the reference client and by
+        # saprfclib still committed and ran (ABAP Platform 2025, 2026-11-26, #34).
+        # What keeps this test falsifiable is the state check below, which refuses
+        # NOT_FOUND -- what a unit that never registered reads as.
         # TRFC-05: create_unit with a queue name → unit_type='Q'.
         with conn.create_unit(queues=["SAPRFC_BG_Q1"]) as unit:
             unit_id = unit.unit_id

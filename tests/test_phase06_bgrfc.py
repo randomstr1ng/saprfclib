@@ -86,7 +86,7 @@ def _make_ready_bgrfc_connection(responses: list[bytes] | None = None):
 # --------------------------------------------------------------------------- #
 
 
-def test_unit_buffer_submit() -> None:
+def test_unit_buffer_submit(monkeypatch: pytest.MonkeyPatch) -> None:
     """create_unit() buffers unit.call() invocations; submit fires on __exit__.
 
     GREEN: Plan 06-05 — Connection.create_unit implemented.
@@ -102,6 +102,14 @@ def test_unit_buffer_submit() -> None:
 
     # MockTransport returns empty bytes for the BGRFC_DEST_SHIP response (offline).
     conn = _make_ready_bgrfc_connection(responses=[b""])
+    # The submit serializes the calls against the interfaces; take them from the
+    # bgRFC capture instead of a server (#34).
+    from tests._bgrfc_fixture import descriptors
+
+    descs = descriptors()
+    monkeypatch.setattr(
+        "saprfclib.connection.get_function_desc", lambda _c, name, cache=None: descs[name.upper()]
+    )
 
     uid = uuid.uuid4().hex.upper()  # valid 32-char UnitID
 

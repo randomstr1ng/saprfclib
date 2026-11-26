@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **bgRFC units can be submitted** (#34). `create_unit()` now sends what the reference client
+  sends: each call serialized as in a tRFC submit, inside `BGRFC_DEST_SHIP`'s `SDATA`, LZH
+  compressed (new `sapcompress_compress_lzh()`, on the standard library's `zlib`), with the
+  unit in `SSTATE` and `SUPPORTABILITY_INFO` and the queue names in `OUT_IN_QUEUE_NAME_TAB`.
+  The layout is taken from six reference captures, every one of which it reproduces byte for
+  byte. Live: one-call, two-call, deep-parameter and queued units committed and were
+  confirmed, and the deep one ran with exactly the values sent. An empty unit is refused
+  before sending (the server would fail an assertion and drop the session).
+
 - **`check_metadata()`** on `Connection` and `AsyncConnection`, and
   **`metadata_check_interval`** on both pools (#112). The check asks `RFC_METADATA_GET`, per
   cached function, for its change date and the timestamps of the DDIC types it uses, and
@@ -80,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md`.
 
 ### Fixed
+
+- **A queued (`'Q'`) bgRFC unit used the wrong `UNIT_KIND`.** It was `[ASSUMED]` as
+  `1409196101`; the reference client sends `1409196103` (live capture), and a state query or
+  confirm with the old value reported a real unit as missing.
 
 - **`retry_parked()` could never succeed on a new connection** (#115). The parked frame carried
   the GW handle and index of the connection that built it, and the gateway refused it on any
