@@ -143,9 +143,9 @@ def test_unit_callback_flow() -> None:
     """
     import uuid
 
-    from saprfclib.invoke import build_bgrfc_request
     from saprfclib.server import RfcServer
     from saprfclib.stores import InMemoryUnitStore, UnitState
+    from tests._bgrfc_legacy import build_bgrfc_request
 
     uid = uuid.uuid4().hex.upper()
     call_sequence: list[str] = []
@@ -202,8 +202,8 @@ def test_unit_rollback_on_handler_exception() -> None:
     """
     import uuid
 
-    from saprfclib.invoke import build_bgrfc_request
     from saprfclib.server import RfcServer
+    from tests._bgrfc_legacy import build_bgrfc_request
 
     uid = uuid.uuid4().hex.upper()
     rollback_called: list[bool] = []

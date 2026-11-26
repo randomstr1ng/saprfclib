@@ -124,15 +124,15 @@ carries the same labels (`tests/api/public_api.json`).
 | SNC single sign-on (`snc_sso=True`) | |
 | RFC server: registration and inbound calls (`RfcServer`, `AsyncRfcServer`) | Plain TCP |
 | tRFC and qRFC submit, with durable TID stores | `retry_parked` re-sends a parked request on any connection, run at most once per TID |
+| bgRFC units (`create_unit()`, types T and Q), state query, confirm, unit stores | Kernel 916; the RFC server's inbound bgRFC is not captured (`docs/protocol/trfc.md`) |
 
 **Preview**
 
 | Capability | Why |
 |---|---|
 | SOCKS5 proxy authentication with a JWT (method `0x80`), message-server logon through the proxy | Not verified live (`docs/protocol/socks5.md`) |
-| bgRFC submit and unit stores | The submit payload (SDATA) is not implemented (#34) |
 | RFC types 33–40 (UTCSECOND … CDAY) | No system exposes them; widths `[ASSUMED]` |
-| SAP LZ4 frames, LZC compression on send | Frame layout `[ASSUMED]`; no capture of a client sending LZC |
+| SAP LZ4 frames, LZC compression on send | Frame layout `[ASSUMED]`; no capture of a client sending LZC (bgRFC units are sent LZH-compressed, as the reference client sends them) |
 | SDK-format traces (`RfcTrace`) | Tested offline only |
 | Inbound tRFC in server mode | The parameter block (`0x5001`) is parsed from an `[ASSUMED]` layout; no committed capture (`docs/protocol/trfc.md`) |
 

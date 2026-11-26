@@ -16,9 +16,10 @@ import uuid
 
 import pytest
 
-from saprfclib.invoke import _parse_tlv_stream, build_bgrfc_request
+from saprfclib.invoke import _parse_tlv_stream
 from saprfclib.server import _TAG_RETURN_CODE, RfcServer
 from saprfclib.stores import InMemoryUnitStore, UnitState
+from tests._bgrfc_legacy import build_bgrfc_request
 
 
 def _return_code(response: bytes) -> int:

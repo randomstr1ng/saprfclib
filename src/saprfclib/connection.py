@@ -63,14 +63,16 @@ from saprfclib.exceptions import (
 )
 from saprfclib.invoke import (
     _ARFC_DEST_SHIP,
+    _BGRFC_DEST_SHIP,
     CallLimits,
     TrfcOrigin,
     _decode_error_text,
     _extract_name_value_pairs,
     _iter_tlv_records,
+    bgrfc_ship_params,
     bgrfc_unit_id_bytes,
     bgrfc_unit_kind,
-    build_bgrfc_request,
+    build_bgrfc_sdata,
     build_invoke_request,
     build_trfc_call,
     build_trfc_confirm_request,
@@ -382,6 +384,39 @@ def _trfc_origin(session: Session) -> TrfcOrigin:
         partner_ip=text(0x0018),
         partner_host=text(0x0006),
     )
+
+
+def _bgrfc_request_tlv(
+    session: Session,
+    ship: FunctionDesc,
+    uid: str,
+    unit_type: str,
+    queues: list[str],
+    calls: list[tuple[str, FunctionDesc, dict[str, Any]]],
+) -> bytes:
+    """The BGRFC_DEST_SHIP request of a unit, from the current session (#34).
+
+    Each call is serialized as a tRFC call is (build_trfc_call) with this session's
+    logon header, so a retry on a new connection carries the new one.
+    """
+    origin = _trfc_origin(session)
+    records = [
+        (name.upper(), build_trfc_call(name.upper(), desc, params, origin))
+        for name, desc, params in calls
+    ]
+    attrs = session.attributes
+    sdata = build_bgrfc_sdata(records, attrs.codepage if attrs is not None else "4103")
+    params = bgrfc_ship_params(
+        uid,
+        unit_type,
+        queues,
+        sdata,
+        caller_user=attrs.user if attrs is not None else "",
+        caller_program=origin.program,
+        caller_host=origin.client_host,
+        sending_time=datetime.datetime.now(datetime.UTC).strftime("%Y%m%d%H%M%S"),
+    )
+    return build_invoke_request(_BGRFC_DEST_SHIP, ship, params)
 
 
 def _tlv_ext(tag: int, value: bytes) -> bytes:
@@ -4320,7 +4355,7 @@ class Connection:
         uid: str,
         unit_type: str,
         queues: list[str],
-        buffered_calls: list[bytes],
+        buffered_calls: list[tuple[str, dict[str, Any]]],
     ) -> None:
         """Internal: submit the buffered unit as a BGRFC_DEST_SHIP call.
 
@@ -4341,7 +4376,24 @@ class Connection:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
-                request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
+                ship = get_function_desc(self, _BGRFC_DEST_SHIP, cache=self._cache)
+                calls = []
+                for func_name, params in buffered_calls:
+                    desc = get_function_desc(self, func_name, cache=self._cache)
+                    calls.append(
+                        (
+                            func_name,
+                            desc,
+                            _filter_call_params(
+                                func_name,
+                                desc,
+                                dict(params),
+                                strict=self._strict_params,
+                                seen=self._dropped_params_seen,
+                            ),
+                        )
+                    )
+                request_tlv = _bgrfc_request_tlv(self._session, ship, uid, unit_type, queues, calls)
                 handle = self._session.handle or b"        "
                 request = self._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
@@ -4678,10 +4730,10 @@ class _UnitHandle:
     ) -> Literal[False]:
         """Submit the unit on clean exit; abandon on exception.
 
-        On no exception (``exc_type is None``): serializes each buffered call's
-        func_name + params into bytes (using the existing ``build_bgrfc_request``
-        embed mechanism) and calls ``Connection._submit_unit`` with the complete
-        payload.  Exactly ONE submit frame is emitted (atomic LUW).
+        On no exception (``exc_type is None``): hands the buffered calls to
+        ``Connection._submit_unit``, which serializes them into BGRFC_DEST_SHIP's
+        SDATA against the server's metadata (#34). Exactly ONE submit frame is emitted
+        (atomic LUW).
 
         On exception: the unit is abandoned.  No submit frame is sent.
         ``exc_type is not None`` → do NOT suppress the exception (return False).
@@ -4699,23 +4751,13 @@ class _UnitHandle:
 
         self._submitted = True
 
-        # Serialize each buffered call into a simple bytes payload.
-        # Format: func_name UTF-16LE + zero separator + params as UTF-16LE key=value pairs.
-        # This is a simplified wire encoding sufficient for offline tests; the exact
-        # BGRFC_DEST_SHIP ARFCSDATA layout is OG-06-02 (D-08 live-capture gate).
-        buffered_bytes: list[bytes] = []
-        for func_name, params in self._buffered:
-            parts = [func_name.encode("utf-16-le")]
-            for k, v in params.items():
-                entry = f"{k}={v}".encode("utf-16-le")
-                parts.append(entry)
-            buffered_bytes.append(b"\x00\x00".join(parts))
+        # Serialized at submit, against the server's metadata (#34).
 
         self._connection._submit_unit(
             self._uid,
             self._unit_type,
             self._queues,
-            buffered_bytes,
+            self._buffered,
         )
         return False
 
@@ -4798,19 +4840,11 @@ class _AsyncUnitHandle:
 
         self._submitted = True
 
-        buffered_bytes: list[bytes] = []
-        for func_name, params in self._buffered:
-            parts = [func_name.encode("utf-16-le")]
-            for k, v in params.items():
-                entry = f"{k}={v}".encode("utf-16-le")
-                parts.append(entry)
-            buffered_bytes.append(b"\x00\x00".join(parts))
-
         await self._connection._submit_unit(
             self._uid,
             self._unit_type,
             self._queues,
-            buffered_bytes,
+            self._buffered,
         )
         return False
 
@@ -6556,7 +6590,7 @@ class AsyncConnection:
         uid: str,
         unit_type: str,
         queues: list[str],
-        buffered_calls: list[bytes],
+        buffered_calls: list[tuple[str, dict[str, Any]]],
     ) -> None:
         """Submit a bgRFC unit via BGRFC_DEST_SHIP with CommunicationError retry (D-01).
 
@@ -6571,10 +6605,30 @@ class AsyncConnection:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
             try:
-                request_tlv = build_bgrfc_request(uid, unit_type, queues, buffered_calls)
+                ship = await self._desc_for(_BGRFC_DEST_SHIP)
+                calls = []
+                for func_name, params in buffered_calls:
+                    desc = await self._desc_for(func_name)
+                    calls.append(
+                        (
+                            func_name,
+                            desc,
+                            _filter_call_params(
+                                func_name,
+                                desc,
+                                dict(params),
+                                strict=self._strict_params,
+                                seen=self._dropped_params_seen,
+                            ),
+                        )
+                    )
 
                 def _frame() -> bytes:
-                    # Handle and connection index of the current session (#75).
+                    # From the current session: after a reconnect the handle, the
+                    # connection index and the logon header in SDATA all change (#75).
+                    request_tlv = _bgrfc_request_tlv(
+                        self._session, ship, uid, unit_type, queues, calls
+                    )
                     handle = self._session.handle or b"        "
                     return Connection._build_invoke_frame(
                         handle, request_tlv, conn_idx=self._session.conn_idx
@@ -6926,7 +6980,7 @@ class _ThreadedAsyncConnection(AsyncConnection):
         uid: str,
         unit_type: str,
         queues: list[str],
-        buffered_calls: list[bytes],
+        buffered_calls: list[tuple[str, dict[str, Any]]],
     ) -> None:
         await self._run(self._sync._submit_unit, uid, unit_type, queues, buffered_calls)
 
