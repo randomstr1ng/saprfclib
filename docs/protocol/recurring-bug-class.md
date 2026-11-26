@@ -104,6 +104,13 @@ def test_a_reference_decodes_the_same_at_every_padded_width(code, width):
     assert _xml_unescape(f"&#{str(code).rjust(width, '0')};") == chr(code)
 ```
 
+For the decoders that read the peer's bytes (NI framing, the tag stream, the gateway
+and logon frames, packed BCD, the router and message-server replies),
+`tests/test_fuzz_decoders.py` holds the three standing properties: round trip across
+every length-form boundary, the same result however the stream is chunked, and hostile
+input (mutated golden frames) raising only the decoder's typed error. A new decoder
+belongs there too.
+
 Pair it with a **fail-closed regression** proving malformed input is still refused:
 unknown values, truncation, out of range, the wrong order.
 
