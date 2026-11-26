@@ -98,8 +98,10 @@
    "kind": "class",
    "signature": "(transport: 'AsyncTransport', *, max_retries: 'int' = 3, retry_delay: 'float' = 1.0, tid_store: 'TidStore | None' = None, unit_store: 'UnitStore | None' = None, strict_params: 'bool' = False, allow_restricted_logon: 'bool' = False, call_limits: 'CallLimits | None' = None, metadata_cache: 'MetadataCache | None' = None, metadata_cache_key: 'str | None' = None) -> 'None'",
    "members": {
+    "add_callback": "(self, func_name: 'str', handler: 'Callable[[dict[str, Any]], dict[str, Any]]', desc: 'FunctionDesc | None' = None) -> 'None'",
     "call": "(self, func_name: 'str', **params: 'object') -> 'dict[str, Any]'",
     "call_transactional": "(self, func_name: 'str', *, tid: 'str', queue: 'str | None' = None, **params: 'object') -> 'None'",
+    "cancel": "(self) -> 'bool'",
     "check_metadata": "(self) -> 'list[str]'",
     "close": "(self) -> 'None'",
     "confirm_tid": "(self, tid: 'str') -> 'None'",
@@ -225,6 +227,13 @@
    "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
   },
   "AbapSystemFailure": {
+   "kind": "exception",
+   "signature": null,
+   "members": {},
+   "stability": "stable",
+   "reason": "public exception type in the documented hierarchy (docs/getting-started/error-handling.md)"
+  },
+  "CallCancelledError": {
    "kind": "exception",
    "signature": null,
    "members": {},

@@ -521,6 +521,47 @@ def _dispatcher_svc_8(gwserv: str) -> bytes:
     return f"sapdp{instance:02d}".ljust(8).encode("ascii")[:8]
 
 
+def _response_tlv(func_desc: FunctionDesc | None, result: dict[str, Any]) -> bytes:
+    """The reply to an inbound call (see RfcServer._build_response); shared with client callbacks."""
+    result_upper = {k.upper(): v for k, v in result.items()}
+    dm_ids: list[str] = []  # DM table ids run from 1 in emission order
+    parts: list[bytes] = [
+        tlv_record(_TAG_RESPONSE_START),
+        tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_OK)),
+    ]
+    if func_desc is not None:
+        for field in func_desc.parameters:
+            if field.direction not in _RESPONSE_DIRECTIONS:
+                continue  # pure IMPORTING — client sent it, server does not echo
+            name_upper = field.name.upper()
+            if name_upper not in result_upper:
+                # Skipping is right — output params are optional — but a handler
+                # that meant to fill this one gets no hint: the client just sees
+                # the key missing from its result dict.
+                _logger.debug(
+                    "server: handler for %s returned no value for output parameter "
+                    "%s; it will be absent from the client's result",
+                    func_desc.name,
+                    field.name,
+                )
+                continue
+            value = result_upper[name_upper]
+            if travels_as_xml(field):
+                # Answered as the reference SDK's server answers (live capture,
+                # 2026-11-26): one XML bracket per deep parameter.
+                parts.extend(xml_parameter_records(field, value))
+                continue
+            if field.rfctype == RFCTYPE_TABLE:
+                parts.extend(RfcServer._build_table_records(field, value, len(dm_ids) + 1))
+                dm_ids.append(field.name)
+                continue
+            encoded = encode(field.rfctype, value, field)
+            parts.append(tlv_record(_TAG_PARAM_NAME, field.name.encode("utf-16-le")))
+            parts.append(tlv_record(_TAG_PARAM_VALUE, encoded))
+    parts.append(tlv_record(_TAG_TERMINATOR))
+    return b"".join(parts)
+
+
 class RfcServer:
     """Sans-I/O RFC server: handler registry + inbound dispatch + asyncio serve.
 
@@ -1454,43 +1495,7 @@ class RfcServer:
         When ``func_desc`` is ``None`` (handler registered without a descriptor),
         only the success header and terminator are emitted — no output params.
         """
-        result_upper = {k.upper(): v for k, v in result.items()}
-        dm_ids: list[str] = []  # DM table ids run from 1 in emission order
-        parts: list[bytes] = [
-            tlv_record(_TAG_RESPONSE_START),
-            tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_OK)),
-        ]
-        if func_desc is not None:
-            for field in func_desc.parameters:
-                if field.direction not in _RESPONSE_DIRECTIONS:
-                    continue  # pure IMPORTING — client sent it, server does not echo
-                name_upper = field.name.upper()
-                if name_upper not in result_upper:
-                    # Skipping is right — output params are optional — but a handler
-                    # that meant to fill this one gets no hint: the client just sees
-                    # the key missing from its result dict.
-                    _logger.debug(
-                        "server: handler for %s returned no value for output parameter "
-                        "%s; it will be absent from the client's result",
-                        func_desc.name,
-                        field.name,
-                    )
-                    continue
-                value = result_upper[name_upper]
-                if travels_as_xml(field):
-                    # Answered as the reference SDK's server answers (live capture,
-                    # 2026-11-26): one XML bracket per deep parameter.
-                    parts.extend(xml_parameter_records(field, value))
-                    continue
-                if field.rfctype == RFCTYPE_TABLE:
-                    parts.extend(self._build_table_records(field, value, len(dm_ids) + 1))
-                    dm_ids.append(field.name)
-                    continue
-                encoded = encode(field.rfctype, value, field)
-                parts.append(tlv_record(_TAG_PARAM_NAME, field.name.encode("utf-16-le")))
-                parts.append(tlv_record(_TAG_PARAM_VALUE, encoded))
-        parts.append(tlv_record(_TAG_TERMINATOR))
-        return b"".join(parts)
+        return _response_tlv(func_desc, result)
 
     @staticmethod
     def _build_table_records(field: FieldDesc, rows: Any, dm_id: int) -> list[bytes]:

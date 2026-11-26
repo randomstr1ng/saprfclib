@@ -268,6 +268,39 @@ interface, or a type it uses, changed since the previous check, invalidates thos
 their names (call `reset_server_context()` next). The first check only records; a pool can
 run it on an interval (`metadata_check_interval`).
 
+## Server callbacks
+
+A function module that calls `DESTINATION 'BACK'` asks the caller to run a function in the
+middle of the call. Register a handler for it; it receives the importing values and returns the
+exporting ones, like an `RfcServer` handler:
+
+```python
+def echo(request):
+    return {"ECHOTEXT": request["REQUTEXT"], "RESPTEXT": "from Python"}
+
+conn.add_callback("STFC_CONNECTION", echo)
+conn.call("Z_CALLS_BACK")
+```
+
+The interface is fetched from the server before the next call, or pass `desc=`. A callback for a
+function with no handler is answered with the ABAP exception `FU_NOT_FOUND`, which the calling
+program can catch, and the call goes on. A handler that raises makes the server end the whole
+call (it becomes a `SYSTEM_FAILURE`): `call()` raises `CommunicationError` and the connection is
+retired. Classic TCP connections only.
+
+## Cancelling a call
+
+From another thread (or task, with `connect_async()`):
+
+```python
+threading.Timer(30, conn.cancel).start()
+conn.call("Z_LONG_REPORT")   # raises CallCancelledError if still running after 30 s
+```
+
+The server stops the function module, and the connection is closed and retired; open a new one,
+or let a pool replace it. `cancel()` returns False when no call is in flight. Classic TCP
+connections only.
+
 ## Unknown keyword arguments
 
 `Connection.call()` matches keyword arguments against the function module's

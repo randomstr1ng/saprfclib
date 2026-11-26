@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server callbacks** (#79). `conn.add_callback(name, handler)` serves a function the server
+  calls back during a call (`CALL FUNCTION ... DESTINATION 'BACK'`); the call then goes on to its
+  own reply. A callback with no handler is answered with the ABAP exception `FU_NOT_FOUND`, which
+  the calling program can catch, instead of breaking the connection (the reference client drops
+  it). A handler that raises is reported to ABAP as `SYSTEM_FAILURE`, which ends the call: it
+  raises `CommunicationError` and the connection is retired. Verified live.
+- **`cancel()`** on `Connection` and `AsyncConnection` (#82), from another thread or task. It
+  sends the gateway's cancel frame, as the reference client does; the call raises the new
+  `CallCancelledError`, the connection is closed and retired (a pool replaces it), and the server
+  stops the function module: a live probe's module never reached the database write at its end,
+  cancelled in a busy loop and in a `WAIT`.
+
 - **bgRFC units can be submitted** (#34). `create_unit()` now sends what the reference client
   sends: each call serialized as in a tRFC submit, inside `BGRFC_DEST_SHIP`'s `SDATA`, LZH
   compressed (new `sapcompress_compress_lzh()`, on the standard library's `zlib`), with the

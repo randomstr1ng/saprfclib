@@ -27,6 +27,7 @@ __all__ = [
     "SapRfcError",
     "AbapApplicationError",
     "AbapSystemFailure",
+    "CallCancelledError",
     "CallParameterError",
     "CommunicationError",
     "IncompleteDescriptorError",
@@ -416,3 +417,19 @@ class CallParameterError(SapRfcError, ValueError):
         self.path = path
         self.message = message
         super().__init__(message)
+
+
+class CallCancelledError(SapRfcError):
+    """A call was cancelled with ``cancel()`` before its reply arrived (#82).
+
+    The gateway acknowledges the cancel and closes the connection, and the server
+    stops the function module: a probe's long-running module, cancelled in a busy
+    loop and in ``WAIT``, never reached the database write at its end (live,
+    docs/protocol/framing.md, "Cancelling a call"). The connection is retired; a
+    pool replaces it. A cancelled call is never resent.
+    """
+
+    def __init__(self, func_name: str) -> None:
+        self.func_name = func_name
+        self.message = f"{func_name}: call cancelled; the connection is closed"
+        super().__init__(self.message)

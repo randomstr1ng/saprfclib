@@ -1061,6 +1061,66 @@ staleness rule above. Probe, 2026-11-26: a baseline check reported nothing, the 
 change above was then reported for the module that uses it, and after the reset the call used
 the new layout.
 
+### Callbacks
+
+A function module that calls `CALL FUNCTION ... DESTINATION 'BACK'` sends, where the client is
+waiting for its reply, a request for the client to run a function. Live capture, ABAP Platform
+2025 (kernel 916), 2026-11-26, with a purpose-built module calling back to the client
+(`tests/golden/framing/callback.json`):
+
+```
+0x0502  call start          (a reply opens with 0x0500 instead)
+0x000b  "816"               the server's release
+0x0102  function name
+0x000b  "816"
+0x0130  the calling program, e.g. SAPLZSAPRFCLIB_SIG2
+0x0514  session token
+0x0420  0
+0x0512
+0x0205  ...                 every parameter, importing ones included
+0x0201 / 0x0203 ...         the importing values
+```
+
+That is the shape of a call to a registered server, so the client answers it as a server does:
+saprfclib decodes the request and writes the reply with `RfcServer`'s code, in an ordinary
+`0x06CB` frame of the same connection, then reads on for the reply to its own call. Live: a module
+calling `STFC_CONNECTION` back three times received each answer, and the outer call then
+returned. What the client may answer when it cannot serve the callback:
+
+- **No handler.** The reference client sends nothing: it closes the connection and raises
+  `RFC_NOT_FOUND`. saprfclib answers as a server answers a call to a function it does not have,
+  with the ABAP exception `FU_NOT_FOUND` (`0x0500`, `0x0415` `FL`, `0x0416` `E`, `0x0417`
+  `046`, `0x0411` the function, `0x0401` `FU_NOT_FOUND`). Live: the calling ABAP caught it
+  (`EXCEPTIONS OTHERS`, `sy-subrc` 3), finished, and the connection stayed usable.
+- **A handler that failed.** The reference SDK's server answers a failing handler with its
+  header records and `0x0402` carrying a message (and `0x0403` `RFC_NOT_FOUND` before it for a
+  function it does not have); ABAP receives `SYSTEM_FAILURE`. Sent back on the caller's own
+  conversation that ends it: the gateway answers with an empty frame, so the outer call is lost
+  too. saprfclib sends that answer for a raising handler and raises `CommunicationError` naming
+  the callback; the connection is retired.
+
+`RfcServer` answers an unknown function and a failing handler with a different, uncaptured
+form (`0x0500`, `0x0420`, `0x0402`); the reference server's form above has not been tried there.
+
+### Cancelling a call
+
+The reference client cancels a call by sending one 80-byte GW frame on the call's socket; the
+gateway acknowledges it and closes the connection, and the reference client then logs on again.
+Live capture, two cancels three seconds into a twelve-second call (`tests/golden/framing/cancel.json`):
+
+```
+client  06 D5 02 00 | FF FF 00 00 | 0 x 8 | 08 00 00 00 [16:20] | 0 x 8 |
+        00 00 01 00 [28:32] | 0 x 8 | GW handle [40:48] | 0 x 28 | client tail [76:80]
+server  06 D6 00 00 | FF FF 00 00 | ... | handle [40:48] | ...          (then FIN)
+```
+
+The two cancels differed only in the handle. **The server stops the function module:** the probe
+module, a busy loop in one case and an ABAP `WAIT` in the other, ends with a database write that
+never happened (its tag was not written 14 seconds after the cancel), for the reference client's
+cancels and for saprfclib's. saprfclib's `cancel()` sends the same frame; the call raises
+`CallCancelledError` when the acknowledgement arrives and the connection is retired. Only on
+classic TCP connections: the frame has not been captured over SNC or WebSocket RFC.
+
 ---
 
 ## Open Questions
