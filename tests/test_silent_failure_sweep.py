@@ -19,7 +19,12 @@ import pytest
 from saprfclib.invoke import _parse_tlv_stream
 from saprfclib.server import _TAG_RETURN_CODE, RfcServer
 from saprfclib.stores import InMemoryUnitStore, UnitState
-from tests._bgrfc_legacy import build_bgrfc_request
+from tests._bgrfc_inbound import live_calls, ship_frame, unit_frame
+
+
+def _unit(uid: str, *names: str) -> bytes:
+    """BGRFC_DEST_SHIP as ABAP sends it, carrying calls of these names and no values."""
+    return ship_frame(uid, "T", [(name, b"") for name in names])
 
 
 def _return_code(response: bytes) -> int:
@@ -74,15 +79,7 @@ def test_a_failed_call_is_not_erased_by_a_later_successful_one() -> None:
     server.set_unit_store(InMemoryUnitStore())
 
     uid = uuid.uuid4().hex.upper()
-    frame = build_bgrfc_request(
-        uid,
-        "T",
-        [],
-        buffered_calls=[
-            "FAILING_FM".encode("utf-16-le"),
-            "GOOD_FM".encode("utf-16-le"),
-        ],
-    )
+    frame = _unit(uid, "FAILING_FM", "GOOD_FM")
     response = server.dispatch_inbound(frame)
 
     assert rolled_back == [uid]
@@ -93,26 +90,32 @@ def test_a_failed_call_is_not_erased_by_a_later_successful_one() -> None:
     assert ran == ["bad"]
 
 
-def test_an_undecodable_buffered_call_fails_the_unit() -> None:
+def test_an_undecodable_call_fails_the_unit() -> None:
     """A call that could not be decoded is not a call that ran."""
+    from saprfclib.invoke import tlv_record
+    from tests._bgrfc_fixture import descriptors
+
+    server = _new_server()
+    ran: list[str] = []
+    server.function("STFC_CONNECTION", descriptors()["STFC_CONNECTION"])(
+        lambda request: ran.append("good") or {}
+    )
+    server.install_unit_handlers()
+    server.set_unit_store(InMemoryUnitStore())
+
+    # REQUTEXT is UTF-16: an odd number of bytes cannot be a value of it.
+    record = tlv_record(0x0201, "REQUTEXT".encode("utf-16-le")) + tlv_record(0x0203, b"A")
+    frame = ship_frame(uuid.uuid4().hex.upper(), "T", [("STFC_CONNECTION", record)])
+    assert _return_code(server.dispatch_inbound(frame)) != 0
+    assert ran == []
+
+
+def test_a_call_without_a_name_fails_the_unit() -> None:
     server = _new_server()
     server.install_unit_handlers()
     server.set_unit_store(InMemoryUnitStore())
 
-    uid = uuid.uuid4().hex.upper()
-    # Lone high surrogate: valid UTF-16 code units, not decodable as text.
-    frame = build_bgrfc_request(uid, "T", [], buffered_calls=[b"\x00\xd8\x41\x00"])
-    assert _return_code(server.dispatch_inbound(frame)) != 0
-
-
-def test_an_empty_buffered_call_fails_the_unit() -> None:
-    server = _new_server()
-    server.install_unit_handlers()
-    server.set_unit_store(InMemoryUnitStore())
-
-    uid = uuid.uuid4().hex.upper()
-    frame = build_bgrfc_request(uid, "T", [], buffered_calls=[b""])
-    assert _return_code(server.dispatch_inbound(frame)) != 0
+    assert _return_code(server.dispatch_inbound(_unit(uuid.uuid4().hex.upper(), " "))) != 0
 
 
 def test_a_call_with_no_handler_still_fails_the_unit() -> None:
@@ -121,56 +124,47 @@ def test_a_call_with_no_handler_still_fails_the_unit() -> None:
     server.install_unit_handlers()
     server.set_unit_store(InMemoryUnitStore())
 
-    uid = uuid.uuid4().hex.upper()
-    frame = build_bgrfc_request(uid, "T", [], buffered_calls=["NO_SUCH_FM".encode("utf-16-le")])
+    frame = _unit(uuid.uuid4().hex.upper(), "NO_SUCH_FM")
     assert _return_code(server.dispatch_inbound(frame)) != 0
 
 
-def test_dropped_call_parameters_are_reported(caplog: pytest.LogCaptureFixture) -> None:
-    """The buffered-call parameter encoding is unimplemented (OG-06-02).
+def test_the_handler_gets_the_values_abap_sent() -> None:
+    """A unit's calls used to reach their handler with an empty request (OG-06-02)."""
+    from tests._bgrfc_fixture import descriptors
 
-    Until it is, a handler runs against an empty request dict. Doing that to a
-    business handler without saying so is the failure mode this whole file is about.
-    """
     server = _new_server()
-    seen: list[dict] = []
-
-    @server.function("PARAM_FM")
-    def _handler(request: dict) -> dict:
-        seen.append(request)
-        return {}
-
-    server.install_unit_handlers()
+    seen: list[str] = []
+    server.function("STFC_CONNECTION", descriptors()["STFC_CONNECTION"])(
+        lambda request: seen.append(request["REQUTEXT"]) or {}
+    )
     server.set_unit_store(InMemoryUnitStore())
 
-    uid = uuid.uuid4().hex.upper()
-    # Name followed by a payload the call encoding cannot yet split out.
-    call = "PARAM_FM".encode("utf-16-le") + b"\x00\x00" + "SOME_PAYLOAD".encode("utf-16-le")
-    with caplog.at_level(logging.WARNING, logger="saprfclib.server"):
-        response = server.dispatch_inbound(build_bgrfc_request(uid, "T", [], buffered_calls=[call]))
-
+    response = server.dispatch_inbound(ship_frame(uuid.uuid4().hex.upper(), "T", live_calls()))
     assert _return_code(response) == 0
-    assert seen == [{}]
-    assert any("OG-06-02" in r.getMessage() for r in caplog.records)
+    assert seen == ["bg-T"]
 
 
 def test_a_declared_but_missing_call_fails_the_unit() -> None:
-    """A frame claiming more calls than it carries must not commit a partial LUW."""
+    """A unit claiming more calls than it carries must not commit a partial LUW."""
+    from saprfclib.compress import sapcompress_compress_lzh, sapcompress_decompress
+    from tests._bgrfc_inbound import _set_values
+
     server = _new_server()
+    ran: list[str] = []
+    server.function("GOOD_FM")(lambda request: ran.append("good") or {})
     server.install_unit_handlers()
     server.set_unit_store(InMemoryUnitStore())
 
-    uid = uuid.uuid4().hex.upper()
-    frame = build_bgrfc_request(uid, "T", [], buffered_calls=["GOOD_FM".encode("utf-16-le")])
-    # Overstate the count: the frame still carries only BGRFC_CALL_0.
-    tampered = frame.replace(
-        "1".encode("utf-16-le") + b"\x00" * 0,
-        "4".encode("utf-16-le"),
-        1,
-    )
-    if tampered == frame:
-        pytest.skip("could not rewrite BGRFC_CALL_COUNT in this frame layout")
+    frame = _unit(uuid.uuid4().hex.upper(), "GOOD_FM")
+    from saprfclib.invoke import build_bgrfc_sdata
+
+    sdata = build_bgrfc_sdata([("GOOD_FM", b"")])
+    (n,) = struct.unpack_from("<I", sdata, 16)
+    plain = bytearray(sapcompress_decompress(sdata[16:], n))
+    plain[0x7C:0x80] = struct.pack(">I", 4)  # overstate the count: one call is there
+    tampered = _set_values(frame, {"SDATA": sdata[:16] + sapcompress_compress_lzh(bytes(plain))})
     assert _return_code(server.dispatch_inbound(tampered)) != 0
+    assert ran == []
 
 
 def test_a_failing_state_lookup_is_not_reported_as_not_found() -> None:
@@ -179,8 +173,6 @@ def test_a_failing_state_lookup_is_not_reported_as_not_found() -> None:
     Returning it when the lookup merely failed re-runs a possibly-committed LUW,
     which is the one thing the store exists to prevent.
     """
-    from saprfclib.invoke import build_bgrfc_state_request
-
     server = _new_server()
 
     def _explode(unit_id: str, unit_type: str) -> UnitState:
@@ -190,7 +182,7 @@ def test_a_failing_state_lookup_is_not_reported_as_not_found() -> None:
     server.set_unit_store(InMemoryUnitStore())
 
     uid = uuid.uuid4().hex.upper()
-    response = server.dispatch_inbound(build_bgrfc_state_request(uid, "T"))
+    response = server.dispatch_inbound(unit_frame("BGRFC_CHECK_UNIT_STATE_SERVER", uid, "T"))
     assert _return_code(response) != 0
     assert b"NOT_FOUND" not in response
 
@@ -209,7 +201,7 @@ def test_a_throwing_unit_callback_is_isolated_but_logged(
     server.set_unit_store(InMemoryUnitStore())
 
     uid = uuid.uuid4().hex.upper()
-    frame = build_bgrfc_request(uid, "T", [], buffered_calls=["GOOD_FM".encode("utf-16-le")])
+    frame = _unit(uid, "GOOD_FM")
     with caplog.at_level(logging.ERROR, logger="saprfclib.server"):
         response = server.dispatch_inbound(frame)
 

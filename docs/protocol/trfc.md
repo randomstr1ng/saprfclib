@@ -335,9 +335,9 @@ inbound frame
        │                              0 (new)       → mark received, run the handler
        │
        ├─ "ARFC_DEST_CONFIRM"  → placeholder: answers OK and does nothing
-       ├─ "BGRFC_DEST_SHIP"    → [ASSUMED] reads BGRFC_UNIT_ID / BGRFC_UNIT_TYPE / BGRFC_CALL_n,
-       │                         which only saprfclib's own builder writes; checks the unit,
-       │                         then plays it back
+       ├─ "BGRFC_DEST_SHIP"    → the unit from SSTATE, its calls from SDATA (Inbound bgRFC,
+       │                         below); checks the unit, then runs its calls in order
+       ├─ "BGRFC_DEST_CONFIRM" → UNIT_ID / UNIT_KIND; confirms the unit
        └─ *(else)*             → ordinary handler dispatch
 ```
 
@@ -472,6 +472,68 @@ deep-parameter unit ran and stored exactly the values sent. The system had no su
 destination configured (`BGRFC_CUST_SUPER` empty): units still ran, inline in the submit, so
 the note under Backend tables below does not hold for direct submits on this release.
 
+## Inbound bgRFC
+
+How ABAP sends a bgRFC unit to a registered server. From live captures on ABAP Platform 2025
+(kernel 916), 2026-11-26 (`tests/golden/trfc/bgrfc_inbound.json`, sanitised): ABAP created
+units with `CL_BGRFC_DESTINATION_OUTBOUND` for a registered TCP/IP destination and committed
+them, first with the reference SDK's server (pyrfc 3.3.1 on the NW RFC SDK 7.50) registered,
+then with `RfcServer`. Three units: one call; a deep-parameter call and a second call; one
+call in an outbound queue.
+
+**The conversation.** Each unit arrives as a `BGRFC_DEST_SHIP` call on a conversation of its
+own. Once that call is answered as a success, ABAP opens another conversation and sends
+`BGRFC_DEST_CONFIRM` with `UNIT_ID` (16 raw bytes) and `UNIT_KIND` (LE INT4). It did this
+for every unit that ran, and for none whose answer was a failure.
+
+**The unit.** `BGRFC_DEST_SHIP` has the parameters in the table above, and the unit is laid
+out as the client writes it:
+
+* `SDATA` is the container of "bgRFC SDATA" above, byte for byte in its constant parts, with
+  each call's record in the tRFC form, deep parameters as XML. One parser reads ABAP's units
+  and the reference client's.
+* `SSTATE` carries `UNIT_ID` at 0 and `UNIT_KIND` at 16 as in a submit, but with the
+  outbound kinds: `1409196105` for a `T` unit, `1409196101` for a `Q` unit. The client's
+  queued submit carries `1409196103`.
+* For a `Q` unit, `SSTATE-QUEUE_NAME` holds the queue (`ZSAPRFCLIB_OQ` in the capture) and
+  `OUT_IN_QUEUE_NAME_TAB` is empty. A client submit is the other way round.
+
+**The answer.** After a unit ran, the reference server answered with `BGRFC_RETRY_DELAY_TIME`
+0, `BGRFC_RETRY_KEY` blank, `BGRFC_RETRY_MAX_COUNT` 0, `SERVER_STATE` 22202 (LE INT4),
+`SHUTDOWN_INSTANCE` and `SHUTDOWN_ACTIVE` blank. It sends the two `SHUTDOWN_*` values even
+though the request does not ask for them. `RfcServer` sends the same six values. ABAP confirmed
+each unit after receiving them.
+
+**What ABAP did with each answer** (probe, same session; `RfcServer`'s answers):
+
+| Case | Answer | ABAP |
+|------|--------|------|
+| unit ran | the six values above | sent `BGRFC_DEST_CONFIRM` |
+| a call's handler raised | `0x0402` with the message, as for any failed call | no confirm; kept the unit and recorded the message as its error, to retry |
+| the check callback reported the unit as executed | the six values, no handler run | sent `BGRFC_DEST_CONFIRM` |
+
+The reference server did something different in two of these cases. When a handler raised, it
+rolled the unit back but answered with the six success values, so ABAP confirmed a unit that
+had not run. When its check callback reported the unit as executed, it answered with the
+failure "Application's transaction state database currently unavailable.", so ABAP kept the
+unit and sent it again later. `RfcServer` reports a failure as a failure, and an executed unit
+as done.
+
+`RfcServer` stops at the first call that fails, because ABAP sends the whole unit again. It also
+fails a unit that has no calls, that names a function no handler is registered for, or whose
+`SDATA` lengths do not add up. Every length in `SDATA` comes from the peer and is checked
+before use.
+
+**`BGRFC_CHECK_UNIT_STATE_SERVER`** [ASSUMED] for this direction: ABAP was not seen asking a
+registered server for a unit's state. `RfcServer` reads `UNIT_ID` and `UNIT_KIND` as the
+client sends them, and answers `STATE` with the integers of the client's state table.
+
+**Setting up the sender** (what the capture needed on the ABAP side). A registered TCP/IP
+destination (type `T`) with the bgRFC protocol selected; with the classic qRFC protocol,
+`CL_BGRFC_DESTINATION_OUTBOUND=>CREATE` refuses the destination as not registered. The
+destination registered for outbound bgRFC (`CL_BGRFC_REG_DEST`, SBGRFCCONF) and a supervisor
+destination (`BGRFC_SET_SUPERVISOR_DEST`). basXML was on.
+
 ---
 
 ## Known Gaps
@@ -490,15 +552,6 @@ sends one per TID.
 
 ### tRFC over WebSocket RFC
 No capture. `call_transactional` raises `NotImplementedError` on a WebSocket connection.
-
-### Inbound bgRFC (SAP to a registered server)
-How an ABAP system sends a bgRFC unit to a registered server has not been captured. The
-RFC server's bgRFC dispatch reads the unit id, type and calls from parameters named
-`BGRFC_UNIT_ID`, `BGRFC_UNIT_TYPE` and `BGRFC_CALL_<n>` **[ASSUMED]**, a shape no server
-sends: it is what this library's own client sent before #34, and the tests that exercise the
-dispatch build frames in it (`tests/_bgrfc_legacy.py`). The submit below suggests the real
-form is a `BGRFC_DEST_SHIP` call with `SDATA`; a destination pointing at `RfcServer` and a
-capture would settle it.
 
 ### Backend tables (A4H, kernel 793, observed 2026-09-04)
 

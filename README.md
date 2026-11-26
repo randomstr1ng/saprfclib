@@ -125,7 +125,8 @@ carries the same labels (`tests/api/public_api.json`).
 | SNC single sign-on (`snc_sso=True`) | |
 | RFC server: registration and inbound calls (`RfcServer`, `AsyncRfcServer`) | Plain TCP |
 | tRFC and qRFC submit, with durable TID stores | `retry_parked` re-sends a parked request on any connection, run at most once per TID |
-| bgRFC units (`create_unit()`, types T and Q), state query, confirm, unit stores | Kernel 916; the RFC server's inbound bgRFC is not captured (`docs/protocol/trfc.md`) |
+| bgRFC units (`create_unit()`, types T and Q), state query, confirm, unit stores | Kernel 916 |
+| RFC server: inbound bgRFC units from ABAP, types T and Q | Kernel 916 |
 
 **Preview**
 

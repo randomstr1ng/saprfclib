@@ -62,7 +62,10 @@ from saprfclib.invoke import (
     _decode_utf16le,
     _extract_name_value_pairs,
     _parse_tlv_stream,
+    bgrfc_unit_type_from_kind,
+    parse_bgrfc_sdata,
     tlv_record,
+    unit_state_to_wire,
     xml_parameter_records,
 )
 from saprfclib.metadata import FunctionDesc
@@ -129,13 +132,14 @@ _ARFC_DEST_CONFIRM = "ARFC_DEST_CONFIRM"  # tRFC confirm
 _BGRFC_DEST_SHIP = "BGRFC_DEST_SHIP"  # bgRFC submit
 _BGRFC_DEST_CONFIRM = "BGRFC_DEST_CONFIRM"  # bgRFC confirm
 _BGRFC_CHECK_UNIT_STATE_SERVER = "BGRFC_CHECK_UNIT_STATE_SERVER"  # bgRFC state query
+# SERVER_STATE in BGRFC_DEST_SHIP's answer for a unit that ran: 22202, from the
+# reference server (live capture, ABAP Platform 2025, 2026-11-26,
+# tests/golden/trfc/bgrfc_inbound.json).
+_BGRFC_SERVER_STATE_DONE = 22202
 
 # TID parameter name as carried in the ARFC_DEST_SHIP frame (invoke.py: ARFCTID).
 _PARAM_ARFCTID = "ARFCTID"
 
-# UnitID validation constants (T-06-U02).
-_UNITID_LN = 32
-_UNITID_CHARSET: frozenset[str] = frozenset("0123456789ABCDEF")
 
 # Directions whose values the SERVER produces on the response (Pitfall 4 mirror of
 # invoke.parse_invoke_response: everything that is not pure IMPORTING comes back).
@@ -529,6 +533,23 @@ def _dispatcher_svc_8(gwserv: str) -> bytes:
     return f"sapdp{instance:02d}".ljust(8).encode("ascii")[:8]
 
 
+def _bgrfc_values(tlv: bytes) -> dict[str, bytes]:
+    """Name -> raw value of the 0x0201/0x0203 pairs of an inbound bgRFC call."""
+    return {name.upper(): value for name, value in _extract_name_value_pairs(tlv)}
+
+
+def _bgrfc_unit_of(tlv: bytes) -> tuple[str, str] | None:
+    """(unit id as hex, 'T'/'Q') from UNIT_ID and UNIT_KIND values, or None."""
+    values = _bgrfc_values(tlv)
+    raw_id, raw_kind = values.get("UNIT_ID", b""), values.get("UNIT_KIND", b"")
+    if len(raw_id) != 16 or len(raw_kind) != 4:
+        return None
+    unit_type = bgrfc_unit_type_from_kind(int.from_bytes(raw_kind, "little"))
+    if unit_type is None:
+        return None
+    return raw_id.hex().upper(), unit_type
+
+
 def _response_tlv(func_desc: FunctionDesc | None, result: dict[str, Any]) -> bytes:
     """The reply to an inbound call (see RfcServer._build_response); shared with client callbacks."""
     result_upper = {k.upper(): v for k, v in result.items()}
@@ -799,8 +820,8 @@ class RfcServer:
           successfully; maps to ``UnitStore.persist`` → ``UnitStore.confirm``.
         - ``rollback(unit_id, unit_type) -> None``: called when a handler raises;
           maps to ``UnitState.ROLLED_BACK`` state.
-        - ``confirm(unit_id, unit_type) -> None``: called after commit as cleanup;
-          maps to ``UnitStore.confirm``.
+        - ``confirm(unit_id, unit_type) -> None``: called when ABAP confirms the unit
+          (``BGRFC_DEST_CONFIRM``, a separate call after the unit ran).
         - ``get_state(unit_id, unit_type) -> UnitState``: called on inbound state
           query; maps to ``UnitStore.get_unit_state``.
 
@@ -1012,44 +1033,37 @@ class RfcServer:
     def _dispatch_bgrfc_unit(self, tlv: bytes) -> bytes:
         """bgRFC unit inbound dispatch — TRFC-07 unit callback state machine.
 
-        Implements the server-side unit processing sequence from
-        docs/protocol/trfc.md §"Server-Side Dispatch":
+        ABAP's BGRFC_DEST_SHIP (docs/protocol/trfc.md §"Inbound bgRFC"):
 
-          1. Extract + validate UnitID (exactly 32 uppercase hex chars, V5 / T-06-U02).
-          2. Extract unit_type ('T' or 'Q') from frame params.
-          3. check_unit(uid, unit_type): if already executed → return RFC_EXECUTED.
-          4. persist(uid, unit_type) BEFORE handler execute (crash-safety, T-06-U01).
-          5. Execute each buffered call from the frame (exception-isolated, T-06-U03).
-          6. Success → on_commit(uid, unit_type) + store state = COMMITTED.
-          7. on_confirm(uid, unit_type) + store.confirm(uid, unit_type).
-          8. Exception → on_rollback(uid, unit_type) + store state = ROLLED_BACK.
+          1. Read the unit id and kind from SSTATE, the calls from SDATA.
+          2. check_unit(uid, unit_type): already executed → answer success, run nothing.
+          3. persist(uid, unit_type) BEFORE any call runs (crash-safety, T-06-U01).
+          4. Run the calls in order, stopping at the first failure (T-06-U03).
+          5. Success → on_commit, the store records the unit as done, answer success.
+          6. Failure → on_rollback, answer the failure; ABAP keeps the unit and resends.
 
-        Threat mitigations:
-          T-06-U01: persist before execute; confirm is a separate step.
-          T-06-U02: reject non-32-char or non-hex UnitID before store lookup.
-          T-06-U03: handler exception isolation — SYSTEM_FAILURE(str(exc)) only.
-          T-06-U04: NOT_FOUND after confirm is success; never resend (N/A server side).
+        on_confirm runs later, on ABAP's BGRFC_DEST_CONFIRM.
         """
-        # --- UnitID extraction + validation (V5 / T-06-U02) ---
-        unit_id = self._extract_param_from_frame(tlv, "BGRFC_UNIT_ID")
-        if not unit_id:
+        # --- the unit, as ABAP sends it (#119) ---
+        # Live capture through a registered destination, ABAP Platform 2025,
+        # 2026-11-26 (tests/golden/trfc/bgrfc_inbound.json): BGRFC_DEST_SHIP with
+        # SSTATE (UNIT_ID 16 raw bytes at 0, UNIT_KIND LE INT4 at 16, QUEUE_NAME at
+        # 84 for a 'Q' unit), SUPPORTABILITY_INFO and the calls in SDATA, in the
+        # layout the client writes (invoke.parse_bgrfc_sdata).
+        values = _bgrfc_values(tlv)
+        sstate = values.get("SSTATE", b"")
+        if len(sstate) < 20:
+            return self._build_system_failure("BGRFC_DEST_SHIP: SSTATE is missing or short")
+        unit_id = sstate[:16].hex().upper()
+        unit_type = bgrfc_unit_type_from_kind(int.from_bytes(sstate[16:20], "little"))
+        if unit_type is None:
             return self._build_system_failure(
-                "BGRFC_DEST_SHIP: missing BGRFC_UNIT_ID param in inbound frame"
+                f"BGRFC_DEST_SHIP: unknown UNIT_KIND {int.from_bytes(sstate[16:20], 'little')}"
             )
-        if len(unit_id) != _UNITID_LN:
-            return self._build_system_failure(
-                f"BGRFC_DEST_SHIP: invalid UnitID length {len(unit_id)} (expected {_UNITID_LN})"
-            )
-        if any(c not in _UNITID_CHARSET for c in unit_id):
-            return self._build_system_failure(
-                "BGRFC_DEST_SHIP: UnitID contains characters outside uppercase hex charset "
-                "(allowed: 0-9A-F)"
-            )
-
-        # --- unit_type extraction ---
-        unit_type = self._extract_param_from_frame(tlv, "BGRFC_UNIT_TYPE") or "T"
-        if unit_type not in ("T", "Q"):
-            unit_type = "T"  # defensive default; invalid type treated as 'T'
+        try:
+            calls = parse_bgrfc_sdata(values.get("SDATA", b""))
+        except ValueError as exc:
+            return self._build_system_failure(f"BGRFC_DEST_SHIP: {exc}")
 
         unit_store = self._unit_store
 
@@ -1062,46 +1076,25 @@ class RfcServer:
             already_done = state in (UnitState.COMMITTED, UnitState.CONFIRMED)
 
         if already_done:
-            return self._build_rfc_executed_response()
+            # Answered as a unit that ran, without running it: ABAP then confirmed it
+            # (live probe, bgrfc_inbound.json "saprfclib_already_executed"). The
+            # reference server answers this case with a failure, and ABAP resends.
+            return self._build_bgrfc_ship_ok()
 
         # --- persist BEFORE execute (crash-safety, T-06-U01) ---
         unit_store.persist(unit_id, unit_type)
 
-        # --- execute buffered calls (exception-isolated, T-06-U03) ---
-        # Each buffered call in the frame was embedded by build_bgrfc_request as raw
-        # bytes under BGRFC_CALL_N params. A unit is one LUW: the calls in it either
-        # all run or none of them count, and the caller re-ships the whole unit after
-        # a failure. So execution stops at the first error rather than carrying on --
-        # running the remaining calls would double-execute them on the resend.
+        # --- execute the calls (exception-isolated, T-06-U03) ---
+        # A unit is one LUW: the calls in it either all run or none of them count,
+        # and ABAP re-sends the whole unit after a failure. So execution stops at the
+        # first error rather than carrying on -- running the remaining calls would
+        # double-execute them on the resend.
         call_error: str | None = None
-        call_count_str = self._extract_param_from_frame(tlv, "BGRFC_CALL_COUNT")
-        call_count = 0
-        if call_count_str:
+        if not calls:
+            call_error = "bgRFC: the unit carries no calls"
+        for func_name, record in calls:
             try:
-                call_count = int(call_count_str)
-            except ValueError:
-                # Treating an unreadable count as zero commits the unit having run
-                # nothing, and reports that to the caller as a completed LUW.
-                return self._build_system_failure(
-                    f"BGRFC_DEST_SHIP: unreadable BGRFC_CALL_COUNT {call_count_str!r}"
-                )
-            if call_count < 0:
-                return self._build_system_failure(
-                    f"BGRFC_DEST_SHIP: negative BGRFC_CALL_COUNT {call_count}"
-                )
-
-        for i in range(call_count):
-            call_bytes = self._extract_raw_param_from_frame(tlv, f"BGRFC_CALL_{i}")
-            if call_bytes is None:
-                # The frame declared more calls than it carries. Skipping the gap
-                # would commit a partial LUW as a complete one.
-                call_error = (
-                    f"bgRFC: frame declares {call_count} call(s) but BGRFC_CALL_{i} is missing"
-                )
-                break
-            # Try to decode the embedded call (func_name from UTF-16LE until NUL NUL).
-            try:
-                call_error = self._execute_buffered_call(call_bytes)
+                call_error = self._execute_unit_call(func_name, record)
             except Exception as exc:  # noqa: BLE001 — isolate ALL errors (T-06-U03)
                 call_error = str(exc).splitlines()[0][:512]
             if call_error is not None:
@@ -1139,28 +1132,49 @@ class RfcServer:
                     unit_type,
                 )
 
+        # Recorded as done at once, so a resend is recognised whatever happens to
+        # the confirm. on_confirm_unit runs when ABAP's BGRFC_DEST_CONFIRM arrives,
+        # on a conversation of its own (live: every committed unit was followed by one).
         unit_store.confirm(unit_id, unit_type)
+        return self._build_bgrfc_ship_ok()
 
-        if self._on_confirm_unit is not None:
-            try:
-                self._on_confirm_unit(unit_id, unit_type)
-            except Exception:  # noqa: BLE001 — cleanup must not fail the unit
-                _logger.exception(
-                    "bgRFC: on_confirm_unit raised for unit %s (type %s)",
-                    unit_id,
-                    unit_type,
-                )
+    @staticmethod
+    def _build_bgrfc_ship_ok() -> bytes:
+        """BGRFC_DEST_SHIP's answer for a unit that ran, as the reference server sends it.
 
-        return self._build_rfc_ok_response()
+        Live capture, same session as the request: after a committed unit the
+        reference SDK's server returned these six values, SERVER_STATE 22202 as an LE
+        INT4, the retry values zero and blank. The SHUTDOWN_* values are sent though
+        the request did not list them among the parameters it wanted.
+        """
+        values = [
+            ("BGRFC_RETRY_DELAY_TIME", struct.pack("<i", 0)),
+            ("BGRFC_RETRY_KEY", " ".encode("utf-16-le") * 24),
+            ("BGRFC_RETRY_MAX_COUNT", struct.pack("<i", 0)),
+            ("SERVER_STATE", struct.pack("<i", _BGRFC_SERVER_STATE_DONE)),
+            ("SHUTDOWN_INSTANCE", " ".encode("utf-16-le") * 40),
+            ("SHUTDOWN_ACTIVE", " ".encode("utf-16-le")),
+        ]
+        parts = [
+            tlv_record(_TAG_RESPONSE_START),
+            tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_OK)),
+        ]
+        for name, value in values:
+            parts.append(tlv_record(_TAG_PARAM_NAME, name.encode("utf-16-le")))
+            parts.append(tlv_record(_TAG_PARAM_VALUE, value))
+        parts.append(tlv_record(_TAG_TERMINATOR))
+        return b"".join(parts)
 
     def _dispatch_bgrfc_confirm(self, tlv: bytes) -> bytes:
-        """Handle BGRFC_DEST_CONFIRM: confirm unit in the store."""
-        unit_id = self._extract_param_from_frame(tlv, "BGRFC_UNIT_ID")
-        unit_type = self._extract_param_from_frame(tlv, "BGRFC_UNIT_TYPE") or "T"
-        if not unit_id or len(unit_id) != _UNITID_LN:
-            return self._build_system_failure(
-                "BGRFC_DEST_CONFIRM: invalid or missing BGRFC_UNIT_ID"
-            )
+        """Handle BGRFC_DEST_CONFIRM: confirm unit in the store.
+
+        ABAP sends it after a unit's BGRFC_DEST_SHIP, with UNIT_ID (16 raw bytes) and
+        UNIT_KIND (LE INT4) as values (live, same capture).
+        """
+        found = _bgrfc_unit_of(tlv)
+        if found is None:
+            return self._build_system_failure("BGRFC_DEST_CONFIRM: invalid or missing UNIT_ID")
+        unit_id, unit_type = found
         # T-06-U04: NOT_FOUND after confirm = success; do not error.
         self._unit_store.confirm(unit_id, unit_type)
         if self._on_confirm_unit is not None:
@@ -1175,13 +1189,18 @@ class RfcServer:
         return self._build_rfc_ok_response()
 
     def _dispatch_bgrfc_state_query(self, tlv: bytes) -> bytes:
-        """Handle BGRFC_CHECK_UNIT_STATE_SERVER: return unit state."""
-        unit_id = self._extract_param_from_frame(tlv, "BGRFC_UNIT_ID")
-        unit_type = self._extract_param_from_frame(tlv, "BGRFC_UNIT_TYPE") or "T"
-        if not unit_id or len(unit_id) != _UNITID_LN:
+        """Handle BGRFC_CHECK_UNIT_STATE_SERVER: return unit state.
+
+        [ASSUMED] inbound: ABAP was not seen asking a registered server for a unit's
+        state. Read as the client sends it (UNIT_ID, UNIT_KIND), answered with the
+        module's STATE (INT4) in the encoding the server uses towards a client.
+        """
+        found = _bgrfc_unit_of(tlv)
+        if found is None:
             return self._build_system_failure(
-                "BGRFC_CHECK_UNIT_STATE_SERVER: invalid or missing BGRFC_UNIT_ID"
+                "BGRFC_CHECK_UNIT_STATE_SERVER: invalid or missing UNIT_ID"
             )
+        unit_id, unit_type = found
         if self._on_get_unit_state is not None:
             try:
                 state = self._on_get_unit_state(unit_id, unit_type)
@@ -1202,130 +1221,36 @@ class RfcServer:
                 )
         else:
             state = self._unit_store.get_unit_state(unit_id, unit_type)
-        # Encode state name as a CHAR param in the response TLV.
         return b"".join(
             [
                 tlv_record(_TAG_RESPONSE_START),
                 tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_OK)),
-                tlv_record(_TAG_PARAM_NAME, "BGRFC_STATE".encode("utf-16-le")),
-                tlv_record(_TAG_PARAM_VALUE, state.name.encode("utf-16-le")),
+                tlv_record(_TAG_PARAM_NAME, "STATE".encode("utf-16-le")),
+                tlv_record(_TAG_PARAM_VALUE, struct.pack("<i", unit_state_to_wire(state.name))),
                 tlv_record(_TAG_TERMINATOR),
             ]
         )
 
-    def _execute_buffered_call(self, call_bytes: bytes) -> str | None:
-        """Execute one buffered call from a bgRFC unit payload.
+    def _execute_unit_call(self, func_name: str, record: bytes) -> str | None:
+        """Run one call of a bgRFC unit; None on success, else the error message.
 
-        Decodes the func_name from the call_bytes (UTF-16LE until NUL NUL separator),
-        looks up the handler, and dispatches it.  Returns None on success or an error
-        string (str(exc) first line) on failure.
-
-        This method is exception-isolated: the caller wraps it in try/except to
-        satisfy T-06-U03 (no traceback leak, no credential leak).
+        ``record`` is the serialized call as SDATA carries it: header records, then the
+        call (0x0502, 0x0201/0x0203 values, XML brackets for deep parameters), so it is
+        decoded like any inbound call against the handler's descriptor.
         """
-        # Returning None here means "this call succeeded" to the caller, which then
-        # commits and confirms the unit. A call that could not be run is not a call
-        # that ran, so every unexecutable case below reports an error instead.
-        if not call_bytes:
-            return "bgRFC: buffered call is empty"
-
-        # Decode func_name: the leading UTF-16LE string up to its NUL terminator.
-        #
-        # The terminator is a 0x0000 *code unit*, so it can only start at an even
-        # offset. Scanning with bytes.find(b"\x00\x00") instead matched the low NUL
-        # of the last character plus the first NUL of the terminator -- an odd offset,
-        # every time, for any ASCII name. The odd result was then rejected as
-        # unaligned and the whole payload taken as the name, so the separator branch
-        # never ran and a call carrying parameters decoded to a garbage name.
-        nul_pos = -1
-        for off in range(0, len(call_bytes) - 1, 2):
-            if call_bytes[off] == 0 and call_bytes[off + 1] == 0:
-                nul_pos = off
-                break
-        try:
-            if nul_pos < 0:
-                # No terminator — the whole payload is the name.
-                func_name = call_bytes.decode("utf-16-le").rstrip("\x00 ")
-            else:
-                func_name = call_bytes[:nul_pos].decode("utf-16-le").rstrip("\x00 ")
-        except UnicodeDecodeError as exc:
-            return f"bgRFC: cannot decode function name from buffered call ({exc})"
-
         if not func_name:
-            return "bgRFC: buffered call carries an empty function name"
-
+            return "bgRFC: a call in the unit carries no function name"
         entry = self._registry.get(func_name.upper())
         if entry is None and self._generic is not None:
             entry = self._generic(func_name)
         if entry is None:
-            # No handler registered — return error (does not crash the unit)
-            return f"bgRFC: no handler registered for {func_name!r}"
-
-        _func_desc, handler = entry
-        # For bgRFC buffered calls, params are not yet deserialized (OG-06-02).
-        # Pass an empty request dict until live-capture confirms the encoding.
-        # Say so whenever the call carries more than the name we consumed: the
-        # handler is about to run against no data, and doing that to a business
-        # handler without a word is worse than the missing feature itself.
-        consumed = len(call_bytes) if nul_pos < 0 else nul_pos + 2
-        if len(call_bytes) > consumed:
-            _logger.warning(
-                "bgRFC: calling %s with an empty request — the buffered-call parameter "
-                "encoding is not implemented (OG-06-02), so %d byte(s) of this call are "
-                "being dropped",
-                func_name,
-                len(call_bytes) - consumed,
-            )
+            return f"Function {func_name} not found"
+        func_desc, handler = entry
+        request = self._deserialize_request(record, func_desc)
         try:
-            handler({})
+            handler(request)
         except Exception as exc:  # noqa: BLE001 — isolate (T-06-U03)
             return str(exc).splitlines()[0][:512]
-        return None
-
-    @staticmethod
-    def _extract_raw_param_from_frame(tlv: bytes, param_name: str) -> bytes | None:
-        """Extract a raw (bytes) named param value from a TLV frame.
-
-        Returns the raw bytes value of the first param whose name matches
-        ``param_name`` (case-insensitive).  Returns None if not found.
-        Used for BGRFC_CALL_N entries (binary payload, not UTF-16LE strings).
-        """
-        key = param_name.upper()
-        pos = 0
-        n = len(tlv)
-        current_name: str | None = None
-
-        while pos + 4 <= n:
-            tag = struct.unpack_from(">H", tlv, pos)[0]
-            length = struct.unpack_from(">H", tlv, pos + 2)[0]
-            pos += 4
-            if tag == _TAG_TERMINATOR:
-                break
-            if length == 0xFFFF:
-                if pos + 4 > n:
-                    break
-                ext_len = struct.unpack_from(">I", tlv, pos)[0]
-                pos += 4
-                end = pos + ext_len
-                if end > n:
-                    break
-                value = tlv[pos:end]
-                pos = end
-            else:
-                end = pos + length
-                if end > n:
-                    break
-                value = tlv[pos:end]
-                pos = end
-            # Skip close tag
-            if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
-                pos += 2
-            if tag == _TAG_PARAM_NAME:
-                current_name = _decode_utf16le(value)
-            elif tag == _TAG_PARAM_VALUE and current_name is not None:
-                if current_name.upper() == key:
-                    return value
-                current_name = None
         return None
 
     # --------------------------------------------------------------------- #

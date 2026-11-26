@@ -29,7 +29,8 @@ _SKIP_SERVER = pytest.mark.skipif(
 
 from saprfclib.invoke import build_invoke_request  # noqa: E402
 from saprfclib.types import RFC_EXPORT, RFC_IMPORT, FieldDesc, FunctionDesc  # noqa: E402
-from tests._bgrfc_legacy import build_bgrfc_request  # noqa: E402
+from tests._bgrfc_fixture import descriptors  # noqa: E402
+from tests._bgrfc_inbound import live_calls, ship_frame, unit_frame  # noqa: E402
 from tests._trfc_fixture import forged_inbound_trfc  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -195,15 +196,14 @@ async def test_async_server_duplicate_tid() -> None:
 async def test_async_server_bgrfc_callback_order() -> None:
     """TRFC-07: bgRFC server callbacks fire in check->commit->confirm order.
 
-    The server must fire the bgRFC lifecycle callbacks in the correct sequence
-    when an inbound bgRFC frame arrives:
+    ABAP sends the unit in BGRFC_DEST_SHIP, then confirms it in BGRFC_DEST_CONFIRM
+    (live capture, tests/golden/trfc/bgrfc_inbound.json):
       1. check   (is the unit already known? return 0 for new unit)
-      2. commit  (LUW commit — logical unit of work complete)
-      3. confirm (remove the unit from the store)
+      2. commit  (the unit's calls ran)
+      3. confirm (on BGRFC_DEST_CONFIRM)
 
     No "rollback" must occur on the success path.
 
-    Uses build_bgrfc_request to produce the inbound BGRFC_DEST_SHIP frame.
     _async_dispatch delegates to dispatch_inbound for bgRFC (synchronous store calls).
 
     Asserts:
@@ -222,9 +222,10 @@ async def test_async_server_bgrfc_callback_order() -> None:
         confirm=lambda uid, ut: order.append("confirm"),
     )
 
-    frame = build_bgrfc_request(unit_id, "T", [], None)
-    response = await server._async_dispatch(frame)
-
+    server.function("STFC_CONNECTION", descriptors()["STFC_CONNECTION"])(lambda request: {})
+    response = await server._async_dispatch(ship_frame(unit_id, "T", live_calls()))
     assert isinstance(response, bytes)
+    await server._async_dispatch(unit_frame("BGRFC_DEST_CONFIRM", unit_id, "T"))
+
     assert order == ["check", "commit", "confirm"]
     assert "rollback" not in order
