@@ -319,8 +319,10 @@ def test_auth_callback_denies() -> None:
     # The callback received the unscrambled credentials.
     assert seen_creds == [("DEVELOPER", "s3cret")]
     # Auth-failure is signalled (non-zero return code via the failure builder).
-    idx = resp.find(struct.pack(">H", _TAG_RETURN_CODE))
-    assert idx != -1 and struct.unpack_from(">I", resp, idx + 4)[0] != 0
+    # A failure answer: the message in 0x0402 and no return code, as the reference
+    # SDK's server answers (server._build_system_failure).
+    assert resp.find(struct.pack(">H", _TAG_RETURN_CODE)) == -1
+    assert resp.find(struct.pack(">H", 0x0402)) != -1
     # The password is NEVER echoed in the failure message (T-05-C03).
     assert "s3cret" not in _error_message_from_response(resp)
 
@@ -345,8 +347,10 @@ def test_handler_exception_isolated() -> None:
 
     # The raising handler does not propagate; it becomes a SYSTEM_FAILURE.
     resp = server.dispatch_inbound(_inbound_call_frame("BOOM", {}))
-    idx = resp.find(struct.pack(">H", _TAG_RETURN_CODE))
-    assert idx != -1 and struct.unpack_from(">I", resp, idx + 4)[0] != 0
+    # A failure answer: the message in 0x0402 and no return code, as the reference
+    # SDK's server answers (server._build_system_failure).
+    assert resp.find(struct.pack(">H", _TAG_RETURN_CODE)) == -1
+    assert resp.find(struct.pack(">H", 0x0402)) != -1
     msg = _error_message_from_response(resp)
     assert "handler blew up" in msg
     # No full traceback leaked — only the first line of str(exc) (T-05-C02).

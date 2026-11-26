@@ -23,9 +23,16 @@ from tests._bgrfc_legacy import build_bgrfc_request
 
 
 def _return_code(response: bytes) -> int:
+    """The reply's return code; -1 for a failure answer, which carries none.
+
+    A failure is answered as the reference SDK's server answers one: 0x0402 with the
+    message and no 0x0420 (server._build_system_failure).
+    """
     tags = _parse_tlv_stream(response)
     rc = tags.get(_TAG_RETURN_CODE)
-    assert rc is not None, "response carries no return code"
+    if rc is None:
+        assert 0x0402 in tags, "response carries neither a return code nor a failure message"
+        return -1
     return int(struct.unpack(">I", rc)[0])
 
 

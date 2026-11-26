@@ -212,3 +212,44 @@ def test_cancel_raises_in_the_call_and_retires_the_connection() -> None:
     assert isinstance(err, CallCancelledError)
     assert err.func_name == "Z_SAPRFCLIB_CB"
     assert conn._session.state is SessionState.BROKEN
+
+
+# --------------------------------------------------------------------------- #
+# RfcServer answers a call it cannot run as the reference SDK's server does
+# --------------------------------------------------------------------------- #
+
+_REF_HEADER = {0x0101, 0x0103, 0x0106, 0x0007, 0x0011, 0x0012, 0x0013, 0x0130, 0x0667}
+
+
+def _server() -> Any:
+    from saprfclib.server import RfcServer
+
+    return RfcServer({"program_id": "ZTEST", "gwhost": "gw.example", "gwserv": "sapgw00"})
+
+
+@pytest.mark.parametrize(
+    ("ours", "reference", "message", "key"),
+    [
+        (
+            "saprfclib_server_not_found",
+            "reference_server_not_found",
+            "Function STFC_CONNECTION not found",
+            "RFC_NOT_FOUND",
+        ),
+        (
+            "saprfclib_server_handler_failed",
+            "reference_server_handler_failed",
+            "handler exploded",
+            None,
+        ),
+    ],
+)
+def test_rfc_server_failures_take_the_reference_servers_form(
+    ours: str, reference: str, message: str, key: str | None
+) -> None:
+    built = _server()._build_system_failure(message, key=key)
+    live = bytes.fromhex(CB[ours]["answer"])[80:]
+    assert live[: len(built)] == built  # what went to ABAP, which read it (callback.json)
+    ref = [t for t in _names(bytes.fromhex(CB[reference]["answer"])) if t not in _REF_HEADER]
+    assert [t for t, _ in _iter_tlv_records(built)] == ref
+    assert 0x0420 not in dict(_iter_tlv_records(built))
