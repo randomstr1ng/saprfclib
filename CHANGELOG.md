@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deep structures and table-typed parameters** (#85). A structure with a STRING, XSTRING,
+  nested structure or nested table component, and every table-typed IMPORTING, EXPORTING or
+  CHANGING parameter, is now sent and read as XML (`0x3c02`/`0x3c05`), as the reference client
+  does, with values typed as on the binary path. Nested components come back as nested dicts.
+  Captured against ABAP Platform 2025 for every scalar type, nested flat and deep structures and
+  nested tables (`tests/golden/serialization/deep/`). The RFC server, tRFC units and namespaced
+  component names refuse deep values with `NotImplementedError` until they are captured.
 - **`invalidate_metadata(name=None)`** on `Connection`, `AsyncConnection`, both pools and
   `MetadataCache` (#80) forgets cached function interfaces and the DDIC layouts cached with
   them, so the next call fetches them again. A live probe showed why it is needed and why it is
@@ -62,6 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md`.
 
 ### Fixed
+
+- **A deep structure parameter was typed as DECFLOAT16** (#85). Its metadata code `v` was mapped
+  from an `[ASSUMED]` guess, so such a parameter had no layout and any value for it failed or was
+  encoded as an 8-byte decimal. It is a structure.
+- **A variable-length value inside a structure overwrote the components after it** (#85). Deep
+  structures no longer go through the fixed-buffer encoder.
+- **A table-typed IMPORTING parameter was refused by the server** with
+  `CALL_FUNCTION_ILLEGAL_P_TYPE`, because it was sent as a binary table (#85).
+- **A structure holding a DECFLOAT could not be sent partially**: a DECFLOAT left out defaulted
+  to `""`, which failed with `InvalidOperation`. It now defaults to zero.
+- **A component typed by another structure had no layout**: its fields were listed at the outer
+  level and the component itself was left unresolved, so reading such a structure raised
+  `IncompleteDescriptorError`. It is now a nested dict, as with the reference client.
+- **The async DDIC lookup read only the first frame** of a multi-frame reply.
 
 - **A unit's buffered call could be changed after `unit.call(...)`** (#86): only the top-level
   dict was copied, so editing a row before the unit was submitted changed what was sent. The

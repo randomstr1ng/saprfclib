@@ -93,6 +93,7 @@ from saprfclib.metadata import (
     _DATATYPE_TO_RFCTYPE,
     _DOUBLED_DATATYPES,
     _EXID_TO_RFCTYPE,
+    _MAX_RECURSION_DEPTH,
     RFCTYPE_CHAR,
     RFCTYPE_STRUCTURE,
     RFCTYPE_TABLE,
@@ -1433,6 +1434,10 @@ def _build_type_desc_from_dfies(tabname: str, dfies_rows: list[tuple[Any, ...]])
 _DDIF_FIELDNAME = slice(60, 120)
 _DDIF_POSITION = slice(122, 130)
 _DDIF_OFFSET = slice(130, 142)
+# [202:262] ROLLNAME C(30): for a STRU or TTYP component, the DDIC name of its type
+# (live DDIF_FIELDINFO_GET reply for a deep structure, 2026-11-26: a component typed
+# ZSAPRFCLIB_FLAT and one typed BAPIRET2_T carried exactly those names here).
+_DDIF_ROLLNAME = slice(202, 262)
 _DDIF_LENG = slice(322, 334)
 _DDIF_INTLEN = slice(334, 346)
 _DDIF_DECIMALS = slice(358, 370)
@@ -1484,8 +1489,8 @@ def _slice_named_table(response: bytes, name: str) -> bytes:
 def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
     """Parse the DFIES_TAB rows of a DDIF_FIELDINFO_GET reply.
 
-    Returns (fieldname, position, offset, leng, intlen, decimals, datatype) per
-    field. ``offset``/``intlen`` are the server's field placement in the reply's
+    Returns (fieldname, position, offset, leng, intlen, decimals, datatype,
+    rollname) per field. ``offset``/``intlen`` are the server's field placement in the reply's
     own length unit; ``leng`` is the external length (character count for char
     types); ``datatype`` is the DDIC type name that types the field (INTTYPE is not
     enough -- INT4/RAW share it). _build_type_desc_from_ddif turns these into a
@@ -1505,11 +1510,12 @@ def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
             intlen = int(data[_DDIF_INTLEN].decode("utf-16-le").strip() or "0")
             decimals = int(data[_DDIF_DECIMALS].decode("utf-16-le").strip() or "0")
             datatype = data[_DDIF_DATATYPE].decode("utf-16-le").rstrip(" \x00")
+            rollname = data[_DDIF_ROLLNAME].decode("utf-16-le").strip(" \x00")
         except (UnicodeDecodeError, ValueError):
             continue
         if not fieldname or datatype not in _DATATYPE_TO_RFCTYPE:
             continue
-        rows.append((fieldname, position, offset, leng, intlen, decimals, datatype))
+        rows.append((fieldname, position, offset, leng, intlen, decimals, datatype, rollname))
     return rows
 
 
@@ -1538,7 +1544,11 @@ _DATATYPE_ALIGNMENT: dict[str, int] = {
 }
 
 
-def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -> TypeDesc:
+def _build_type_desc_from_ddif(
+    tabname: str,
+    ddif_rows: list[tuple[Any, ...]],
+    resolve: Callable[[str], TypeDesc | None] | None = None,
+) -> TypeDesc:
     """Build a TypeDesc from DDIF_FIELDINFO_GET DFIES rows.
 
     Types come from the DDIC DATATYPE (INTTYPE is ambiguous -- INT4 and RAW share
@@ -1548,6 +1558,18 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
     (only the HoneySAP emulator, which never returns structure values to decode)
     has no such offsets, so widths are derived from LENG and packed tight. See the
     module comment for the evidence.
+
+    Named components. With ALL_TYPES='X' a component typed by another structure
+    arrives as a STRU row followed by that structure's own components, each at its
+    offset in the outer structure; a table-typed component arrives as one TTYP row
+    and nothing else. Live DDIF reply for a deep structure, 2026-11-26: a STRU row
+    at offset 32 with INTLEN 144 was followed by its 14 components at offsets 32 to
+    160, then the next component of the outer structure at 176. So the components
+    that sit inside a STRU row's [OFFSET, OFFSET + INTLEN) belong to it, and are
+    rebuilt as a nested structure with offsets relative to it. A TTYP row's line
+    type is looked up by its ROLLNAME through ``resolve``; with no resolver, or
+    when the lookup finds nothing, its layout stays unresolved. Structures whose
+    substructures are includes (SYST) have no STRU rows, and stay flat.
     """
     if not ddif_rows:
         raise ValueError(f"no DFIES rows for {tabname!r}")
@@ -1557,37 +1579,100 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
     # Reply length unit: a doubled-type field whose INTLEN is twice its LENG is a
     # Unicode reply (CHAR1 -> 2 bytes). Otherwise treat it as NUC.
     unicode_reply = True
-    for _fn, _pos, _off, leng, intlen, _dec, datatype in rows:
+    for row in rows:
+        leng, intlen, datatype = row[3], row[4], row[6]
         if datatype in _DOUBLED_DATATYPES and leng > 0:
             unicode_reply = intlen == leng * 2
             break
 
+    if not unicode_reply:
+        return _packed_type_desc_from_ddif(tabname, rows)
+    fields, _next, align = _ddif_tree(rows, 0, None, 0, resolve, 0)
+    max_end = max((f.uc_offset + f.uc_length for f in fields), default=0)
+    nuc_size = sum(f.nuc_length for f in fields)
+    # Trailing padding to the structure's alignment (see _DATATYPE_ALIGNMENT).
+    uc_size = -(-max_end // align) * align
+    return TypeDesc(name=tabname, fields=fields, nuc_size=nuc_size, uc_size=uc_size)
+
+
+def _ddif_table_types(rows: list[tuple[Any, ...]]) -> list[str]:
+    """ROLLNAMEs of the table-typed (TTYP) components among DFIES rows, in order."""
+    names: list[str] = []
+    for row in rows:
+        if row[6] == "TTYP" and len(row) > 7 and row[7] and row[7] not in names:
+            names.append(row[7])
+    return names
+
+
+def _ddif_tree(
+    rows: list[tuple[Any, ...]],
+    i: int,
+    end: int | None,
+    base: int,
+    resolve: Callable[[str], TypeDesc | None] | None,
+    depth: int,
+) -> tuple[list[FieldDesc], int, int]:
+    """Components of one structure level: (fields, next row index, alignment)."""
+    if depth > _MAX_RECURSION_DEPTH:
+        raise ValueError(f"DDIC structure nested deeper than {_MAX_RECURSION_DEPTH} levels")
     fields: list[FieldDesc] = []
-    packed_nuc = 0
-    packed_uc = 0
-    max_end = 0
     align = 1
-    for fieldname, _position, offset, leng, intlen, decimals, datatype in rows:
+    while i < len(rows):
+        fieldname, _pos, offset, leng, intlen, decimals, datatype, *rest = rows[i]
+        if end is not None and offset >= end:
+            break
+        i += 1
+        rollname = rest[0] if rest else ""
         align = max(align, _DATATYPE_ALIGNMENT.get(datatype, 1))
         rfctype = _DATATYPE_TO_RFCTYPE[datatype]
         doubled = datatype in _DOUBLED_DATATYPES
+        type_desc: TypeDesc | None = None
         nuc_len = leng if doubled else intlen
-        uc_len = leng * 2 if doubled else intlen
-        if unicode_reply:
-            # The server placed the field (alignment + flattened nesting included).
-            uc_off = offset
-            nuc_off = packed_nuc  # NUC layout is not used on a Unicode connection.
-        else:
-            uc_off = packed_uc
-            nuc_off = packed_nuc
+        if datatype == "STRU":
+            children, i, sub_align = _ddif_tree(
+                rows, i, offset + intlen, offset, resolve, depth + 1
+            )
+            align = max(align, sub_align)
+            nuc_len = sum(c.nuc_length for c in children)
+            type_desc = TypeDesc(
+                name=rollname or fieldname, fields=children, nuc_size=nuc_len, uc_size=intlen
+            )
+        elif datatype == "TTYP" and resolve is not None and rollname:
+            type_desc = resolve(rollname)
         fields.append(
             FieldDesc(
                 name=fieldname,
                 rfctype=rfctype,
                 nuc_length=nuc_len,
-                nuc_offset=nuc_off,
+                nuc_offset=0,  # the NUC layout is not used on a Unicode connection
+                uc_length=leng * 2 if doubled else intlen,
+                uc_offset=offset - base,
+                decimals=decimals,
+                unicode_mode=True,
+                type_desc=type_desc,
+                direction=RFC_IMPORT,
+            )
+        )
+    return fields, i, align
+
+
+def _packed_type_desc_from_ddif(tabname: str, rows: list[tuple[Any, ...]]) -> TypeDesc:
+    """The NUC-reply layout: widths from LENG, packed tight (see the module comment)."""
+    fields: list[FieldDesc] = []
+    packed_nuc = 0
+    packed_uc = 0
+    for fieldname, _position, _offset, leng, intlen, decimals, datatype, *_rest in rows:
+        doubled = datatype in _DOUBLED_DATATYPES
+        nuc_len = leng if doubled else intlen
+        uc_len = leng * 2 if doubled else intlen
+        fields.append(
+            FieldDesc(
+                name=fieldname,
+                rfctype=_DATATYPE_TO_RFCTYPE[datatype],
+                nuc_length=nuc_len,
+                nuc_offset=packed_nuc,
                 uc_length=uc_len,
-                uc_offset=uc_off,
+                uc_offset=packed_uc,
                 decimals=decimals,
                 unicode_mode=True,
                 direction=RFC_IMPORT,
@@ -1595,11 +1680,7 @@ def _build_type_desc_from_ddif(tabname: str, ddif_rows: list[tuple[Any, ...]]) -
         )
         packed_nuc += nuc_len
         packed_uc += uc_len
-        max_end = max(max_end, uc_off + uc_len)
-
-    # Trailing padding to the structure's alignment (see _DATATYPE_ALIGNMENT).
-    uc_size = -(-max_end // align) * align if unicode_reply else packed_uc
-    return TypeDesc(name=tabname, fields=fields, nuc_size=packed_nuc, uc_size=uc_size)
+    return TypeDesc(name=tabname, fields=fields, nuc_size=packed_nuc, uc_size=packed_uc)
 
 
 def _build_ddif_fieldinfo_desc(unicode_mode: bool) -> FunctionDesc:
@@ -2182,6 +2263,7 @@ class Connection:
         self._anon_cache_key: str | None = metadata_cache_key
         self._metrics = ConnectionMetrics()
         self._struct_desc_cache: dict[str, TypeDesc] = {}  # tabname → TypeDesc (META-04)
+        self._line_types_pending: set[str] = set()  # table types being resolved
         self._snc_mode: bool = False
         self._snc_sso: bool = False
         # 16 bytes proposed by this client in the LOGON's 0x0514 and echoed in the
@@ -2215,6 +2297,7 @@ class Connection:
         inst._lock = threading.Lock()
         inst._cache = async_conn._cache
         inst._struct_desc_cache = async_conn._struct_desc_cache
+        inst._line_types_pending = getattr(async_conn, "_line_types_pending", set())
         inst._snc_mode = False
         inst._snc_sso = False
         inst._ws_auth = None
@@ -3211,7 +3294,37 @@ class Connection:
         rows = _parse_ddif_dfies_rows(response)
         if not rows:
             return None
-        return _build_type_desc_from_ddif(tabname, rows)
+        lines: dict[str, TypeDesc | None] = {}
+        for line_type in _ddif_table_types(rows):
+            lines[line_type] = self._line_type(line_type)
+        return _build_type_desc_from_ddif(tabname, rows, lines.get)
+
+    def _line_type(self, name: str) -> TypeDesc | None:
+        """The row layout of a table type named by a TTYP component, cached per name.
+
+        Resolved through _call_struct_bootstrap like any other type. For a table type,
+        DDIF_FIELDINFO_GET answers with no field rows, and the fallback
+        RFC_GET_STRUCTURE_DEFINITION answers with the fields of its line type (live,
+        2026-11-26: BAPIRET2_T came back as BAPIRET2's 14 fields, STFCCPLXT_T as
+        STFCCPLXT's 4; tests/golden/serialization/deep_*). A lookup that fails leaves
+        the component unresolved, so a value for it is refused with
+        IncompleteDescriptorError rather than guessed.
+        """
+        if name in self._struct_desc_cache:
+            return self._struct_desc_cache[name]
+        if name in self._line_types_pending:
+            raise ValueError(f"DDIC type {name!r} contains itself")
+        self._line_types_pending.add(name)
+        try:
+            td: TypeDesc | None = self._call_struct_bootstrap(name)
+        except (AbapApplicationError, AbapSystemFailure, ValueError) as exc:
+            _logger.warning("could not fetch the line type of table type %r: %s", name, exc)
+            td = None
+        finally:
+            self._line_types_pending.discard(name)
+        if td is not None:
+            self._struct_desc_cache[name] = td
+        return td
 
     def _call_struct_bootstrap(self, tabname: str) -> TypeDesc:
         """Fetch a DDIC type's field layout for a STRUCTURE/TABLE parameter (META-04).
@@ -5306,6 +5419,7 @@ class AsyncConnection:
         self._cache = metadata_cache if metadata_cache is not None else MetadataCache()
         self._anon_cache_key: str | None = metadata_cache_key
         self._struct_desc_cache: dict[str, TypeDesc] = {}
+        self._line_types_pending: set[str] = set()
         # Retry + durable-store attributes (D-01/D-02/D-03/D-03b)
         self._max_retries = max_retries  # max auto-retry attempts (D-02)
         self._retry_delay = retry_delay  # base backoff delay in seconds (D-02)
@@ -5581,12 +5695,37 @@ class AsyncConnection:
         handle = self._session.handle or b"        "
         frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
         await self._send_request(frame)
-        response = await self._transport.recv_message()
+        # A deep structure's reply runs to tens of kilobytes (27 KB for a 25-row
+        # layout, live 2026-11-26), so it may arrive in more than one frame.
+        response = await _join_response_frames_async(
+            self._transport.recv_message, "DDIF_FIELDINFO_GET"
+        )
         raise_for_rfc_error(_strip_gw_header(response))
         rows = _parse_ddif_dfies_rows(response)
         if not rows:
             return None
-        return _build_type_desc_from_ddif(tabname, rows)
+        lines: dict[str, TypeDesc | None] = {}
+        for line_type in _ddif_table_types(rows):
+            lines[line_type] = await self._line_type(line_type)
+        return _build_type_desc_from_ddif(tabname, rows, lines.get)
+
+    async def _line_type(self, name: str) -> TypeDesc | None:
+        """Async twin of Connection._line_type."""
+        if name in self._struct_desc_cache:
+            return self._struct_desc_cache[name]
+        if name in self._line_types_pending:
+            raise ValueError(f"DDIC type {name!r} contains itself")
+        self._line_types_pending.add(name)
+        try:
+            td: TypeDesc | None = await self._call_struct_bootstrap(name)
+        except (AbapApplicationError, AbapSystemFailure, ValueError) as exc:
+            _logger.warning("could not fetch the line type of table type %r: %s", name, exc)
+            td = None
+        finally:
+            self._line_types_pending.discard(name)
+        if td is not None:
+            self._struct_desc_cache[name] = td
+        return td
 
     async def _call_struct_bootstrap(self, tabname: str) -> TypeDesc:
         """Async DDIC layout bootstrap (META-04, classic path).

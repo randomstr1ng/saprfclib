@@ -441,7 +441,10 @@ def _default_field_value(child: FieldDesc) -> Any:
         return b""
     if rfctype == RFCTYPE_FLOAT:
         return 0.0
-    if rfctype == RFCTYPE_BCD:
+    if rfctype in (RFCTYPE_BCD, RFCTYPE_DECF16, RFCTYPE_DECF34):
+        # A DECFLOAT left out of a structure used to fall through to "", which the
+        # decimal encoder cannot parse: a partial dict for any structure holding a
+        # DECFLOAT failed with InvalidOperation (live, 2026-11-26).
         return Decimal(0)
     if rfctype in _INT_FORMATS or rfctype == RFCTYPE_INT1:
         return 0

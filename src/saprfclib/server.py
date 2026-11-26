@@ -80,6 +80,7 @@ from saprfclib.types import (
     RFC_TABLES,
     FieldDesc,
 )
+from saprfclib.xmlparam import travels_as_xml
 
 __all__ = ["RfcServer", "AsyncRfcServer"]
 
@@ -517,6 +518,22 @@ def _dispatcher_svc_8(gwserv: str) -> bytes:
             f"expected sapgwNN or a gateway port number"
         )
     return f"sapdp{instance:02d}".ljust(8).encode("ascii")[:8]
+
+
+def _refuse_deep(field: FieldDesc, func_name: str) -> None:
+    """Refuse a deep parameter on the server side rather than corrupt it.
+
+    A deep structure or a table-typed IMPORTING/EXPORTING/CHANGING parameter travels
+    as XML (xmlparam, captured on the client side). How an ABAP caller sends one to a
+    registered server, and how it expects one back, has not been captured, so the
+    binary encoding this path would use is refused.
+    """
+    if travels_as_xml(field):
+        raise NotImplementedError(
+            f"{func_name}: parameter {field.name!r} is a deep structure or a table-typed "
+            "parameter; the RFC server does not handle those yet (no capture of the "
+            "inbound form; docs/protocol/serialization.md, Known Gaps)"
+        )
 
 
 class RfcServer:
@@ -1316,6 +1333,7 @@ class RfcServer:
             field = name_to_field.get(name.upper())
             if field is None:
                 continue
+            _refuse_deep(field, func_desc.name)
             request[field.name] = decode(field.rfctype, raw, field)
 
         # Registered-server inbound: 0x5001 compact param block (no 0x0201/0x0203)
@@ -1460,6 +1478,7 @@ class RfcServer:
                     )
                     continue
                 value = result_upper[name_upper]
+                _refuse_deep(field, func_desc.name)
                 if field.rfctype == RFCTYPE_TABLE:
                     parts.extend(self._build_table_records(field, value, len(dm_ids) + 1))
                     dm_ids.append(field.name)
