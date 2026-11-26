@@ -109,7 +109,7 @@ carries the same labels (`tests/api/public_api.json`).
 | ABAP types CHAR, NUM, DATE, TIME, INT1/2/4/8, FLOAT, packed (BCD), DECFLOAT16/34, STRING, XSTRING, UTCLONG | Packed rounding and every sign nibble as the reference client reads them |
 | Compressed tables (SAPCOMPRESS LZH) | |
 | XML table text (`ET_DATA` with `USE_ET_DATA_4_RETURN`) | |
-| Deep structures (STRING, XSTRING, nested structures and tables) and table-typed IMPORTING/EXPORTING/CHANGING parameters | Client side, kernel 916; sent and read as XML like the reference client. The RFC server and tRFC units refuse them (`docs/protocol/serialization.md`) |
+| Deep structures (STRING, XSTRING, nested structures and tables) and table-typed IMPORTING/EXPORTING/CHANGING parameters | Kernel 916, client and `RfcServer`; sent and read as XML like the reference SDK. tRFC/qRFC/bgRFC units refuse them (`docs/protocol/serialization.md`) |
 | Connection pool, sync and async; `connect_async()` | `reset_on_release=True` resets ABAP session state between borrowers; waiters served in arrival order, `max_waiters` sheds overload |
 | `invalidate_metadata()` on a connection, a pool or a `MetadataCache` | Explicit only: nothing on the wire marks a cached interface as stale (`docs/protocol/framing.md`) |
 | Call arguments copied before sending; `CallLimits` bounds on rows and value size | Checked before anything is encoded |

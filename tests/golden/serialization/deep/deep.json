@@ -92,6 +92,42 @@
    "dir": "S>C",
    "client": "saprfclib",
    "what": "reply to the call above"
+  },
+  {
+   "file": "server_deep_table_request.bin",
+   "dir": "S>C",
+   "client": "server",
+   "what": "ABAP calling STFC_DEEP_TABLE through registered destination ZSAPRFCLIB_BXML (basXML switched on in the destination): IMPORT_TAB, two rows, as plain XML"
+  },
+  {
+   "file": "server_deep_table_reference_reply.bin",
+   "dir": "C>S",
+   "client": "reference",
+   "what": "the reference SDK's server answering it: EXPORT_TAB as plain XML, RESPTEXT binary"
+  },
+  {
+   "file": "server_deep_structure_request.bin",
+   "dir": "S>C",
+   "client": "server",
+   "what": "ABAP calling STFC_DEEP_STRUCTURE through the same destination: IMPORTSTRUCT as plain XML"
+  },
+  {
+   "file": "server_deep_structure_reference_reply.bin",
+   "dir": "C>S",
+   "client": "reference",
+   "what": "the reference SDK's server answering it"
+  },
+  {
+   "file": "server_deep_table_saprfclib_reply.bin",
+   "dir": "C>S",
+   "client": "saprfclib",
+   "what": "saprfclib's RfcServer answering the STFC_DEEP_TABLE call; ABAP read both rows back"
+  },
+  {
+   "file": "server_deep_structure_saprfclib_reply.bin",
+   "dir": "C>S",
+   "client": "saprfclib",
+   "what": "saprfclib's RfcServer answering the STFC_DEEP_STRUCTURE call; ABAP read the structure back"
   }
  ],
  "reference_call_values": {
@@ -161,5 +197,6 @@
   "ddif_ttyp_stfccplxt_t_response.bin",
   "rgsd_stfccplxt_t_response.bin",
   "ddif_flat_response.bin"
- ]
+ ],
+ "server_side": "RFC server captures, 2026-11-26: destination ZSAPRFCLIB_BXML (TCP/IP, registered program, BASXML_ACTIVE='1'), called from a purpose-built module Z_SAPRFCLIB_BXML_CALL. 'S>C' here is the gateway sending the call to the registered server. Neither the reference SDK's server nor saprfclib's received the binary BXML form; both got the plain XML a client sends. The lab address is replaced by 198.51.100.9 (same length)."
 }

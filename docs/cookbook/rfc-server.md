@@ -92,6 +92,10 @@ server.serve_forever()
 - `nuc_length` is the character count in the non-Unicode encoding; `uc_length` is double
   that value for UTF-16 (2 bytes per code unit).
 - The `RESPTEXT` export is sent back to the SAP caller automatically when the handler returns.
+- Deep parameters (a structure with STRING, XSTRING or table components, or a table-typed
+  IMPORTING/EXPORTING/CHANGING parameter) arrive as nested dicts and lists, and are returned
+  the same way, provided the `FunctionDesc` carries their layout. The simplest way to get one
+  is to fetch it from the system with a client connection.
 - For tRFC/qRFC inbound calls the handler still needs a `FunctionDesc` to see its
   parameters: without one it is called with `{}`. Only a duplicate TID skips the handler
   before the request is decoded.
