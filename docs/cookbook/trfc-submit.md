@@ -95,7 +95,8 @@ On a plain TCP connection `call_transactional` already retries a transport failu
 same TID (`max_retries`, `retry_delay` on `connect()`), each time over a new connection,
 since the failed one may be out of step, then parks the request in `tid_store`
 if one is configured and raises `RetryExhausted`; `conn.retry_parked(tid)` sends the parked
-request again later. Over SNC there is no automatic retry, and a transport failure raises
+request again later, on whatever connection you call it on: the stored request is framed for
+that connection, and the server runs it at most once under its TID. Over SNC there is no automatic retry, and a transport failure raises
 `CommunicationError`. In both cases: do **not** confirm the TID — it is safe to resubmit, and
 the server does not run a call twice under one TID. An `AbapApplicationError` is never retried:
 the server has refused the call.

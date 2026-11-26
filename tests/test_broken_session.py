@@ -57,7 +57,7 @@ def _continuation_of_truncated() -> bytes:
     Modelled on the live capture, where the continuation frame's body is not a
     TLV stream at all: it begins mid-record and carries only the remaining bytes.
     """
-    return b"\x00" * 210 + b"\x03\x05" + struct.pack(">HH", 0xFFFF, 0)
+    return b"\x00" * 210 + b"\x03\x05" + struct.pack(">HHH", 0xFFFF, 0, 0xFFFF)
 
 
 def test_a_two_frame_reply_is_reassembled() -> None:
@@ -161,7 +161,7 @@ def test_abap_system_failure_does_not_retire() -> None:
     failure = (
         tr(0x0500, b"")
         + tr(0x0420, struct.pack(">I", 3))
-        + struct.pack(">HH", 0xFFFF, 0)
+        + struct.pack(">HHH", 0xFFFF, 0, 0xFFFF)
         + b"\xff\xff"
     )
     conn, _ = _ready_connection_with_invoke([failure, _invoke_response_for_stfc(echo="ok")])

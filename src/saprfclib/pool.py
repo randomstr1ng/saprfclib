@@ -183,6 +183,18 @@ def _check_sizes(min_size: int, max_size: int, max_waiters: int | None) -> None:
         raise ValueError("max_waiters must be >= 0 or None")
 
 
+def _metadata_check_due(pool: Any) -> bool:
+    """True, and the clock restarted, when a pool's metadata check interval has passed."""
+    interval = getattr(pool, "_check_interval", None)
+    if interval is None:
+        return False
+    now = time.monotonic()
+    if now - getattr(pool, "_last_check", 0.0) < interval:
+        return False
+    pool._last_check = now
+    return True
+
+
 class ConnectionPool:
     """A bounded, thread-safe pool of ready Connection objects (POOL-01..04).
 
@@ -205,8 +217,16 @@ class ConnectionPool:
         *,
         reset_on_release: bool = False,
         max_waiters: int | None = None,
+        metadata_check_interval: float | None = None,
     ) -> None:
         _check_sizes(min_size, max_size, max_waiters)
+        if metadata_check_interval is not None and not metadata_check_interval > 0:
+            raise ValueError("metadata_check_interval must be a positive number of seconds")
+        # Ask the server, at most this often, whether a cached interface changed
+        # (#112, Connection.check_metadata). Off by default: each check costs a round
+        # trip per cached function, and no interval suits every system.
+        self._check_interval = metadata_check_interval
+        self._last_check = time.monotonic()
 
         self._params: dict[str, Any] = dict(params)
         self._max_size = max_size
@@ -273,6 +293,14 @@ class ConnectionPool:
         if _is_retired(conn):
             _logger.debug("pool: discarding a connection whose session is BROKEN")
             return False
+        if _metadata_check_due(self):
+            try:
+                changed = conn.check_metadata()
+            except Exception as exc:  # noqa: BLE001 — a failed check must not lend a dead connection
+                _logger.debug("pool: metadata check failed (%s: %s)", type(exc).__name__, exc)
+                return False
+            if changed:
+                _logger.info("pool: interfaces changed in the system: %s", ", ".join(changed))
         generation = self._metadata_cache.generation
         if self._loaded.get(conn, generation) != generation:
             # Loaded before an invalidate_metadata(): reset instead of pinging. The
@@ -644,8 +672,16 @@ class AsyncConnectionPool:
         *,
         reset_on_release: bool = False,
         max_waiters: int | None = None,
+        metadata_check_interval: float | None = None,
     ) -> None:
         _check_sizes(min_size, max_size, max_waiters)
+        if metadata_check_interval is not None and not metadata_check_interval > 0:
+            raise ValueError("metadata_check_interval must be a positive number of seconds")
+        # Ask the server, at most this often, whether a cached interface changed
+        # (#112, Connection.check_metadata). Off by default: each check costs a round
+        # trip per cached function, and no interval suits every system.
+        self._check_interval = metadata_check_interval
+        self._last_check = time.monotonic()
 
         self._params: dict[str, Any] = dict(params)
         self._max_size = max_size
@@ -729,6 +765,14 @@ class AsyncConnectionPool:
         if _is_retired(conn):
             _logger.debug("pool: discarding a connection whose session is BROKEN")
             return False
+        if _metadata_check_due(self):
+            try:
+                changed = await conn.check_metadata()
+            except Exception as exc:  # noqa: BLE001 — a failed check must not lend a dead connection
+                _logger.debug("pool: metadata check failed (%s: %s)", type(exc).__name__, exc)
+                return False
+            if changed:
+                _logger.info("pool: interfaces changed in the system: %s", ", ".join(changed))
         generation = self._metadata_cache.generation
         if self._loaded.get(conn, generation) != generation:
             # Loaded before an invalidate_metadata(): reset instead of pinging, as in

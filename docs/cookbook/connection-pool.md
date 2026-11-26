@@ -86,7 +86,16 @@ widened character parameter still cut to its old length on such a connection, wi
 That reset drops whatever session state the connections held. A connection that is lent at the
 moment finishes on the old version and is reset when it is next lent.
 
-Nothing detects a change on its own: a call made with an outdated interface usually succeeds
-and returns the old shape of the data (`docs/protocol/framing.md`, "Metadata and the server's
-loaded version").
+A call made with an outdated interface usually succeeds and returns the old shape of the
+data (`docs/protocol/framing.md`, "Metadata and the server's loaded version"), so the pool can
+ask the server instead:
+
+```python
+pool = ConnectionPool(params, metadata_check_interval=300)   # at most every 5 minutes
+```
+
+When the interval has passed, the next connection lent first asks `RFC_METADATA_GET` whether a
+cached interface or a type it uses changed, one round trip per cached function. A changed one
+is invalidated and the connections reset as above. Off by default; the interval is yours to
+pick. A change made before a function's first check is not seen.
 

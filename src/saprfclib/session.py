@@ -421,6 +421,15 @@ class Session:
         value, peek at the next 2 bytes and skip them if they match the current
         tag (repeated-tag suffix). This is a transparent no-op for simple format.
         Length bounds are validated against the remaining payload (T-03-TLV).
+
+        A value of 65535 bytes or more uses the extended length form: 0xFFFF in the
+        length field, then the length as a 4-byte BE integer (OQ-C08). Seen in the
+        logon phase as the reference client writes it -- a 70000-byte record
+        ``06 70 FF FF 00 01 11 70``, which the server read and answered with an
+        ordinary logon refusal (live capture, 2026-11-26, docs/protocol/handshake.md)
+        -- and on the call path in both directions (docs/protocol/framing.md).
+        [ASSUMED] that a server writes it in a logon reply too: no logon reply that
+        long has been seen. Before this, 0xFFFF was read as a literal length.
         """
         out: dict[int, bytes] = {}
         pos = 0
@@ -430,6 +439,11 @@ class Session:
             pos += _TLV_HEADER.size
             if tag == _TAG_TERMINATOR:
                 break
+            if length == 0xFFFF:
+                if pos + 4 > n:
+                    raise ValueError(f"malformed TLV: tag 0x{tag:04x} extended length truncated")
+                length = struct.unpack_from(">I", payload, pos)[0]
+                pos += 4
             end = pos + length
             if end > n:
                 raise ValueError(

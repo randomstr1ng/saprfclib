@@ -242,6 +242,20 @@ The rule is "queue count < 1 → `'T'`, otherwise `'Q'`". The wire carries the m
 
 ---
 
+## Re-driving a parked request
+
+A parked request is the invoke frame its first connection built: the GW header with that
+connection's handle and index, the request body, the 8-byte footer. Sent as it is on any later
+connection, the gateway refuses it, `Conversation NNNN not found`. Probe, ABAP Platform 2025,
+2026-11-26, both ways a submit gets parked: the send dropped before it reached the server, and
+the server ran the call and the reply was lost. So `retry_parked` and `retry_parked_unit` keep
+the body, including the logon header of the serialized calls in it, and rebuild the frame
+around it from the connection they send on. Framed that way, the call that had never arrived
+ran once (one `ARFCRSTATE` entry, its values stored), and the one that had already run was
+accepted and not run again (its `ARFCRSTATE` entry unchanged, a value overwritten in between
+left as it was). bgRFC re-drives use the same framing; bgRFC submit itself has no payload yet
+(#34), so they are tested offline only.
+
 ## Client-Side Orchestration
 
 ### tRFC / qRFC submit and confirm
@@ -412,16 +426,6 @@ inbound handler does not parse it yet ([ASSUMED] in `server.py`).
 
 The wire format carries any number of calls (fixture `trfc`: two). `call_transactional`
 sends one per TID.
-
-### Re-driving a parked request
-
-`retry_parked` and `retry_parked_unit` send the parked request bytes as they were stored.
-Those bytes carry the GW handle and connection index of the connection that built them, and
-for tRFC the logon header in the call, so on any later connection they belong to a session
-that no longer exists. A retry no longer reuses the failed connection, but the parked bytes
-themselves are not rebuilt: whether a gateway accepts such a frame on a new connection, or
-whether the request has to be rebuilt from stored parameters, has not been tested. A probe
-that parks a submit, reconnects and re-drives it would settle it.
 
 ### tRFC over WebSocket RFC
 No capture. `call_transactional` raises `NotImplementedError` on a WebSocket connection.

@@ -168,6 +168,9 @@ class MetadataCache:
     def __init__(self) -> None:
         # {sys_id: {func_name_upper: FunctionDesc}}
         self._cache: dict[str, dict[str, FunctionDesc]] = {}
+        # Server-side change stamps per (system, function), kept across invalidations:
+        # they describe the server, not the cache (see Connection.check_metadata).
+        self._stamps: dict[tuple[str, str], tuple[Any, ...]] = {}
         self._lock = threading.Lock()
         # Bumped by every invalidate(). Connections keep a cache of DDIC type layouts
         # of their own, filled while a descriptor is fetched; they compare this number
@@ -202,6 +205,20 @@ class MetadataCache:
                     dropped += 1
             self._generation += 1
             return dropped
+
+    def names(self, sys_id: str) -> list[str]:
+        """The functions cached for one system, sorted."""
+        with self._lock:
+            return sorted(self._cache.get(sys_id, {}))
+
+    def stamp(self, sys_id: str, name: str) -> tuple[Any, ...] | None:
+        """The change stamp recorded by the last ``check_metadata()`` for a function."""
+        with self._lock:
+            return self._stamps.get((sys_id, name.upper()))
+
+    def set_stamp(self, sys_id: str, name: str, stamp: tuple[Any, ...]) -> None:
+        with self._lock:
+            self._stamps[(sys_id, name.upper())] = stamp
 
     def get(self, sys_id: str, name: str) -> FunctionDesc | None:
         """Return the cached descriptor or None on miss (never raises KeyError)."""

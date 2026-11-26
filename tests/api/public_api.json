@@ -70,7 +70,7 @@
   },
   "ConnectionPool": {
    "kind": "class",
-   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False, max_waiters: 'int | None' = None) -> 'None'",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False, max_waiters: 'int | None' = None, metadata_check_interval: 'float | None' = None) -> 'None'",
    "members": {
     "acquire": "(self, timeout: 'float' = 30.0) -> 'Iterator[Any]'",
     "close": "(self) -> 'None'",
@@ -100,6 +100,7 @@
    "members": {
     "call": "(self, func_name: 'str', **params: 'object') -> 'dict[str, Any]'",
     "call_transactional": "(self, func_name: 'str', *, tid: 'str', queue: 'str | None' = None, **params: 'object') -> 'None'",
+    "check_metadata": "(self) -> 'list[str]'",
     "close": "(self) -> 'None'",
     "confirm_tid": "(self, tid: 'str') -> 'None'",
     "confirm_unit": "(self, unit_id: 'str', unit_type: 'str' = 'T') -> 'None'",
@@ -162,7 +163,7 @@
   },
   "AsyncConnectionPool": {
    "kind": "class",
-   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False, max_waiters: 'int | None' = None) -> 'None'",
+   "signature": "(params: 'dict[str, Any]', min_size: 'int' = 1, max_size: 'int' = 10, *, reset_on_release: 'bool' = False, max_waiters: 'int | None' = None, metadata_check_interval: 'float | None' = None) -> 'None'",
    "members": {
     "acquire": "(self, timeout: 'float' = 30.0) -> 'AsyncIterator[Any]'",
     "close": "(self) -> 'None'",

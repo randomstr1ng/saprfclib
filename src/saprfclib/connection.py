@@ -210,6 +210,10 @@ _GW_HDR_MAX_LEN = 0x0000050C  # GW[28:32]: CPIC max message length = 1292 (NW 7.
 # /SAPDS/RFC_ABAP_INSTALL_RUN, for one). Verified across all nine request
 # fixtures: the BE uint32 at [0:4] equals len(tlv_body) exactly in each.
 _INVOKE_FOOTER_MAGIC = b"\x00\x00\x85\x00"  # bytes [4:8] of footer — constant
+# The invoke frame around a request body: the 80-byte GW header (76 bytes + the
+# RFC marker) before it and the 8-byte footer after it (_build_invoke_frame).
+_GW_HEADER_SIZE = 80
+_INVOKE_FOOTER_SIZE = 8
 # Client tail at [76:80] of every client frame after GW_CONNECT: FF FF followed by
 # the connection index the gateway assigned (see _client_tail). These two are only
 # the fallbacks for frames built without a live session -- the values earlier
@@ -1595,6 +1599,95 @@ def _build_type_desc_from_ddif(
     # Trailing padding to the structure's alignment (see _DATATYPE_ALIGNMENT).
     uc_size = -(-max_end // align) * align
     return TypeDesc(name=tabname, fields=fields, nuc_size=nuc_size, uc_size=uc_size)
+
+
+# --------------------------------------------------------------------------- #
+# Detecting a changed interface (#112)
+# --------------------------------------------------------------------------- #
+# Live probe, ABAP Platform 2025 (kernel 916), 2026-11-26, docs/protocol/framing.md:
+# RFC_METADATA_GET with GET_TIMESTAMPS='X' reports a function's change date
+# (FUNCTIONNAMES-UDAT/UTIME), and for the DDIC types named in DATATYPES each type's
+# DATATYPESCONT-TIMESTAMP, nested types included. Changing only a structure the
+# function uses left UDAT/UTIME where they were and moved the timestamp of that
+# structure and of every structure containing it. So a function's stamp is its date
+# and the timestamps of its types together.
+
+
+def _descriptor_type_names(desc: FunctionDesc) -> list[str]:
+    """The DDIC names of the layouts a descriptor uses, nested ones included."""
+    names: list[str] = []
+    stack = [f.type_desc for f in desc.parameters if f.type_desc is not None]
+    seen: set[int] = set()
+    while stack:
+        td = stack.pop()
+        if td is None or id(td) in seen:
+            continue
+        seen.add(id(td))
+        if td.name and td.name not in names:
+            names.append(td.name)
+        stack.extend(f.type_desc for f in td.fields if f.type_desc is not None)
+    return sorted(names)
+
+
+def _metadata_stamp(reply: dict[str, Any]) -> tuple[Any, ...] | None:
+    """A function's change stamp from an RFC_METADATA_GET reply; None if it is gone."""
+    if reply.get("FUNC_ERRORS"):
+        return None
+    functions = reply.get("FUNCTIONNAMES") or []
+    if not functions:
+        return None
+    head = functions[0]
+    types = sorted(
+        {
+            (str(row.get("TYPENAME", "")), str(row.get("TIMESTAMP", "")))
+            for row in reply.get("DATATYPESCONT") or []
+        }
+    )
+    return (str(head.get("UDAT", "")), str(head.get("UTIME", "")), tuple(types))
+
+
+def _metadata_get_params(name: str, desc: FunctionDesc) -> dict[str, Any]:
+    return {
+        "FUNCTIONNAMES": [{"FUNCTIONNAME": name}],
+        "DATATYPES": [{"TABNAME": t} for t in _descriptor_type_names(desc)],
+        "GET_TIMESTAMPS": "X",
+    }
+
+
+def _record_stamp(cache: MetadataCache, key: str, name: str, stamp: tuple[Any, ...] | None) -> bool:
+    """Store a fresh stamp; True when it differs from a recorded one (a change)."""
+    before = cache.stamp(key, name)
+    if stamp is None:
+        cache.invalidate(name, sys_id=key)
+        return True
+    cache.set_stamp(key, name, stamp)
+    if before is not None and before != stamp:
+        cache.invalidate(name, sys_id=key)
+        return True
+    return False
+
+
+def _reframe_parked(parked: bytes, session: Session) -> bytes:
+    """A parked request, framed for the session it is re-sent on (#115).
+
+    A parked request is the whole invoke frame its first connection built: GW
+    header with that connection's handle and index, the request body, the 8-byte
+    footer. Sent on any later connection as it is, the gateway refuses it --
+    "Conversation NNNN not found" -- whether or not the first send had reached the
+    server (live probe, ABAP Platform 2025, 2026-11-26; docs/protocol/trfc.md). So the
+    body is kept and the frame around it rebuilt from the current session. The body
+    itself, including the logon header of the serialized calls in it, is re-sent
+    unchanged: a resubmit framed this way ran once, or was recognised as already run,
+    in that probe.
+    """
+    if len(parked) < _GW_HEADER_SIZE + _INVOKE_FOOTER_SIZE or parked[:1] != b"\x06":
+        raise ValueError(f"a parked request of {len(parked)} bytes is not an invoke frame")
+    body = parked[_GW_HEADER_SIZE:-_INVOKE_FOOTER_SIZE]
+    footer = parked[-_INVOKE_FOOTER_SIZE:]
+    if struct.unpack(">I", footer[:4])[0] != len(body) or footer[4:] != _INVOKE_FOOTER_MAGIC:
+        raise ValueError("a parked request does not end with the invoke footer for its body")
+    handle = session.handle or b"        "
+    return Connection._build_invoke_frame(handle, body, conn_idx=session.conn_idx)
 
 
 def _ddif_table_types(rows: list[tuple[Any, ...]]) -> list[str]:
@@ -3564,6 +3657,35 @@ class Connection:
             raise
         ret = self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
         _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
+
+    def check_metadata(self) -> list[str]:
+        """Invalidate cached interfaces the server reports as changed (#112).
+
+        For each function cached for this system, asks ``RFC_METADATA_GET`` for its
+        change date and for the timestamps of the DDIC types it uses -- one round
+        trip per cached function -- and compares them with what the previous check
+        recorded. A function whose stamp moved, or that no longer exists, is
+        invalidated as by :meth:`invalidate_metadata`, and its name returned.
+
+        The first check of a function only records its stamp: a change made before
+        it is not seen. Both parts of the stamp are needed: changing only a
+        structure a function uses leaves the function's own date unchanged (live
+        probe, docs/protocol/framing.md). As after :meth:`invalidate_metadata`, call
+        :meth:`reset_server_context` before calling a changed function; a pool with
+        ``metadata_check_interval`` does both.
+        """
+        key = self._metadata_cache_key
+        if not key:
+            return []
+        changed: list[str] = []
+        for name in self._cache.names(key):
+            desc = self._cache.get(key, name)
+            if desc is None:
+                continue
+            reply = self.call("RFC_METADATA_GET", **_metadata_get_params(name, desc))
+            if _record_stamp(self._cache, key, name, _metadata_stamp(reply)):
+                changed.append(name)
+        return changed
 
     def invalidate_metadata(self, name: str | None = None) -> int:
         """Forget cached function metadata for this connection's system (#80).
@@ -6063,6 +6185,21 @@ class AsyncConnection:
         ret = await self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
         _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
 
+    async def check_metadata(self) -> list[str]:
+        """Async twin of :meth:`Connection.check_metadata`."""
+        key = self._metadata_cache_key
+        if not key:
+            return []
+        changed: list[str] = []
+        for name in self._cache.names(key):
+            desc = self._cache.get(key, name)
+            if desc is None:
+                continue
+            reply = await self.call("RFC_METADATA_GET", **_metadata_get_params(name, desc))
+            if _record_stamp(self._cache, key, name, _metadata_stamp(reply)):
+                changed.append(name)
+        return changed
+
     def invalidate_metadata(self, name: str | None = None) -> int:
         """Forget cached function metadata for this connection's system (#80).
 
@@ -6568,10 +6705,11 @@ class AsyncConnection:
         if payload is None:
             raise TransactionalError(f"no parked call for {tid}")
 
-        # Re-send the raw request bytes without re-marshaling (D-03b).
+        # Re-send the stored request without re-marshaling (D-03b), framed for the
+        # connection it goes out on (#115, see _reframe_parked).
         async def _do_resend() -> None:
             try:
-                await self._send_request(payload)
+                await self._send_request(_reframe_parked(payload, self._session))
                 response = await _join_response_frames_async(
                     self._transport.recv_message, f"retry {tid}"
                 )
@@ -6628,7 +6766,7 @@ class AsyncConnection:
 
         async def _do_resend() -> None:
             try:
-                await self._send_request(payload)
+                await self._send_request(_reframe_parked(payload, self._session))
                 response = await _join_response_frames_async(
                     self._transport.recv_message, f"retry unit {unit_id}"
                 )
@@ -6741,6 +6879,10 @@ class _ThreadedAsyncConnection(AsyncConnection):
 
     async def reset_server_context(self) -> None:
         await self._run(self._sync.reset_server_context)
+
+    async def check_metadata(self) -> list[str]:
+        result: list[str] = await self._run(self._sync.check_metadata)
+        return result
 
     def invalidate_metadata(self, name: str | None = None) -> int:
         # No I/O, and the cache is thread-safe: no need to queue behind the worker.
