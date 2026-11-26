@@ -16,4 +16,8 @@
 
 ::: saprfclib.exceptions.WebSocketError
 
+::: saprfclib.exceptions.CallParameterError
+
 ::: saprfclib.exceptions.PoolTimeoutError
+
+::: saprfclib.exceptions.PoolOverloadedError

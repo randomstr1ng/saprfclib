@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`invalidate_metadata(name=None)`** on `Connection`, `AsyncConnection`, both pools and
+  `MetadataCache` (#80) forgets cached function interfaces and the DDIC layouts cached with
+  them, so the next call fetches them again. A live probe showed why it is needed and why it is
+  not enough alone: a call made with an outdated interface raises no error (a grown structure
+  comes back in its old shape), and a server session that loaded the old version keeps running
+  it until its context is reset (a widened `CHAR` parameter was read at its old length). A pool
+  therefore also resets each connection loaded before the invalidate before lending it again;
+  on a single connection, call `reset_server_context()` next. A fetch that overlaps an
+  invalidate is not cached. Change detection is not automatic: `RFC_METADATA_GET` reports a
+  function's change date, but whether it covers a changed structure is still open
+  (`docs/protocol/framing.md`).
+- **Pool fairness and overload limit** (#84). Callers waiting for a connection are now served
+  in arrival order; a caller arriving as a connection is released can no longer take it ahead
+  of one that has been waiting. `ConnectionPool(max_waiters=N)` and the async pool raise the new
+  `PoolOverloadedError` at once when `N` callers already wait. New gauges `pool.waiting` and
+  `stats()["waiting"]`, new counter `stats()["overloads"]`.
+- **Call arguments are copied and checked before anything is sent** (#86). A value that
+  contains itself or is nested deeper than any interface allows raises the new
+  `CallParameterError` (a `ValueError` too), naming the path, e.g. `IT_ROWS[3]-FIELD`. The new
+  `connect(..., call_limits=CallLimits(max_table_rows=..., max_value_bytes=...))` bounds what a
+  call may send; both limits are off by default.
+- **Fuzz and property tests for the decoders that read the peer's bytes** (#88): NI framing
+  (sync and async, arbitrary chunking), the tag stream across the extended-length boundary,
+  invoke replies, the gateway and logon frames, packed BCD, and the router and message-server
+  replies. Hostile inputs are mutations of the golden corpus; each decoder must decode, wait
+  for more data, or raise its typed error. They found no crash in the current decoders.
 - **`reset_server_context()`** on `Connection` and `AsyncConnection` (#68) drops the ABAP
   session state behind a connection (function-group globals, buffers, an open LUW) and keeps
   the logon. It sends what the reference client sends (`SYSTEM_RESET_RFC_SERVER`, captured,
@@ -37,6 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A unit's buffered call could be changed after `unit.call(...)`** (#86): only the top-level
+  dict was copied, so editing a row before the unit was submitted changed what was sent. The
+  arguments are now copied in full. A **generator of table rows** passed to `call()` failed with
+  `TypeError` before anything was sent; it is now read once and sent in full. On async
+  connections the arguments are copied before the call waits for anything.
+- **The async pool leaked a slot when an acquire timed out while opening a connection** (#84):
+  the reservation was never undone, so a pool whose opens were slow could end up permanently
+  full. A timeout during the health check likewise left the connection counted as lent.
 - **A transactional retry opens a new connection instead of resending on the failed one**
   (#75). tRFC, qRFC and bgRFC retries resent on the same transport after a
   `CommunicationError`, where a partial write or an unread reply leaves the stream out of

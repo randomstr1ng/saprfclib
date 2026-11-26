@@ -59,5 +59,34 @@ pool.close()
   uncommitted LUW from the previous one. It costs one round trip per release; a connection
   whose reset fails is closed instead of lent again. Without it, state carries over between
   borrowers, which is what a stateful sequence across several `acquire()` blocks would need.
+- Callers that have to wait are served in the order they arrived. A caller that comes in
+  while others are waiting joins the back of the queue; it never takes a released connection
+  ahead of them.
+- `max_waiters=N` limits that queue. When no connection is free and `N` callers already
+  wait, `acquire()` raises `PoolOverloadedError` at once instead of blocking, so overload is
+  shed early rather than ending in a `PoolTimeoutError` for everyone queued. `max_waiters=0`
+  means never wait. `pool.waiting` and `stats()["waiting"]` show the queue length, and
+  `stats()["overloads"]` counts the refusals. Without `max_waiters` the queue is unbounded.
 - `pool.close()` does not wait: it closes the idle connections at once, and each
   checked-out connection is closed when it is released. Call it once at application shutdown.
+
+## After a function module changes
+
+Function interfaces are cached for the life of the pool. When a function module, or a
+structure or table type it uses, is changed and activated in SAP, call:
+
+```python
+pool.invalidate_metadata("Z_MY_FUNCTION")   # or invalidate_metadata() for everything
+```
+
+The next call on any of the pool's connections fetches the interface again. The pool also
+resets each connection's ABAP session (`reset_server_context()`) before lending it again,
+because a session that already called the old version keeps running it: a live probe showed a
+widened character parameter still cut to its old length on such a connection, with no error.
+That reset drops whatever session state the connections held. A connection that is lent at the
+moment finishes on the old version and is reset when it is next lent.
+
+Nothing detects a change on its own: a call made with an outdated interface usually succeeds
+and returns the old shape of the data (`docs/protocol/framing.md`, "Metadata and the server's
+loaded version").
+

@@ -45,9 +45,11 @@ from saprfclib.connection import (
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
+    CallParameterError,
     CommunicationError,
     IncompleteDescriptorError,
     LogonError,
+    PoolOverloadedError,
     PoolTimeoutError,
     ProxyError,
     RetryExhausted,
@@ -56,6 +58,7 @@ from saprfclib.exceptions import (
     TransactionalError,
     WebSocketError,
 )
+from saprfclib.invoke import CallLimits
 from saprfclib.language import language_iso_to_sap, language_sap_to_iso
 from saprfclib.metadata import get_function_desc
 from saprfclib.pool import AsyncConnectionPool, ConnectionPool, PoolMetrics
@@ -97,6 +100,7 @@ __all__ = [
     # Sync connection
     "connect",
     "connectivity_proxy_kwargs",
+    "CallLimits",
     "ConnectionPool",
     # Async connection + pool + server (Phase 9 / D-08)
     "connect_async",
@@ -113,9 +117,11 @@ __all__ = [
     "SapRfcError",
     "AbapApplicationError",
     "AbapSystemFailure",
+    "CallParameterError",
     "CommunicationError",
     "IncompleteDescriptorError",
     "LogonError",
+    "PoolOverloadedError",
     "PoolTimeoutError",
     "ProxyError",
     "RetryExhausted",

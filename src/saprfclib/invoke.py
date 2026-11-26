@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import re
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,9 +44,11 @@ from saprfclib.compress import DecompressError, sapcompress_decompress
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
+    CallParameterError,
     CommunicationError,
     IncompleteDescriptorError,
 )
+from saprfclib.metadata import _MAX_RECURSION_DEPTH
 from saprfclib.types import (
     RFC_CHANGING,
     RFC_EXPORT,
@@ -64,6 +66,8 @@ _RFCTYPE_TABLE = 5
 _RFCTYPE_STRUCTURE = 17
 
 __all__ = [
+    "CallLimits",
+    "snapshot_params",
     "tlv_record",
     "build_invoke_request",
     "parse_invoke_response",
@@ -287,6 +291,120 @@ def tlv_record(tag: int, data: bytes = b"") -> bytes:
 # --------------------------------------------------------------------------- #
 # Request builder
 # --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class CallLimits:
+    """Bounds on what one call may send, checked before anything is encoded (#86).
+
+    Pass one to ``connect(..., call_limits=...)``. Each limit is off (``None``) by
+    default: what a system accepts depends on its configuration and memory, and no
+    capture shows a value that would be right for every caller, so the library
+    does not pick one. A service passing on input it did not write itself should
+    set both.
+
+    - ``max_table_rows``: rows in any one table, nested tables included.
+    - ``max_value_bytes``: total size of all text (as UTF-16, as it is sent) and
+      binary values in the call.
+
+    A limit is exceeded with :class:`~saprfclib.CallParameterError`, naming the
+    path of the value that crossed it.
+    """
+
+    max_table_rows: int | None = None
+    max_value_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("max_table_rows", "max_value_bytes"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise TypeError(f"{name} must be an int or None")
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be >= 0 or None")
+
+
+# A value cannot be nested deeper than an interface it is encoded against. The
+# metadata layer refuses a DDIC type nested deeper than _MAX_RECURSION_DEPTH, and
+# each DDIC level costs a value at most two containers (a table is a list of row
+# dicts), plus the parameter's own. Anything deeper matches no descriptor; refusing
+# it early keeps a hostile or accidental nesting away from the recursion limit.
+_MAX_VALUE_DEPTH = 2 * _MAX_RECURSION_DEPTH + 2
+
+# Values passed through unchanged: immutable, so a caller cannot change them later.
+_IMMUTABLE_LEAVES = (str, bytes, int, float, bool, type(None))
+
+
+def snapshot_params(params: Mapping[str, Any], limits: CallLimits | None = None) -> dict[str, Any]:
+    """Copy a call's arguments into a form the caller can no longer change (#86).
+
+    Mappings become dicts; lists, tuples and iterators (a generator of rows, say)
+    become lists; ``bytearray`` and ``memoryview`` become ``bytes``. Other values
+    are kept as they are: dates, decimals and the like are immutable.
+
+    Copying first means a caller who changes their objects while an async call
+    is waiting, or while a unit is buffered, cannot change what is sent, and an
+    iterator of rows is read once, here, instead of being consumed by the first
+    check that walks it.
+
+    Raises :class:`~saprfclib.CallParameterError` for a container that contains
+    itself, for nesting deeper than any interface allows, and for a limit in
+    ``limits`` that is exceeded, before any of it is encoded.
+    """
+    max_rows = limits.max_table_rows if limits is not None else None
+    max_bytes = limits.max_value_bytes if limits is not None else None
+    on_path: set[int] = set()
+    total = 0
+
+    def leaf_size(value: Any) -> int:
+        if isinstance(value, str):
+            # Sent as UTF-16; a character outside the BMP takes two code units.
+            return len(value.encode("utf-16-le", "surrogatepass"))
+        if isinstance(value, bytes):
+            return len(value)
+        return 0
+
+    def copy(value: Any, path: str, depth: int) -> Any:
+        nonlocal total
+        if isinstance(value, (bytearray, memoryview)):
+            value = bytes(value)
+        if isinstance(value, _IMMUTABLE_LEAVES):
+            if max_bytes is not None:
+                total += leaf_size(value)
+                if total > max_bytes:
+                    raise CallParameterError(
+                        f"{path}: the call's text and binary values exceed "
+                        f"max_value_bytes={max_bytes}",
+                        path=path,
+                    )
+            return value
+        is_mapping = isinstance(value, Mapping)
+        if not (is_mapping or isinstance(value, (list, tuple, Iterator))):
+            return value
+        if depth > _MAX_VALUE_DEPTH:
+            raise CallParameterError(
+                f"{path}: nested deeper than {_MAX_VALUE_DEPTH} levels, more than any "
+                "function interface allows",
+                path=path,
+            )
+        marker = id(value)
+        if marker in on_path:
+            raise CallParameterError(f"{path}: the value contains itself", path=path)
+        on_path.add(marker)
+        try:
+            if is_mapping:
+                return {k: copy(v, f"{path}-{k}", depth + 1) for k, v in value.items()}
+            rows: list[Any] = []
+            for i, item in enumerate(value):
+                if max_rows is not None and i >= max_rows:
+                    raise CallParameterError(
+                        f"{path}: more than max_table_rows={max_rows} rows", path=path
+                    )
+                rows.append(copy(item, f"{path}[{i}]", depth + 1))
+            return rows
+        finally:
+            on_path.discard(marker)
+
+    return {name: copy(value, name, 1) for name, value in params.items()}
 
 
 def unknown_parameters(desc: FunctionDesc, params: dict[str, Any]) -> list[str]:

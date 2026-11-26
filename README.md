@@ -43,7 +43,8 @@ conn.close()
 ```
 
 `conn.call()` fetches function module metadata from DDIC on the first call and caches
-it in-process - no configuration needed.
+it in-process - no configuration needed. After a function module changes in SAP, call
+`conn.invalidate_metadata()` and `conn.reset_server_context()` (a pool does both for you).
 
 
 ## Connection Options
@@ -108,7 +109,9 @@ carries the same labels (`tests/api/public_api.json`).
 | ABAP types CHAR, NUM, DATE, TIME, INT1/2/4/8, FLOAT, packed (BCD), DECFLOAT16/34, STRING, XSTRING, UTCLONG | Packed rounding and every sign nibble as the reference client reads them |
 | Compressed tables (SAPCOMPRESS LZH) | |
 | XML table text (`ET_DATA` with `USE_ET_DATA_4_RETURN`) | |
-| Connection pool, sync and async; `connect_async()` | `reset_on_release=True` resets ABAP session state between borrowers |
+| Connection pool, sync and async; `connect_async()` | `reset_on_release=True` resets ABAP session state between borrowers; waiters served in arrival order, `max_waiters` sheds overload |
+| `invalidate_metadata()` on a connection, a pool or a `MetadataCache` | Explicit only: nothing on the wire marks a cached interface as stale (`docs/protocol/framing.md`) |
+| Call arguments copied before sending; `CallLimits` bounds on rows and value size | Checked before anything is encoded |
 | `reset_server_context()` and `conn.transaction()` (BAPI commit / rollback) | |
 | Message server / group logon (`mshost`) | Binary and HTTP resolution |
 | SAProuter, including chained routers | |

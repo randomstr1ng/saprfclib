@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from saprfclib.exceptions import PoolTimeoutError
+from saprfclib.metadata import MetadataCache
 from saprfclib.pool import ConnectionPool, PoolMetrics
 
 
@@ -42,6 +43,10 @@ def _pool(max_size: int = 2, opener: Any = None) -> ConnectionPool:
     p = ConnectionPool.__new__(ConnectionPool)
     p._cv = threading.Condition()
     p._idle = deque()
+    p._waiters = deque()
+    p._max_waiters = None
+    p._loaded = {}
+    p._metadata_cache = MetadataCache()
     p._in_use = set()
     p._created = 0
     p._max_size = max_size
@@ -182,6 +187,10 @@ async def test_the_async_pool_keeps_the_same_books() -> None:
     pool = AsyncConnectionPool.__new__(AsyncConnectionPool)
     pool._cond = asyncio.Condition()
     pool._idle = deque()
+    pool._waiters = deque()
+    pool._max_waiters = None
+    pool._loaded = {}
+    pool._metadata_cache = MetadataCache()
     pool._in_use = set()
     pool._created = 0
     pool._max_size = 2

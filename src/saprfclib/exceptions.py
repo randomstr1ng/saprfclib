@@ -27,8 +27,10 @@ __all__ = [
     "SapRfcError",
     "AbapApplicationError",
     "AbapSystemFailure",
+    "CallParameterError",
     "CommunicationError",
     "IncompleteDescriptorError",
+    "PoolOverloadedError",
     "PoolTimeoutError",
     "RetryExhausted",
     "ProxyError",
@@ -353,3 +355,64 @@ class PoolTimeoutError(SapRfcError):
         )
         self.message = diagnostic
         super().__init__(diagnostic)
+
+
+class PoolOverloadedError(SapRfcError):
+    """A pool refused to queue another caller because ``max_waiters`` were already waiting.
+
+    Raised by ``ConnectionPool.acquire()`` and ``AsyncConnectionPool.acquire()`` instead
+    of blocking, when no connection can be lent now and the queue of waiting callers is
+    full (#84). It is raised before the caller waits at all, so it is cheap: a service
+    under more load than its pool can absorb sheds the excess immediately instead of
+    building a queue that ends in a :class:`PoolTimeoutError` for everyone in it.
+
+    The fields:
+
+    - ``waiters`` -- callers queued when this one was refused.
+    - ``max_waiters`` -- the configured limit.
+    - ``active``, ``idle``, ``max_size`` -- as in :class:`PoolTimeoutError`.
+
+    Security: like :class:`PoolTimeoutError`, it carries counts only, never the
+    connection ``params``.
+    """
+
+    def __init__(
+        self,
+        *,
+        waiters: int,
+        max_waiters: int,
+        active: int,
+        idle: int,
+        max_size: int,
+    ) -> None:
+        self.waiters = waiters
+        self.max_waiters = max_waiters
+        self.active = active
+        self.idle = idle
+        self.max_size = max_size
+        self.message = (
+            f"pool overloaded: {waiters} callers already waiting (max_waiters={max_waiters}); "
+            f"active={active} idle={idle} max={max_size}"
+        )
+        super().__init__(self.message)
+
+
+class CallParameterError(SapRfcError, ValueError):
+    """A call's arguments were refused before anything was encoded or sent (#86).
+
+    Raised for a value that refers to itself (a cycle), one nested deeper than any
+    function interface can be, or one past a limit the caller set with
+    :class:`~saprfclib.CallLimits`. Nothing reached the server, so the call can be
+    corrected and repeated safely. Subclasses ``ValueError`` as well, like the other
+    argument errors ``call()`` raises.
+
+    ``path`` names the offending value the way the interface names it:
+    ``IT_ROWS[3]-FIELD`` is field ``FIELD`` of row 3 of table ``IT_ROWS``.
+
+    Security: the message carries the path and the limit, never the value.
+    """
+
+    def __init__(self, message: str, *, path: str) -> None:
+        self.path = path
+        self.message = message
+        super().__init__(message)

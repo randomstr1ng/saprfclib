@@ -63,6 +63,7 @@ from saprfclib.exceptions import (
 )
 from saprfclib.invoke import (
     _ARFC_DEST_SHIP,
+    CallLimits,
     TrfcOrigin,
     _decode_error_text,
     _extract_name_value_pairs,
@@ -80,6 +81,7 @@ from saprfclib.invoke import (
     extract_server_duration,
     parse_invoke_response,
     raise_for_rfc_error,
+    snapshot_params,
     tlv_stream_status,
     unit_state_from_wire,
     unknown_fields,
@@ -2127,6 +2129,20 @@ def _fail_closed(session: Session, func_name: str) -> Iterator[None]:
         raise
 
 
+def _drop_stale_layouts(conn: Any) -> None:
+    """Empty the connection's DDIC layout cache if its metadata cache was invalidated.
+
+    The layouts are cached per connection while a descriptor is fetched (META-04),
+    so ``invalidate_metadata()`` on a pool cannot reach them directly: other
+    threads own those connections. It bumps the shared cache's generation instead,
+    and each connection drops its layouts here, the next time it fetches (#80).
+    """
+    generation = conn._cache.generation
+    if getattr(conn, "_layout_generation", 0) != generation:
+        conn._struct_desc_cache.clear()
+        conn._layout_generation = generation
+
+
 class Connection:
     """Sync RFC Connection facade binding a Transport to a Session (TRANS-04/05/06).
 
@@ -2141,6 +2157,7 @@ class Connection:
         *,
         strict_params: bool = False,
         allow_restricted_logon: bool = False,
+        call_limits: CallLimits | None = None,
         metadata_cache: MetadataCache | None = None,
         metadata_cache_key: str | None = None,
     ) -> None:
@@ -2150,6 +2167,8 @@ class Connection:
         # function interface does not declare.
         self._strict_params = strict_params
         self._allow_restricted_logon = allow_restricted_logon
+        # Caller-side bounds on what one call may send (#86); None means unbounded.
+        self._call_limits = call_limits
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self._session = Session(allow_restricted_logon=allow_restricted_logon)
         self._lock = threading.Lock()
@@ -2203,6 +2222,7 @@ class Connection:
         inst._loop_thread = loop_thread
         inst._strict_params = async_conn._strict_params
         inst._allow_restricted_logon = async_conn._allow_restricted_logon
+        inst._call_limits = getattr(async_conn, "_call_limits", None)
         inst._dropped_params_seen = async_conn._dropped_params_seen
         return inst
 
@@ -3150,6 +3170,7 @@ class Connection:
         # Secondary bootstrap: fetch TypeDesc for each STRUCTURE param's row layout.
         # Uses _call_struct_bootstrap which calls RFC_GET_STRUCTURE_DEFINITION.
         # Results cached in _struct_desc_cache keyed by TABNAME (META-04).
+        _drop_stale_layouts(self)
         for fd, tabname in struct_lookups:
             if tabname not in self._struct_desc_cache:
                 try:
@@ -3341,6 +3362,36 @@ class Connection:
             raise
         ret = self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
         _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
+
+    def invalidate_metadata(self, name: str | None = None) -> int:
+        """Forget cached function metadata for this connection's system (#80).
+
+        Call it after a function module, or a structure or table type it uses, was
+        changed and activated in the system. Descriptors are cached for the life of
+        the process, and a stale one encodes values at the old offsets: the call is
+        then refused at best and receives shifted fields at worst. The next call
+        fetches the interface again; the connection stays open.
+
+        ``name`` forgets one function module; ``None`` forgets every function of
+        this system. DDIC type layouts are refetched in both cases, since a changed
+        structure is what usually moves the offsets. Returns how many function
+        descriptors were dropped. No round trip; safe to call at any time.
+
+        The server session behind this connection keeps running the version of the
+        function group it loaded before the change, and reads a longer value cut to
+        the old length without an error (live probe, docs/protocol/framing.md,
+        "Metadata and the server's loaded version"). Call
+        :meth:`reset_server_context` next, or open a new connection, before calling
+        the changed function. A pool does that for its connections.
+
+        The cache may be shared (a pool's connections share one). Invalidating
+        through any of them invalidates it for all.
+        """
+        key = self._metadata_cache_key
+        # Not logged on yet: nothing of this system can be cached, but the call still
+        # has to invalidate layouts. "" is never a bucket (get_function_desc refuses
+        # an empty key), so it drops no other system's descriptors.
+        return self._cache.invalidate(name, sys_id=key or "")
 
     def reset_server_context(self) -> None:
         """Discard the ABAP session state behind this connection.
@@ -3649,6 +3700,9 @@ class Connection:
             return cast(
                 dict[str, Any], self._loop_thread.run(self._async_conn.call(func_name, **params))
             )
+        # Copied and bounded before anything else (#86). The delegated path above
+        # does the same in the async core.
+        params = snapshot_params(params, self._call_limits)
         with self._lock:
             # WS lazy-LOGON: in WS_PENDING the first call sends LOGON+GFI combined
             # (inside _call_bootstrap), then sends the actual function as a subsequent
@@ -3806,6 +3860,7 @@ class Connection:
                 self._async_conn.call_transactional(func_name, tid=tid, queue=queue, **params)
             )
             return
+        params = snapshot_params(params, self._call_limits)  # #86, as in call()
         if self._is_ws():
             raise NotImplementedError(
                 "tRFC over WebSocket RFC: no capture of a submit over a WebSocket "
@@ -4281,7 +4336,11 @@ class _UnitHandle:
             func_name: The ABAP function module name to call.
             **params:  Key/value params for the function module.
         """
-        self._buffered.append((func_name, dict(params)))
+        # A copy, not dict(params): the unit is sent later, and rows the caller changes
+        # in between must not change what is sent (#86).
+        self._buffered.append(
+            (func_name, snapshot_params(params, getattr(self._connection, "_call_limits", None)))
+        )
         return None
 
     def __enter__(self) -> _UnitHandle:
@@ -4384,7 +4443,11 @@ class _AsyncUnitHandle:
 
         Returns None always (Pitfall 6).
         """
-        self._buffered.append((func_name, dict(params)))
+        # A copy, not dict(params): the unit is sent later, and rows the caller changes
+        # in between must not change what is sent (#86).
+        self._buffered.append(
+            (func_name, snapshot_params(params, getattr(self._connection, "_call_limits", None)))
+        )
         return None
 
     async def __aenter__(self) -> _AsyncUnitHandle:
@@ -4545,6 +4608,7 @@ def connect(
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
     allow_restricted_logon: bool = False,
+    call_limits: CallLimits | None = None,
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float | None = DEFAULT_READ_TIMEOUT,
@@ -4837,6 +4901,7 @@ def connect(
             transport,  # type: ignore[arg-type]
             strict_params=strict_params,
             allow_restricted_logon=allow_restricted_logon,
+            call_limits=call_limits,
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
@@ -4916,6 +4981,7 @@ def connect(
             transport,  # type: ignore[arg-type]
             strict_params=strict_params,
             allow_restricted_logon=allow_restricted_logon,
+            call_limits=call_limits,
             metadata_cache=metadata_cache,
             metadata_cache_key=metadata_cache_key,
         )
@@ -4950,6 +5016,7 @@ def connect(
         _lang = lang
         _strict = strict_params
         _allow_restricted = allow_restricted_logon
+        _call_limits = call_limits
         _sysnr = int(sysnr)
         _max_retries = max_retries
         _retry_delay = retry_delay
@@ -4986,6 +5053,7 @@ def connect(
                 unit_store=_unit_store,
                 strict_params=_strict,
                 allow_restricted_logon=_allow_restricted,
+                call_limits=_call_limits,
                 metadata_cache=_metadata_cache,
                 metadata_cache_key=_metadata_cache_key,
             )
@@ -5217,6 +5285,7 @@ class AsyncConnection:
         unit_store: UnitStore | None = None,
         strict_params: bool = False,
         allow_restricted_logon: bool = False,
+        call_limits: CallLimits | None = None,
         metadata_cache: MetadataCache | None = None,
         metadata_cache_key: str | None = None,
     ) -> None:
@@ -5229,6 +5298,8 @@ class AsyncConnection:
         # Unknown-parameter policy (issue #24) - see Connection.__init__.
         self._strict_params = strict_params
         self._allow_restricted_logon = allow_restricted_logon
+        # Caller-side bounds on what one call may send (#86); None means unbounded.
+        self._call_limits = call_limits
         self._dropped_params_seen: set[tuple[str, tuple[str, ...]]] = set()
         self.metrics = ConnectionMetrics()
         # Shareable across connections to one system — see Connection.__init__.
@@ -5480,6 +5551,7 @@ class AsyncConnection:
                 )
                 continue
 
+        _drop_stale_layouts(self)
         for fd, tabname in struct_lookups:
             if tabname not in self._struct_desc_cache:
                 try:
@@ -5638,6 +5710,10 @@ class AsyncConnection:
         remain on the sync Connection path). CancelledError propagates (Pitfall 7).
         Credentials are never logged (T-09-03-CRED).
         """
+        # Copied before the first await (#86): a caller who changes their objects
+        # while this call waits for the connection lock or for metadata cannot
+        # change what is sent.
+        params = snapshot_params(params, self._call_limits)
         started = time.perf_counter()
         sent_before = getattr(self._transport, "bytes_sent", 0)
         received_before = getattr(self._transport, "bytes_received", 0)
@@ -5677,12 +5753,13 @@ class AsyncConnection:
                 cache_key = self._metadata_cache_key
                 desc = self._cache.get(cache_key, func_name) if cache_key is not None else None
                 if desc is None:
+                    generation = self._cache.generation
                     try:
                         desc = await self._call_bootstrap(func_name)
                     except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                         raise CommunicationError(str(exc), original_exception=exc) from exc
                     if cache_key is not None:
-                        self._cache.put(cache_key, desc)
+                        self._cache.put(cache_key, desc, generation=generation)
 
                 # Classic GW-framed invoke.
                 call_params = _filter_call_params(
@@ -5734,6 +5811,37 @@ class AsyncConnection:
             raise
         ret = await self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
         _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
+
+    def invalidate_metadata(self, name: str | None = None) -> int:
+        """Forget cached function metadata for this connection's system (#80).
+
+        Call it after a function module, or a structure or table type it uses, was
+        changed and activated in the system. Descriptors are cached for the life of
+        the process, and a stale one encodes values at the old offsets: the call is
+        then refused at best and receives shifted fields at worst. The next call
+        fetches the interface again; the connection stays open. A plain method,
+        not a coroutine: it does no I/O.
+
+        ``name`` forgets one function module; ``None`` forgets every function of
+        this system. DDIC type layouts are refetched in both cases, since a changed
+        structure is what usually moves the offsets. Returns how many function
+        descriptors were dropped. No round trip; safe to call at any time.
+
+        The server session behind this connection keeps running the version of the
+        function group it loaded before the change, and reads a longer value cut to
+        the old length without an error (live probe, docs/protocol/framing.md,
+        "Metadata and the server's loaded version"). Call
+        :meth:`reset_server_context` next, or open a new connection, before calling
+        the changed function. A pool does that for its connections.
+
+        The cache may be shared (a pool's connections share one). Invalidating
+        through any of them invalidates it for all.
+        """
+        key = self._metadata_cache_key
+        # Not logged on yet: nothing of this system can be cached, but the call still
+        # has to invalidate layouts. "" is never a bucket (get_function_desc refuses
+        # an empty key), so it drops no other system's descriptors.
+        return self._cache.invalidate(name, sys_id=key or "")
 
     async def reset_server_context(self) -> None:
         """Discard the ABAP session state behind this connection (async parity).
@@ -5912,12 +6020,13 @@ class AsyncConnection:
         cache_key = self._metadata_cache_key
         desc = self._cache.get(cache_key, func_name) if cache_key is not None else None
         if desc is None:
+            generation = self._cache.generation
             try:
                 desc = await self._call_bootstrap(func_name)
             except (OSError, asyncio.IncompleteReadError, EOFError, TimeoutError) as exc:
                 raise CommunicationError(str(exc), original_exception=exc) from exc
             if cache_key is not None:
-                self._cache.put(cache_key, desc)
+                self._cache.put(cache_key, desc, generation=generation)
         return desc
 
     async def call_transactional(
@@ -5942,6 +6051,9 @@ class AsyncConnection:
 
         Credentials are never logged (T-09-04-CRED).
         """
+        params = snapshot_params(
+            params, self._call_limits
+        )  # #86, before the first await, as in call()
         async with self._lock:
             self._session._require_state(SessionState.READY)
             self._session.mark_in_call()
@@ -6368,6 +6480,9 @@ class _ThreadedAsyncConnection(AsyncConnection):
         return self._sync.get_connection_attributes()
 
     async def call(self, func_name: str, **params: object) -> dict[str, Any]:
+        # Copied here, on the event loop, not on the worker (#86): the caller's code
+        # keeps running while the worker sends.
+        params = snapshot_params(params, getattr(self._sync, "_call_limits", None))
         return await self._run(self._sync.call, func_name, **params)
 
     async def ping(self) -> bool:
@@ -6375,6 +6490,10 @@ class _ThreadedAsyncConnection(AsyncConnection):
 
     async def reset_server_context(self) -> None:
         await self._run(self._sync.reset_server_context)
+
+    def invalidate_metadata(self, name: str | None = None) -> int:
+        # No I/O, and the cache is thread-safe: no need to queue behind the worker.
+        return self._sync.invalidate_metadata(name)
 
     async def close(self) -> None:
         if self._closed:
@@ -6393,6 +6512,9 @@ class _ThreadedAsyncConnection(AsyncConnection):
         queue: str | None = None,
         **params: object,
     ) -> None:
+        params = snapshot_params(
+            params, getattr(self._sync, "_call_limits", None)
+        )  # #86, as in call()
         await self._run(self._sync.call_transactional, func_name, tid=tid, queue=queue, **params)
 
     async def confirm_tid(self, tid: str) -> None:
@@ -6441,6 +6563,7 @@ async def connect_async(
     lang: str = _DEFAULT_LANG,
     strict_params: bool = False,
     allow_restricted_logon: bool = False,
+    call_limits: CallLimits | None = None,
     timeout: float | None = None,
     connect_timeout: float | None = DEFAULT_CONNECT_TIMEOUT,
     metadata_cache: MetadataCache | None = None,
@@ -6537,6 +6660,7 @@ async def connect_async(
             lang=lang,
             strict_params=strict_params,
             allow_restricted_logon=allow_restricted_logon,
+            call_limits=call_limits,
             timeout=timeout,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
@@ -6660,6 +6784,7 @@ async def connect_async(
         unit_store=unit_store,
         strict_params=strict_params,
         allow_restricted_logon=allow_restricted_logon,
+        call_limits=call_limits,
         metadata_cache=metadata_cache,
         metadata_cache_key=metadata_cache_key,
     )
