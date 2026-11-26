@@ -30,8 +30,16 @@ def _server() -> RfcServer:
 
 
 def _rc(response: bytes) -> int:
-    raw = _parse_tlv_stream(response).get(_TAG_RETURN_CODE)
-    assert raw is not None
+    """The reply's return code; -1 for a failure answer, which carries none.
+
+    A failure is answered as the reference SDK's server answers one: 0x0402 with the
+    message and no 0x0420 (server._build_system_failure).
+    """
+    tags = _parse_tlv_stream(response)
+    raw = tags.get(_TAG_RETURN_CODE)
+    if raw is None:
+        assert 0x0402 in tags, "neither a return code nor a failure message"
+        return -1
     return int(struct.unpack(">I", raw)[0])
 
 

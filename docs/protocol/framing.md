@@ -1099,8 +1099,15 @@ returned. What the client may answer when it cannot serve the callback:
   too. saprfclib sends that answer for a raising handler and raises `CommunicationError` naming
   the callback; the connection is retired.
 
-`RfcServer` answers an unknown function and a failing handler with a different, uncaptured
-form (`0x0500`, `0x0420`, `0x0402`); the reference server's form above has not been tried there.
+`RfcServer` answers a call it cannot run in the reference server's form too: `0x0403`
+`RFC_NOT_FOUND` and `0x0402` "Function <name> not found" for a function it has no handler for,
+`0x0402` with the message for a handler that raised (and for its other refusals), and no
+`0x0500` or `0x0420`. It leaves out the reference server's header records. Live, 2026-11-26,
+through a registered destination: ABAP received `SYSTEM_FAILURE` with exactly those messages,
+as from the reference server, and the server went on serving
+(`tests/golden/framing/callback.json`). It used to send `0x0500`, an `[ASSUMED]` return code 3
+in `0x0420` and `0x0402`; ABAP read that as `SYSTEM_FAILURE` as well, but no SAP component was
+seen sending it.
 
 ### Cancelling a call
 

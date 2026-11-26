@@ -107,12 +107,20 @@ _TAG_ERROR_MESSAGE = 0x0402  # error message text (server-direction; from fixtur
 _logger = logging.getLogger(__name__)
 
 # Return codes in the reply's 0x0420 record. 0 = OK is seen in every successful reply.
-# 3 (failure) and 16 (TID already executed) are [ASSUMED]: no capture of a SAP system
-# receiving a failed or duplicate inbound call from a registered server exists. Such a
-# capture would settle both.
+# 16 (TID already executed) is [ASSUMED]: no capture of a SAP system receiving a
+# duplicate inbound call from a registered server exists. A failure carries no 0x0420
+# at all (_build_system_failure).
 _RC_OK = 0
-_RC_SYSTEM_FAILURE = 3  # [ASSUMED], see above
 _RC_EXECUTED = 16  # [ASSUMED], see above — TID already executed
+
+# How the reference SDK's server answers a call it cannot run (live captures through a
+# registered destination, ABAP Platform 2025, 2026-11-26, tests/golden/framing/
+# callback.json): no 0x0500 and no 0x0420, but 0x0403 with an error key -- RFC_NOT_FOUND
+# for a function it does not have -- and 0x0402 with the message ("Function
+# STFC_CONNECTION not found"), or 0x0402 alone after a handler raised. ABAP receives
+# either as SYSTEM_FAILURE with that message, and the server goes on serving.
+_TAG_ERROR_KEY = 0x0403
+_KEY_NOT_FOUND = "RFC_NOT_FOUND"
 
 # System FM names that trigger transactional dispatch.
 # ARFC_DEST_SHIP is the tRFC/qRFC call-type discriminator (function name IS the marker).
@@ -876,7 +884,7 @@ class RfcServer:
             entry = self._generic(fname)
         if entry is None:
             # No info leak about the registered set (V4 / T-05-C05).
-            return self._build_system_failure(f"function {fname} not registered")
+            return self._build_system_failure(f"Function {fname} not found", key=_KEY_NOT_FOUND)
         func_desc, handler = entry
 
         # --- authentication (SERVER-05 / T-05-C06) — BEFORE handler dispatch ---
@@ -1443,8 +1451,8 @@ class RfcServer:
         this as "TID already executed" and does NOT raise an error; it is a
         normal flow indicator for exactly-once dedup (TRFC-03).
 
-        Format mirrors _build_system_failure but uses _RC_EXECUTED instead of
-        _RC_SYSTEM_FAILURE.  No error-message TLV is emitted (not an error path).
+        0x0500, then 0x0420 carrying _RC_EXECUTED [ASSUMED], then the terminator. No
+        error-message TLV is emitted (not an error path).
         """
         return b"".join(
             [
@@ -1521,22 +1529,20 @@ class RfcServer:
             parts.append(tlv_record(_TAG_TABLE_ROW, all_rows[i * row_size : (i + 1) * row_size]))
         return parts
 
-    def _build_system_failure(self, message: str) -> bytes:
-        """Serialize an RFC SYSTEM_FAILURE response (D-03 / T-05-C02).
+    def _build_system_failure(self, message: str, key: str | None = None) -> bytes:
+        """Serialize an RFC SYSTEM_FAILURE answer (D-03 / T-05-C02).
 
-        Non-zero return code (0x0420) + an error-message TLV (0x0402, UTF-16LE).
+        The reference SDK's server form (see _TAG_ERROR_KEY): an optional 0x0403 error
+        key, then the message in 0x0402 (UTF-16LE). Its header records are left out:
+        ABAP read the answer without them (live, 2026-11-26, docs/protocol/framing.md).
         ``message`` is sanitized: it is the caller-supplied ``str(exc)`` only — no
         full traceback and no inbound credentials are ever placed here.
         """
         safe = self._sanitize_message(message)
-        return b"".join(
-            [
-                tlv_record(_TAG_RESPONSE_START),
-                tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_SYSTEM_FAILURE)),
-                tlv_record(_TAG_ERROR_MESSAGE, safe.encode("utf-16-le")),
-                tlv_record(_TAG_TERMINATOR),
-            ]
-        )
+        parts = [] if key is None else [tlv_record(_TAG_ERROR_KEY, key.encode("utf-16-le"))]
+        parts.append(tlv_record(_TAG_ERROR_MESSAGE, safe.encode("utf-16-le")))
+        parts.append(tlv_record(_TAG_TERMINATOR))
+        return b"".join(parts)
 
     @staticmethod
     def _sanitize_message(message: str) -> str:
@@ -1857,7 +1863,7 @@ class AsyncRfcServer(RfcServer):
         if entry is None and self._generic is not None:
             entry = self._generic(fname)
         if entry is None:
-            return self._build_system_failure(f"function {fname} not registered")
+            return self._build_system_failure(f"Function {fname} not found", key=_KEY_NOT_FOUND)
         func_desc, handler = entry
 
         # Auth check before handler dispatch (SERVER-05 / T-05-C06).

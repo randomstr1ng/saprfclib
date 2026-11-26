@@ -375,7 +375,7 @@ attacker-influenced input and become store keys, so validate before use:
 
 | Field | Length | Valid charset | Action on invalid |
 |-------|--------|---------------|-------------------|
-| TID | exactly 24 characters | `A-Z0-9/_=@-` | Reject with a system failure (return code 3) |
+| TID | exactly 24 characters | `A-Z0-9/_=@-` | Reject with a system failure (a `0x0402` message, no return code) |
 | UnitID | exactly 32 characters | `0-9A-F` (uppercase hex) | Reject |
 
 The client validates queue names (1–24 characters) before sending; the server does not see

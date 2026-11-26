@@ -102,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`RfcServer` answered a call it could not run in an uncaptured form** (`0x0500`, an
+  `[ASSUMED]` return code 3, `0x0402`). It now answers as the reference SDK's server does:
+  `0x0403` `RFC_NOT_FOUND` and "Function <name> not found" for a function with no handler,
+  `0x0402` with the message for a handler that raised or another refusal, and no return code.
+  Live through a registered destination, ABAP received the same `SYSTEM_FAILURE` messages as
+  from the reference server.
+
 - **A queued (`'Q'`) bgRFC unit used the wrong `UNIT_KIND`.** It was `[ASSUMED]` as
   `1409196101`; the reference client sends `1409196103` (live capture), and a state query or
   confirm with the old value reported a real unit as missing.
