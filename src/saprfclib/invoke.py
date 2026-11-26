@@ -57,6 +57,12 @@ from saprfclib.types import (
     FieldDesc,
     FunctionDesc,
 )
+from saprfclib.xmlparam import (
+    XML_CHUNK_BYTES,
+    decode_xml_parameter,
+    encode_xml_parameter,
+    travels_as_xml,
+)
 
 # rfctype constant for TABLE (RFCTYPE_TABLE = 5, codec.py): the type code the server's
 # metadata reports for TABLE parameters (live: RFC_READ_TABLE's DATA, FIELDS and OPTIONS
@@ -519,7 +525,7 @@ def dm_table_ids(desc: FunctionDesc, params: dict[str, Any]) -> dict[int, str]:
         if field.direction == RFC_EXPORT:
             continue
         value = params_upper.get(field.name.upper())
-        if field.rfctype != _RFCTYPE_TABLE or not value:
+        if field.rfctype != _RFCTYPE_TABLE or not value or travels_as_xml(field):
             continue
         next_id += 1
         assigned[next_id] = field.name
@@ -624,7 +630,23 @@ def build_invoke_request(
             continue  # optional param not supplied by caller — skip
         value = params_upper[name_upper]
 
-        if field.rfctype == _RFCTYPE_TABLE:
+        if travels_as_xml(field):
+            # A deep structure, or a table-typed parameter outside TABLES: one XML
+            # element between two empty 0x3c02 records, in 0x3c05 records of at most
+            # XML_CHUNK_BYTES. An empty table is still sent, as an empty element.
+            # Source: live captures of the reference client, 2026-11-26
+            # (tests/golden/serialization/deep_*, xmlparam module docstring).
+            if transactional:
+                raise NotImplementedError(
+                    f"{func_name}: deep parameter {field.name!r} in a tRFC/qRFC call; "
+                    "how it is serialized inside a unit has not been captured"
+                )
+            document = encode_xml_parameter(field, value)
+            parts.append(tlv_record(_TAG_BASXML_MARKER))
+            for at in range(0, len(document), XML_CHUNK_BYTES):
+                parts.append(tlv_record(_TAG_BASXML_DATA, document[at : at + XML_CHUNK_BYTES]))
+            parts.append(tlv_record(_TAG_BASXML_MARKER))
+        elif field.rfctype == _RFCTYPE_TABLE:
             # TABLE protocol: 0x0301(name) + 0x0330(dm_id) + 0x0302(info) + 0x0303*(rows) + 0x0306
             # Empty tables: 0x0205 decl (already emitted above) suffices; no 0x0301 block.
             rows: list[Any] = value if value else []
@@ -1556,13 +1578,17 @@ def parse_invoke_response(
                 r for row in rows for r in decode(tfield.rfctype, row, tfield, 1)
             ]
 
-    # BASXML-encoded tables carry XML text rather than a flat row buffer, so they
-    # bypass the codec entirely (see decode_basxml_table).
+    # XML-encoded parameters carry text rather than a flat buffer, so they bypass the
+    # binary codec. With a resolved layout the value is decoded by type, as the
+    # binary path would decode it (xmlparam); without one only the text is known.
     for name, payload in basxml.items():
         match_field = param_map.get(name.upper())
         if match_field is None:
             continue
-        result[match_field.name] = decode_basxml_table(payload, match_field.name)
+        if match_field.type_desc is not None and payload[:4] != _BASXML_BINARY_MAGIC:
+            result[match_field.name] = decode_xml_parameter(match_field, payload)
+        else:
+            result[match_field.name] = decode_basxml_table(payload, match_field.name)
 
     return result
 

@@ -372,6 +372,80 @@ exercised; the non-Unicode layout is undocumented here.
 
 ---
 
+### Deep parameters — XML in `0x3c02` / `0x3c05`
+
+A **deep** structure is one with a STRING, XSTRING or table component at any depth. A deep
+structure parameter, and **every table-typed IMPORTING, EXPORTING or CHANGING parameter**
+(flat rows or not), is not laid into a fixed buffer. It travels as one XML element per
+parameter, UTF-8, between two empty `0x3c02` records:
+
+```
+0x3c02 ""
+0x3c05 "<IS_DEEP><ID>1</ID><STR>d1</STR><XSTR></XSTR><FLAT><C></C>...</FLAT>...</IS_DEEP>"
+0x3c02 ""
+```
+
+**Evidence tier 1 — live capture**, 2026-11-26, ABAP Platform 2025 (SAP_BASIS 816, kernel 916):
+the reference client (pyrfc 3.3.1 on the NW RFC SDK 7.50) calling `STFC_DEEP_STRUCTURE`,
+`STFC_DEEP_TABLE` and a purpose-built echo module whose deep structure holds every scalar type,
+a nested flat structure, a nested deep structure, a nested table of flat rows and a nested table
+of deep rows; then saprfclib against the same module. Fixtures and provenance:
+`tests/golden/serialization/deep/` (`deep.json`), replayed by `tests/test_deep_parameters.py`.
+
+**Which parameters.** Observed in one call: the deep `IS_DEEP` went as XML, the flat structure
+`IS_FLAT` and the STRING `IV_STR` as ordinary binary `0x0201`/`0x0203` values. Table-typed
+`IT_RET`, whose rows (`BAPIRET2`) are flat, went as XML as well, and sent as a binary table
+instead the server refuses the call with `CALL_FUNCTION_ILLEGAL_P_TYPE` (behavioural probe).
+TABLES parameters keep the binary table protocol. Each XML parameter has its own `0x3c02`
+bracket; in a reply XML and binary parameters are interleaved in interface order.
+
+**Large values.** The client cuts the document into `0x3c05` records of **16384 bytes**, the
+last one shorter (a 2000-row table of 230 KB), and the request into `0x0608` chunks as for
+any large request. The server cuts its own at other points (1024 bytes, or after the opening
+tag), so a reader joins the records of a bracket before parsing.
+
+**Value forms** inside the element (client and server agree unless noted):
+
+| Type | Text | Example |
+|------|------|---------|
+| CHAR | the text, trailing blanks dropped | `Ab &#60;&#38;&#62;` |
+| NUMC | all digits, zero-padded to the width | `000042` |
+| DATS | `YYYY-MM-DD`; initial `0000-00-00` | `2026-11-26` |
+| TIMS | `HH:MM:SS` | `23:59:59` |
+| DEC | plain decimal, the field's decimals | `-1234.56`, `0.00` |
+| FLTP | the server writes `1.5000000000000000E+00`; the client wrote `1.5` | |
+| INT1, INT2, INT4, INT8 | decimal integer | `-32768` |
+| RAW | base64 of the field's bytes (fixed width) | `AP8QIA==`; initial RAW(4) `AAAAAA==` |
+| STRING | the text | |
+| XSTRING | base64; empty is an empty element | `AAH/3q0=` |
+| DECFLOAT16/34 | decimal, exponent form where needed | `12.5`, `-0.001` |
+| UTCLONG | the signed 64-bit value of the binary form | `639314660961234568`; initial `0` |
+| structure | one element per component, in layout order | |
+| table | one `<item>` element per row; an empty table is an empty element | `<IT></IT>` |
+
+**Escaping.** The client writes `&`, `<`, `>` as `&#38;`, `&#60;`, `&#62;` and every other
+character as itself: newline, tab, `]]>` (as `]]&#62;`), non-ASCII and characters outside the
+BMP raw in UTF-8. The server also escapes `"` and `'` (`&#34;`, `&#39;`).
+
+**What saprfclib writes** where the reference client differs or was not captured. These went to
+the server and came back unchanged through the echo module (behavioural probe, 2026-11-26):
+
+- every component of a structure, with the initial value for one the caller left out. The
+  reference client writes an untouched nested structure as an empty element (`<FLAT></FLAT>`),
+  which the server reads as initial too, so saprfclib also reads an empty structure element as
+  initial;
+- a float in the server's own form (`%.16E`): `1.5` and `-1e-300` came back exactly;
+- an initial date as `0000-00-00`. The reference client refuses an empty date before sending;
+- a DECFLOAT with an exponent as Python writes it: `1E+5` and `1.20E-7` came back with their
+  scale, as on the binary path, where the plain form turned `1E+5` into `100000`.
+
+**Metadata.** `RFC_GET_FUNCTION_INTERFACE` reports a deep structure parameter with EXID `v`, a
+flat one with `u` and a table-typed one with `h` (`gfi_response.bin`). The component layout
+comes from `DDIF_FIELDINFO_GET`; how named components and table types appear there is in
+[Framing](framing.md#ddif_fieldinfo_get).
+
+---
+
 ### RFCTYPE_DECF16 (type=23) / RFCTYPE_DECF34 (type=24)
 **Encoding:** IEEE 754-2008 **densely packed decimal (DPD)**, **little-endian** on the
 wire. DECFLOAT16 is decimal64 (8 bytes), DECFLOAT34 is decimal128 (16 bytes).
@@ -691,6 +765,21 @@ Every sign nibble `0x0A`–`0x0F` and the all-zero field are captured (`bcd_sign
 field that is not all zero but carries `0x0`–`0x9` in the sign position is not: no capture shows
 whether the reference client refuses it or reads it with some sign. saprfclib refuses it. The
 probe module would settle it with one more case writing such a byte pattern.
+
+### Deep parameters: what is not captured
+
+- **The RFC server side.** How an ABAP caller sends a deep parameter to a registered server,
+  and what it expects back, has not been captured. `RfcServer` refuses such a parameter with
+  `NotImplementedError` instead of laying it into a binary buffer. A destination pointing at
+  `RfcServer` and a capture of the call would settle it.
+- **tRFC, qRFC and bgRFC units.** No capture of a deep parameter inside a unit; refused with
+  `NotImplementedError`.
+- **Namespaced component names** (`/ABC/FIELD`). How such a name is written as an element
+  is not captured; a deep value with one is refused.
+- **Tables whose line type is not a structure** (a table of STRING, for example). No capture
+  of the row form; the layout stays unresolved and a value is refused with
+  `IncompleteDescriptorError`.
+- **SAP's binary BASXML** (`BXML` magic), issue #18: a different format, still refused.
 
 ### STRUCTURE non-Unicode offsets
 

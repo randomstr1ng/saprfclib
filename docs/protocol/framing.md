@@ -788,10 +788,13 @@ The server echos the struct back in ECHOSTRUCT via the same `0x0201 + 0x0203` en
 
 Two formats observed for TABLE parameters, depending on param direction and type.
 
-#### BASXML format (0x3c02 / 0x3c05) — heterogeneous / STRING-containing tables
+#### XML format (0x3c02 / 0x3c05) — deep and table-typed parameters
 
-Used when tables contain STRING/XSTRING fields or when `REMOTE_BASXML_SUPPORTED` capability
-is negotiated. Confirmed from STFC_DEEP_TABLE capture (2026-06-28). Golden fixtures:
+Used for a deep structure parameter and for every table-typed IMPORTING, EXPORTING or
+CHANGING parameter, whether its rows are deep or flat; which parameters, and the value forms,
+are in [Serialization](serialization.md#deep-parameters-xml-in-0x3c02-0x3c05). It is chosen
+per parameter by its type, not negotiated. First seen in an STFC_DEEP_TABLE capture
+(2026-06-28). Golden fixtures:
 `tests/golden/framing/stfc_deep_table_request.bin` (441B),
 `tests/golden/framing/stfc_deep_table_response.bin` (1144B).
 
@@ -1230,6 +1233,7 @@ also carries a second table (`FIXED_VALUES`), so the `DFIES_TAB` byte range must
 | 60 | `FIELDNAME` | C(30) | field name |
 | 122 | `POSITION` | N(4) | 1-based field index |
 | 130 | `OFFSET` | N(6) | field offset in the structure — **unit varies per reply** (see below) |
+| 202 | `ROLLNAME` | C(30) | for a `STRU` or `TTYP` component, the DDIC name of its type (see below) |
 | 322 | `LENG` | N(6) | external length: character count for char types, byte count for binary |
 | 334 | `INTLEN` | N(6) | internal byte length — **unit varies per reply** |
 | 358 | `DECIMALS` | N(6) | decimals |
@@ -1268,6 +1272,27 @@ where a char field's `INTLEN` is `2 × LENG` — `_build_type_desc_from_ddif` ta
     branch just derives widths from `LENG` (char → `2 × LENG`, else `INTLEN`) and packs them —
     enough for a descriptor that is never used to slice real bytes, while the Unicode branch is
     exact for every real system. Type always comes from `DATATYPE`.
+
+##### Named components and table types
+`SYST` has no `STRU` rows because its substructures are includes. A component typed by
+another structure does produce one: with `ALL_TYPES='X'` it arrives as a `STRU` row followed
+by that structure's own components, each at its offset in the outer structure. A table-typed
+component arrives as a single `TTYP` row, and the DDIC name of the type of both sits in
+`ROLLNAME`. Live reply for a deep structure, 2026-11-26
+(`tests/golden/serialization/deep/ddif_deep_response.bin`): `FLAT` (`STRU`, `ROLLNAME`
+`ZSAPRFCLIB_FLAT`) at offset 32 with `INTLEN` 144, then its 14 components at offsets 32 to
+160, then the next outer component at 176; `RETS` (`TTYP`, `ROLLNAME` `BAPIRET2_T`).
+
+So the components inside a `STRU` row's `[OFFSET, OFFSET + INTLEN)` belong to it, and
+saprfclib rebuilds them as a nested structure with offsets relative to it; a caller passes
+and gets back a nested dict, as with the reference client. A `TTYP` component's row layout
+is looked up by its `ROLLNAME`. `DDIF_FIELDINFO_GET` on a table type answers with no
+`DFIES_TAB` rows (`ddif_ttyp_response.bin`); the `RFC_GET_STRUCTURE_DEFINITION` fallback
+answers with the fields of its line type (`rgsd_bapiret2_t_response.bin`: `BAPIRET2_T` →
+`BAPIRET2`'s 14 fields). The reference client instead asks `DDIF_FIELDINFO_GET` with
+`UCLEN` and `LFIELDNAME` set and reads the line type from `DFIES_WA` and `LINES_DESCR`; that
+variant is not implemented. How deep values travel is in
+[Serialization](serialization.md#deep-parameters-xml-in-0x3c02-0x3c05).
 
 ##### Row width: the structure's padded width
 A structure's width is the end of its last field **rounded up to the largest alignment among

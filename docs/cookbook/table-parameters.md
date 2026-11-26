@@ -71,6 +71,29 @@ for row in result["DATA"]:
 conn.close()
 ```
 
+## Deep structures and table-typed parameters
+
+A structure with a STRING, XSTRING or table component, and a table-typed parameter outside
+TABLES, are passed like any other value: a dict for a structure, a list of dicts for a
+table, nested as deep as the type is. saprfclib sends them as XML, which is what the server
+expects for them, and returns them the same shape.
+
+```python
+result = conn.call(
+    "STFC_DEEP_TABLE",
+    IMPORT_TAB=[{"I": 1, "C": "R1", "STR": "any length", "XSTR": b"\x01\x02"}],
+)
+result["EXPORT_TAB"]  # list of dicts, STR as str, XSTR as bytes
+```
+
+A component you leave out is sent with its initial value. Each component comes back in the
+type of the binary path: a NUMC as its zero-padded digits, a RAW as its full width, a date as
+`YYYYMMDD` (`""` when initial).
+
+Not supported yet, and refused with a clear error: deep parameters in an `RfcServer` handler
+and inside tRFC/qRFC/bgRFC units, components with namespaced names (`/ABC/FIELD`), and tables
+whose rows are not structures.
+
 ## Tips
 
 - `ROWCOUNT=0` returns all rows — be cautious on large tables.

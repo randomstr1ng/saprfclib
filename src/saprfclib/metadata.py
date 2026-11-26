@@ -335,11 +335,13 @@ _EXID_TO_RFCTYPE: dict[str, int] = {
     # descriptor, so the function interface silently lost them -- the call then went
     # out missing those parameters rather than failing.
     "a": RFCTYPE_DECF16,
-    # [ASSUMED] 'v' for DECFLOAT16 predates that capture and has never been observed.
-    # Kept because removing an untested entry is no better evidenced than keeping it,
-    # and a stray 'v' would otherwise drop the row. If a capture shows 'v' is
-    # something else, replace it rather than relabelling.
-    "v": RFCTYPE_DECF16,
+    # 'v' is a deep structure: one with a STRING, XSTRING or table component.
+    # Live metadata, ABAP Platform 2025 (kernel 916), 2026-11-26: STFC_DEEP_STRUCTURE's
+    # IMPORTSTRUCT/ECHOSTRUCT (STFCCPLXT) and a purpose-built module's deep structure
+    # parameters all came back as 'v', a flat structure parameter of the same module
+    # as 'u'. This entry used to read 'v' as DECFLOAT16, an [ASSUMED] guess, so every
+    # deep structure parameter was typed as an 8-byte decimal with no layout.
+    "v": RFCTYPE_STRUCTURE,
     "e": RFCTYPE_DECF34,  # confirmed by the same 2026-08-31 capture
     "g": RFCTYPE_STRING,
     "y": RFCTYPE_XSTRING,

@@ -1,0 +1,165 @@
+{
+ "fixture": "deep",
+ "capture_source": "live captures 2026-11-26 against ABAP Platform 2025 (SAP_BASIS 816, kernel 916), Unicode. 'reference' frames: pyrfc 3.3.1 on the NW RFC SDK 7.50. 'saprfclib' frames: this library. Z_SAPRFCLIB_DEEP is a purpose-built remote-enabled echo module (local objects): IMPORTING IS_DEEP TYPE ZSAPRFCLIB_DEEP, IS_FLAT TYPE ZSAPRFCLIB_FLAT, IV_STR TYPE STRING, IT_CPLX TYPE STFCCPLXT_T, IT_RET TYPE BAPIRET2_T; EXPORTING ES_DEEP, ES_FLAT, EV_STR, ET_CPLX, ET_RET (copies of the importing values); CHANGING CS_DEEP TYPE ZSAPRFCLIB_DEEP (ID incremented). ZSAPRFCLIB_FLAT: C CHAR10, N NUMC6, D DATS, T TIMS, P DEC15.2, F FLTP, I1 INT1, I2 INT2, I4 INT4, I8 INT8, X RAW4, DF16 DECFLOAT16, DF34 DECFLOAT34, TS UTCLONG. ZSAPRFCLIB_DEEP: ID INT4, STR STRING, XSTR RAWSTRING, FLAT ZSAPRFCLIB_FLAT, CPLX STFCCPLXT, RETS BAPIRET2_T, CPLXT STFCCPLXT_T.",
+ "evidence": "tier 1 live capture. Each .bin is one NI frame with its 4-byte length prefix.",
+ "frames": [
+  {
+   "file": "gfi_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "RFC_GET_FUNCTION_INTERFACE reply for Z_SAPRFCLIB_DEEP: deep structure parameters carry EXID 'v', the flat one 'u', table-typed ones 'h'"
+  },
+  {
+   "file": "ddif_deep_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "DDIF_FIELDINFO_GET (ALL_TYPES='X') reply for ZSAPRFCLIB_DEEP: STRU rows followed by their components, TTYP rows with the table type in ROLLNAME"
+  },
+  {
+   "file": "ddif_ttyp_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "DDIF_FIELDINFO_GET reply for the table type BAPIRET2_T: no DFIES_TAB rows"
+  },
+  {
+   "file": "rgsd_bapiret2_t_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "RFC_GET_STRUCTURE_DEFINITION reply for BAPIRET2_T: the 14 fields of its line type BAPIRET2"
+  },
+  {
+   "file": "rgsd_stfccplxt_t_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "RFC_GET_STRUCTURE_DEFINITION reply for STFCCPLXT_T: the 4 fields of STFCCPLXT"
+  },
+  {
+   "file": "ddif_flat_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "DDIF_FIELDINFO_GET reply for ZSAPRFCLIB_FLAT"
+  },
+  {
+   "file": "echo_reference_request.bin",
+   "dir": "C>S",
+   "client": "reference",
+   "what": "Z_SAPRFCLIB_DEEP with IS_DEEP (every type), IS_FLAT and IV_STR: IS_DEEP as XML, IS_FLAT and IV_STR binary"
+  },
+  {
+   "file": "echo_reference_response.bin",
+   "dir": "S>C",
+   "client": "reference",
+   "what": "reply to the call above: ES_DEEP as XML split over 0x3c05 records, ES_FLAT and EV_STR binary"
+  },
+  {
+   "file": "multi_reference_request.bin",
+   "dir": "C>S",
+   "client": "reference",
+   "what": "CS_DEEP, IS_DEEP, IT_CPLX (deep rows) and IT_RET (flat rows): one 0x3c02 bracket per parameter"
+  },
+  {
+   "file": "multi_reference_response.bin",
+   "dir": "S>C",
+   "client": "reference",
+   "what": "reply to the call above, XML and binary parameters interleaved"
+  },
+  {
+   "file": "stfc_deep_structure_request.bin",
+   "dir": "C>S",
+   "client": "reference",
+   "what": "STFC_DEEP_STRUCTURE with I=7, C='AbC', STR=\"Hällo <&> 'x\\\"\", XSTR=00 01 ff de ad"
+  },
+  {
+   "file": "stfc_deep_structure_response.bin",
+   "dir": "S>C",
+   "client": "reference",
+   "what": "reply: the server also escapes the quote and the apostrophe"
+  },
+  {
+   "file": "ddif_ttyp_stfccplxt_t_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "DDIF_FIELDINFO_GET reply for the table type STFCCPLXT_T: no DFIES_TAB rows"
+  },
+  {
+   "file": "echo_saprfclib_request.bin",
+   "dir": "C>S",
+   "client": "saprfclib",
+   "what": "saprfclib calling Z_SAPRFCLIB_DEEP with IS_DEEP={ID: 1, STR: 'd1', RETS: [{TYPE: 'S'}]}"
+  },
+  {
+   "file": "echo_saprfclib_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "reply to the call above"
+  }
+ ],
+ "reference_call_values": {
+  "IS_DEEP": {
+   "ID": 1,
+   "STR": "Grüße\n\t \"q\" 'a' ]]> é𝄞",
+   "XSTR_hex": "000102",
+   "FLAT": {
+    "C": "Ab <&>",
+    "N": "42",
+    "D": "20261126",
+    "T": "235959",
+    "P": "-1234.56",
+    "F": 1.5,
+    "I1": 255,
+    "I2": -32768,
+    "I4": -7,
+    "I8": 9007199254740993,
+    "X_hex": "00ff1020",
+    "DF16": "12.5",
+    "DF34": "-0.001",
+    "TS": "2026-11-26T12:34:56.1234567"
+   },
+   "CPLX": {
+    "I": 2,
+    "C": "cx",
+    "STR": "s",
+    "XSTR_hex": "ff"
+   },
+   "RETS": [
+    {
+     "TYPE": "E",
+     "ID": "00",
+     "NUMBER": "001",
+     "MESSAGE": "m1 <x>"
+    },
+    {
+     "TYPE": "W",
+     "MESSAGE": ""
+    }
+   ],
+   "CPLXT": [
+    {
+     "I": 3,
+     "C": "t1",
+     "STR": "a",
+     "XSTR_hex": "01"
+    },
+    {
+     "I": 4,
+     "C": "",
+     "STR": "",
+     "XSTR_hex": ""
+    }
+   ]
+  },
+  "IV_STR": "top",
+  "IS_FLAT": "the same values as IS_DEEP.FLAT",
+  "note": "the reference client decoded ES_DEEP and ES_FLAT back to these values, NUMC as '000042'"
+ },
+ "large_value": "not stored (230 KB): the reference client sent a 2000-row IT_CPLX as 0x3c05 records of 16384 bytes each and a last one of 3857, in GW request chunks of type 0x0608",
+ "saprfclib_metadata_sequence": [
+  "gfi_response.bin",
+  "ddif_deep_response.bin",
+  "ddif_ttyp_response.bin",
+  "rgsd_bapiret2_t_response.bin",
+  "ddif_ttyp_stfccplxt_t_response.bin",
+  "rgsd_stfccplxt_t_response.bin",
+  "ddif_flat_response.bin"
+ ]
+}
