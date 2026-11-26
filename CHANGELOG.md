@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`RfcServer` receives bgRFC units from ABAP** (#119). A unit that ABAP sends to a registered
+  server through a bgRFC destination is read as it arrives: the unit from `SSTATE`, its calls
+  from `SDATA` (the same layout the client writes, new `parse_bgrfc_sdata()`), each call decoded
+  against its handler's descriptor, deep parameters included. The calls run in order; the unit
+  is committed, answered as the reference SDK's server answers, and confirmed when ABAP sends
+  `BGRFC_DEST_CONFIRM`. A failing handler stops the unit and is reported as a failure, so ABAP
+  keeps the unit and retries it. The reference server reports success there, and ABAP then
+  confirms a unit that did not run. Live: `T`, `Q` and deep-parameter units ran and were
+  confirmed; a failing unit stayed in ABAP with its error; a unit the check callback reported
+  as executed was confirmed without running.
+
 - **Server callbacks** (#79). `conn.add_callback(name, handler)` serves a function the server
   calls back during a call (`CALL FUNCTION ... DESTINATION 'BACK'`); the call then goes on to its
   own reply. A callback with no handler is answered with the ABAP exception `FU_NOT_FOUND`, which

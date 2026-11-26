@@ -83,9 +83,10 @@ __all__ = [
     "build_trfc_request",
     "build_trfc_confirm_request",
     "bgrfc_ship_params",
+    "bgrfc_unit_type_from_kind",
+    "parse_bgrfc_sdata",
+    "unit_state_to_wire",
     "build_bgrfc_sdata",
-    "build_bgrfc_confirm_request",
-    "build_bgrfc_state_request",
     "bgrfc_unit_id_bytes",
     "bgrfc_unit_kind",
     "unit_state_from_wire",
@@ -984,15 +985,9 @@ def build_trfc_confirm_request(tid: str, *, version: bytes = _RFC_VERSION) -> by
 # that travel on the wire (live submit, docs/protocol/trfc.md).  Unit type is 'T' (no
 # queues) or 'Q' (queues given).
 #
-# OG-06-02 NOT CONFIRMED (issue #15). This block previously claimed the named-param
-# encoding was confirmed because test_live_bgrfc_unit_lifecycle passed on 2026-08-05.
-# It was not evidence: that test accepted NOT_FOUND as a successful state, and
-# NOT_FOUND is what every unit reads as on a backend with no supervisor destination
-# — nothing is registered, so the state query and the confirm both succeed by having
-# nothing to act on. The test has since been made to skip unless bgRFC is configured
-# and to require the state to move across the confirm.
-# What would settle it: a live round trip on a configured backend where the unit is
-# visible in the state tables independently of get_unit_state().
+# The unit itself travels in BGRFC_DEST_SHIP's SSTATE and SDATA, in the same layout
+# in both directions: as the reference client submits it (#34) and as ABAP sends it to
+# a registered server (#119, tests/golden/trfc/bgrfc_inbound.json).
 #
 # Security (T-06-U02): UnitID length is enforced to exactly 32 hex chars
 # before encoding. queue_names are bounded.
@@ -1104,6 +1099,49 @@ def build_bgrfc_sdata(calls: list[tuple[str, bytes]], codepage: str = "4103") ->
     return _BGRFC_SDATA_HEAD + codepage.encode("ascii") + bytes(4) + sapcompress_compress_lzh(plain)
 
 
+_BGRFC_MAX_CALLS = 100_000  # a bound on peer input, not a wire value
+
+
+def parse_bgrfc_sdata(sdata: bytes) -> list[tuple[str, bytes]]:
+    """The (function, record) pairs in a unit's SDATA, as build_bgrfc_sdata writes them.
+
+    ABAP writes the same layout when it sends a unit to a registered server (live
+    capture through a registered destination, ABAP Platform 2025, 2026-11-26,
+    tests/golden/trfc/bgrfc_inbound.json): the container, the constant parts and the
+    rows all match what the reference client sends. The bytes come from the peer, so
+    every length is checked against what is there before it is used.
+    """
+    if len(sdata) < 21 or sdata[:8] != _BGRFC_SDATA_HEAD:
+        raise ValueError("SDATA does not start with the bgRFC container header")
+    (length,) = struct.unpack_from("<I", sdata, 16)
+    try:
+        plain = sapcompress_decompress(sdata[16:], length)
+    except DecompressError as exc:
+        raise ValueError(f"SDATA: {exc}") from None
+    head = len(_BGRFC_SER_HEAD_A) + 4 + len(_BGRFC_SER_HEAD_B)
+    if len(plain) < head + 4 + 2 or plain[: len(_BGRFC_SER_HEAD_A)] != _BGRFC_SER_HEAD_A:
+        raise ValueError("SDATA plaintext does not start as a bgRFC unit")
+    (count,) = struct.unpack_from(">I", plain, head)
+    if count > _BGRFC_MAX_CALLS:
+        raise ValueError(f"SDATA declares {count} calls")
+    pos = head + 4
+    calls: list[tuple[str, bytes]] = []
+    for _ in range(count):
+        end = pos + len(_BGRFC_ROW_NAME) + 60 + len(_BGRFC_ROW_MID) + 4
+        if end > len(plain) or plain[pos : pos + len(_BGRFC_ROW_NAME)] != _BGRFC_ROW_NAME:
+            raise ValueError(f"SDATA call {len(calls) + 1} is cut short or malformed")
+        name_at = pos + len(_BGRFC_ROW_NAME)
+        name = plain[name_at : name_at + 60].decode("utf-16-le", "replace").rstrip()
+        (n,) = struct.unpack_from(">I", plain, end - 4)
+        if end + n + 2 > len(plain) or plain[end + n : end + n + 2] != _BGRFC_ROW_END:
+            raise ValueError(f"SDATA call {len(calls) + 1} ({name}) overruns the unit")
+        calls.append((name, plain[end : end + n]))
+        pos = end + n + 2
+    if plain[pos:] != _BGRFC_UNIT_END:
+        raise ValueError("SDATA does not end where its calls do")
+    return calls
+
+
 def bgrfc_ship_params(
     unit_id: str,
     unit_type: str,
@@ -1203,6 +1241,22 @@ _UNIT_KIND_BY_TYPE = {
     _UNIT_TYPE_Q: BGRFC_UNIT_KIND_QUEUED,
 }
 
+# A unit ABAP sends to a registered server carries the OUTBOUND kinds: 1409196105 for
+# a 'T' unit, 1409196101 for a 'Q' unit (live, same capture) -- unlike a unit an
+# external client submits into the system, whose 'Q' kind is 1409196103.
+_UNIT_TYPE_BY_KIND = {
+    BGRFC_UNIT_KIND_TRFC_OUTBOUND: _UNIT_TYPE_T,
+    BGRFC_UNIT_KIND_TRFC_INBOUND: _UNIT_TYPE_T,
+    BGRFC_UNIT_KIND_QRFC_OUTBOUND: _UNIT_TYPE_Q,
+    BGRFC_UNIT_KIND_QRFC_INBOUND: _UNIT_TYPE_Q,
+    BGRFC_UNIT_KIND_QUEUED: _UNIT_TYPE_Q,
+}
+
+
+def bgrfc_unit_type_from_kind(kind: int) -> str | None:
+    """'T' or 'Q' for a UNIT_KIND seen on the wire; None for any other value."""
+    return _UNIT_TYPE_BY_KIND.get(kind)
+
 
 def bgrfc_unit_kind(unit_type: str) -> int:
     """Return the UNIT_KIND integer for a 'T' or 'Q' unit type."""
@@ -1259,98 +1313,22 @@ def unit_state_from_wire(value: int) -> tuple[str, bool]:
     return (name, True) if name is not None else (str(value), False)
 
 
-# --------------------------------------------------------------------------- #
-# Legacy bgRFC frame builders — server-side test fixtures only
-# --------------------------------------------------------------------------- #
-#
-# These build BGRFC_UNIT_ID / BGRFC_UNIT_TYPE as named UTF-16LE CHAR parameters.
-# The dictionary says a real system sends neither: BGRFC_DEST_CONFIRM and
-# BGRFC_CHECK_UNIT_STATE_SERVER declare UNIT_ID as BYTE(16) and UNIT_KIND as
-# INT4. The client no longer uses these -- it drives both modules through the
-# ordinary call path.
-#
-# They remain because server.py's inbound dispatch is keyed to the same names,
-# and these are what its tests feed it. That means the server role would not
-# recognise inbound bgRFC from a real SAP system either. Unverified and tracked
-# separately; do not treat these frames as evidence of the wire format.
+def unit_state_to_wire(name: str) -> int:
+    """The wire STATE integer for a UnitState name (the reverse of unit_state_from_wire).
 
-
-def build_bgrfc_confirm_request(
-    unit_id: str,
-    unit_type: str,
-    *,
-    version: bytes = _RFC_VERSION,
-) -> bytes:
-    """Build the RFC invoke TLV payload for a BGRFC_DEST_CONFIRM call.
-
-    Confirms the Unit on the backend, allowing status cleanup.
-
-    Security: validates UnitID before encoding (T-06-U02).
-
-    Confirmed: the BGRFC_DEST_CONFIRM branch of the server dispatch.
+    Carries the same labels as the table it inverts: only NOT_FOUND (22206) was seen
+    live as a state answer; the others are [ASSUMED].
     """
-    _validate_unit_id(unit_id)
-    if unit_type not in (_UNIT_TYPE_T, _UNIT_TYPE_Q):
-        raise ValueError(f"unit_type must be 'T' or 'Q', got {unit_type!r}")
-
-    version_bytes: bytes
-    if isinstance(version, str):
-        version_bytes = version.encode("utf-16-le")
-    else:
-        version_bytes = version.decode("ascii").encode("utf-16-le")
-
-    return b"".join(
-        [
-            tlv_record(_TAG_CALL_START),
-            tlv_record(_TAG_RFC_VERSION, version_bytes),
-            tlv_record(_TAG_FUNC_NAME, _BGRFC_DEST_CONFIRM.encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_SECTION),
-            tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_ID".encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_VALUE, unit_id.encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_TYPE".encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_VALUE, unit_type.encode("utf-16-le")),
-            tlv_record(_TAG_TERMINATOR),
-        ]
-    )
-
-
-def build_bgrfc_state_request(
-    unit_id: str,
-    unit_type: str,
-    *,
-    version: bytes = _RFC_VERSION,
-) -> bytes:
-    """Build the RFC invoke TLV payload for a BGRFC_CHECK_UNIT_STATE_SERVER call.
-
-    Queries the current Unit state on the backend, returning a UnitState.
-
-    Security: validates UnitID before encoding (T-06-U02).
-
-    Confirmed: the BGRFC_CHECK_UNIT_STATE_SERVER branch of the server dispatch.
-    """
-    _validate_unit_id(unit_id)
-    if unit_type not in (_UNIT_TYPE_T, _UNIT_TYPE_Q):
-        raise ValueError(f"unit_type must be 'T' or 'Q', got {unit_type!r}")
-
-    version_bytes: bytes
-    if isinstance(version, str):
-        version_bytes = version.encode("utf-16-le")
-    else:
-        version_bytes = version.decode("ascii").encode("utf-16-le")
-
-    return b"".join(
-        [
-            tlv_record(_TAG_CALL_START),
-            tlv_record(_TAG_RFC_VERSION, version_bytes),
-            tlv_record(_TAG_FUNC_NAME, _BGRFC_CHECK_UNIT_STATE_SERVER.encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_SECTION),
-            tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_ID".encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_VALUE, unit_id.encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_NAME, "BGRFC_UNIT_TYPE".encode("utf-16-le")),
-            tlv_record(_TAG_PARAM_VALUE, unit_type.encode("utf-16-le")),
-            tlv_record(_TAG_TERMINATOR),
-        ]
-    )
+    for value, known in (
+        (_WIRE_STATE_NOT_IN_DB, "NOT_FOUND"),
+        (_WIRE_STATE_IN_EXECUTION, "IN_PROCESS"),
+        (_WIRE_STATE_FINISHED, "COMMITTED"),
+        (_WIRE_STATE_CONFIRMED, "CONFIRMED"),
+        (_WIRE_STATE_WRONG_STATE, "ROLLED_BACK"),
+    ):
+        if known == name:
+            return value
+    raise ValueError(f"no wire STATE for unit state {name!r}")
 
 
 # --------------------------------------------------------------------------- #

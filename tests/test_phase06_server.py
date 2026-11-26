@@ -139,13 +139,14 @@ def test_unit_callback_flow() -> None:
       2. [persist uid]              → BEFORE handler execute (crash-safety, T-06-U01)
       3. execute buffered handler calls
       4. commit_unit(uid, unit_type) on success / rollback_unit on exception
-      5. confirm_unit(uid, unit_type) as cleanup
+      5. confirm_unit(uid, unit_type) when ABAP sends BGRFC_DEST_CONFIRM
     """
     import uuid
 
     from saprfclib.server import RfcServer
     from saprfclib.stores import InMemoryUnitStore, UnitState
-    from tests._bgrfc_legacy import build_bgrfc_request
+    from tests._bgrfc_fixture import descriptors
+    from tests._bgrfc_inbound import live_calls, ship_frame, unit_frame
 
     uid = uuid.uuid4().hex.upper()
     call_sequence: list[str] = []
@@ -179,9 +180,10 @@ def test_unit_callback_flow() -> None:
     store = InMemoryUnitStore()
     server.set_unit_store(store)
 
-    # Deliver a synthetic BGRFC_DEST_SHIP frame (no buffered calls — unit submit only)
-    frame = build_bgrfc_request(uid, "T", [])
-    server.dispatch_inbound(frame)
+    server.function("STFC_CONNECTION", descriptors()["STFC_CONNECTION"])(lambda request: {})
+    # The unit as ABAP sends it, then ABAP's confirm (bgrfc_inbound.json).
+    server.dispatch_inbound(ship_frame(uid, "T", live_calls()))
+    server.dispatch_inbound(unit_frame("BGRFC_DEST_CONFIRM", uid, "T"))
 
     # Verify callback ordering: check before commit/confirm
     assert "check" in call_sequence, "check_unit callback must be called"
@@ -203,7 +205,7 @@ def test_unit_rollback_on_handler_exception() -> None:
     import uuid
 
     from saprfclib.server import RfcServer
-    from tests._bgrfc_legacy import build_bgrfc_request
+    from tests._bgrfc_inbound import ship_frame
 
     uid = uuid.uuid4().hex.upper()
     rollback_called: list[bool] = []
@@ -218,10 +220,8 @@ def test_unit_rollback_on_handler_exception() -> None:
         rollback=lambda uid, ut: rollback_called.append(True),
     )
 
-    # Build a frame with one buffered call to FAILING_FM
-    # Encode the call bytes as the function name in UTF-16LE
-    call_payload = "FAILING_FM".encode("utf-16-le")
-    frame = build_bgrfc_request(uid, "T", [], buffered_calls=[call_payload])
+    # A unit with one call to FAILING_FM, carrying no values.
+    frame = ship_frame(uid, "T", [("FAILING_FM", b"")])
     response = server.dispatch_inbound(frame)
 
     # rollback must have been called (handler exception path)
