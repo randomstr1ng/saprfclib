@@ -18,6 +18,8 @@
 
 ::: saprfclib.exceptions.CallParameterError
 
+::: saprfclib.exceptions.CallCancelledError
+
 ::: saprfclib.exceptions.PoolTimeoutError
 
 ::: saprfclib.exceptions.PoolOverloadedError

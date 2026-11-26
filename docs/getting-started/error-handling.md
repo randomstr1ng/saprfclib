@@ -19,6 +19,7 @@ SapRfcError
 ├── WebSocketError             — WebSocket upgrade, framing, or TLS error
 ├── ProxyError                 — SOCKS5 proxy negotiation, authentication or CONNECT failed
 ├── CallParameterError         — call arguments refused before sending (also a ValueError)
+├── CallCancelledError         — the call was cancelled with cancel(); the connection is closed
 ├── PoolTimeoutError           — ConnectionPool.acquire() timed out
 └── PoolOverloadedError        — ConnectionPool.acquire() refused: max_waiters already waiting
 ```
@@ -163,6 +164,17 @@ connection stays usable. It is also a `ValueError`.
 | `path` | `str` | The offending value, e.g. `IT_ROWS[3]-FIELD` (field `FIELD` of row 3 of `IT_ROWS`) |
 
 The message names the path and the limit, never the value.
+
+### CallCancelledError
+
+Raised by a call that another thread or task cancelled with `conn.cancel()`. The server stops
+the function module, the gateway closes the connection, and the connection is retired; a pool
+replaces it. A cancelled call is never resent: whether its work had reached a commit before the
+cancel is for the application to find out.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `func_name` | `str` | The function module that was cancelled |
 
 ## Argument errors are not `SapRfcError`
 

@@ -45,6 +45,7 @@ from saprfclib.connection import (
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
+    CallCancelledError,
     CallParameterError,
     CommunicationError,
     IncompleteDescriptorError,
@@ -117,6 +118,7 @@ __all__ = [
     "SapRfcError",
     "AbapApplicationError",
     "AbapSystemFailure",
+    "CallCancelledError",
     "CallParameterError",
     "CommunicationError",
     "IncompleteDescriptorError",

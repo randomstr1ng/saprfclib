@@ -114,6 +114,7 @@ carries the same labels (`tests/api/public_api.json`).
 | `invalidate_metadata()` on a connection, a pool or a `MetadataCache`; `check_metadata()` and the pool's `metadata_check_interval` | A check asks the server for change timestamps; the first one only records (`docs/protocol/framing.md`) |
 | Call arguments copied before sending; `CallLimits` bounds on rows and value size | Checked before anything is encoded |
 | `reset_server_context()` and `conn.transaction()` (BAPI commit / rollback) | |
+| Server callbacks during a call (`DESTINATION 'BACK'`, `add_callback()`); cancelling a call (`cancel()`) | Classic TCP; a cancel stops the ABAP work too (`docs/protocol/framing.md`) |
 | Message server / group logon (`mshost`) | Binary and HTTP resolution |
 | SAProuter, including chained routers | |
 | SOCKS5 / SAP BTP Connectivity proxy without proxy authentication | |
@@ -142,8 +143,6 @@ carries the same labels (`tests/api/public_api.json`).
 |---|---|
 | SNC on the server side (acceptor role) | `docs/protocol/snc.md` |
 | SAP logon tickets (`MYSAPSSO2`) | #78 |
-| Client-side callbacks (`DESTINATION 'BACK'`) | #79 |
-| Cancelling a call in flight | #82 |
 
 **Refused on purpose**
 

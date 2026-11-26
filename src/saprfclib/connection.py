@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from saprfclib.exceptions import (
     AbapApplicationError,
     AbapSystemFailure,
+    CallCancelledError,
     CommunicationError,
     LogonError,
     RetryExhausted,
@@ -64,6 +65,8 @@ from saprfclib.exceptions import (
 from saprfclib.invoke import (
     _ARFC_DEST_SHIP,
     _BGRFC_DEST_SHIP,
+    _TRFC_HDR_CAPS,
+    _TRFC_HDR_CODEPAGE,
     CallLimits,
     TrfcOrigin,
     _decode_error_text,
@@ -85,6 +88,7 @@ from saprfclib.invoke import (
     parse_invoke_response,
     raise_for_rfc_error,
     snapshot_params,
+    tlv_record,
     tlv_stream_status,
     unit_state_from_wire,
     unknown_fields,
@@ -384,6 +388,117 @@ def _trfc_origin(session: Session) -> TrfcOrigin:
         partner_ip=text(0x0018),
         partner_host=text(0x0006),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Cancelling a call (#82)
+# --------------------------------------------------------------------------- #
+# Live capture of the reference client cancelling two long-running calls (a busy
+# loop and a WAIT), ABAP Platform 2025, 2026-11-26 (tests/golden/framing/cancel.json):
+# the client sends one 80-byte GW frame of type 0x06D5 on the call's socket, the
+# gateway answers with type 0x06D6 and closes the connection. Both cancel frames were
+# the same apart from the handle: type and version 06 D5 02 00, FF FF 00 00 at [4:8],
+# 08 00 00 00 at [16:20], 00 00 01 00 at [28:32], the GW handle at
+# [40:48], the client tail at [76:80]. The module stopped: it never reached the
+# database write at its end.
+_GW_TYPE_CANCEL = b"\x06\xd5\x02\x00"
+_GW_TYPE_CANCEL_ACK = b"\x06\xd6"
+_CANCEL_FIELD_16 = b"\x08\x00\x00\x00"  # [16:20], as captured
+_CANCEL_FIELD_28 = b"\x00\x00\x01\x00"  # [28:32], as captured
+
+
+def _build_cancel_frame(handle: bytes, conn_idx: int | None) -> bytes:
+    frame = bytearray(80)
+    frame[0:4] = _GW_TYPE_CANCEL
+    frame[4:8] = b"\xff\xff\x00\x00"
+    frame[16:20] = _CANCEL_FIELD_16
+    frame[28:32] = _CANCEL_FIELD_28
+    frame[40:48] = handle
+    struct.pack_into(">I", frame, 76, _client_tail(conn_idx))
+    return bytes(frame)
+
+
+# --------------------------------------------------------------------------- #
+# Callbacks from the server (DESTINATION 'BACK', #79)
+# --------------------------------------------------------------------------- #
+# Live capture, ABAP Platform 2025, 2026-11-26 (tests/golden/framing/callback.json):
+# a function module calling CALL FUNCTION ... DESTINATION 'BACK' sends, where the
+# client waits for its reply, a request shaped like a call to a server: 0x0502, the
+# release, 0x0102 the function name, 0x0130 the calling program, the session token,
+# 0x0420 0, 0x0512, 0x0205 declarations, 0x0201/0x0203 values. A reply opens with
+# 0x0500 instead. The client answers in the same conversation and then keeps
+# waiting for the reply to its own call.
+#
+# A callback to a function with no handler is answered as a server answers a call
+# to a function it does not have: the ABAP exception FU_NOT_FOUND, 0x0500, 0x0415
+# "FL", 0x0416 "E", 0x0417 "046", 0x0411 the function name, 0x0401 "FU_NOT_FOUND"
+# (that form: captured server replies, invoke._TAG_EXCEPTION_*). Live, 2026-11-26:
+# the calling ABAP caught it (EXCEPTIONS OTHERS, sy-subrc 3), finished, and the
+# connection stayed usable. The reference client sends no answer at all; it drops
+# the connection and fails the outer call with RFC_NOT_FOUND.
+#
+# A handler that raises is answered as the reference SDK's server answers a failing
+# handler (same capture date): the client's header records (0x0101, 0x0103, 0x0106,
+# 0x0007, 0x0011, 0x0012, 0x0013, 0x0130) and 0x0402 with a message; ABAP receives it
+# as SYSTEM_FAILURE. A system failure ends the conversation, and a callback runs on
+# the caller's own conversation, so the outer call is lost with it (live: the gateway
+# then sends an empty frame); the call raises and the connection is retired.
+_TAG_CALLBACK_START = 0x0502
+_TAG_ERROR_KEY = 0x0403
+_TAG_ERROR_TEXT = 0x0402
+_CALLBACK_HDR_VERSION = bytes.fromhex("00000e0b")  # 0x0103 in those answers
+_MAX_CALLBACKS_PER_CALL = 10_000  # a bound on a peer looping, not a wire value
+
+
+def _is_callback_request(tlv: bytes) -> bool:
+    return len(tlv) >= 2 and struct.unpack_from(">H", tlv, 0)[0] == _TAG_CALLBACK_START
+
+
+def _callback_function_name(tlv: bytes) -> str:
+    for tag, value in _iter_records(tlv):
+        if tag == 0x0102:
+            return value.decode("utf-16-le", "replace").rstrip("\x00 ")
+    return ""
+
+
+def _callback_not_found_tlv(name: str) -> bytes:
+    def u(text: str) -> bytes:
+        return text.encode("utf-16-le")
+
+    return b"".join(
+        [
+            tlv_record(0x0500),
+            tlv_record(0x0415, u("FL")),
+            tlv_record(0x0416, u("E")),
+            tlv_record(0x0417, u("046")),
+            tlv_record(0x0411, u(name)),
+            tlv_record(0x0401, u("FU_NOT_FOUND")),
+            tlv_record(0xFFFF),
+        ]
+    )
+
+
+def _callback_failure_tlv(session: Session, message: str, key: str | None = None) -> bytes:
+    origin = _trfc_origin(session)
+
+    def u(text: str) -> bytes:
+        return text.encode("utf-16-le")
+
+    parts = [
+        tlv_record(0x0101, _TRFC_HDR_CAPS),
+        tlv_record(0x0103, _CALLBACK_HDR_VERSION),
+        tlv_record(0x0106, _TRFC_HDR_CODEPAGE),
+        tlv_record(0x0007, u(origin.client_ip)),
+        tlv_record(0x0011, u(origin.language)),
+        tlv_record(0x0012, u(origin.client_release)),
+        tlv_record(0x0013, u(origin.partner_kernel + origin.partner_ip)),
+        tlv_record(0x0130, u(origin.program)),
+    ]
+    if key is not None:
+        parts.append(tlv_record(_TAG_ERROR_KEY, u(key)))
+    parts.append(tlv_record(_TAG_ERROR_TEXT, u(message.splitlines()[0][:255] if message else "")))
+    parts.append(tlv_record(0xFFFF))
+    return b"".join(parts)
 
 
 def _bgrfc_request_tlv(
@@ -3693,6 +3808,51 @@ class Connection:
         ret = self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
         _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
 
+    def add_callback(
+        self,
+        func_name: str,
+        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        desc: FunctionDesc | None = None,
+    ) -> None:
+        """Serve ``func_name`` when the server calls back during a call (#79).
+
+        See :meth:`AsyncConnection.add_callback`. Classic TCP connections only: over
+        SNC or WebSocket RFC no callback exchange has been captured.
+        """
+        if self._async_conn is None:
+            raise NotImplementedError(
+                "server callbacks are handled on classic TCP connections only; none has "
+                "been captured over SNC or WebSocket RFC"
+            )
+        self._async_conn.add_callback(func_name, handler, desc)
+
+    def cancel(self) -> bool:
+        """Cancel the call in flight on this connection, from another thread (#82).
+
+        The call raises :class:`~saprfclib.CallCancelledError` and the server stops
+        the function module; the connection is closed by the gateway and retired.
+        Returns False when no call was in flight. Classic TCP connections only.
+        """
+        ac = self._async_conn
+        if ac is None or self._loop_thread is None:
+            raise NotImplementedError(
+                "cancel() is available on classic TCP connections only; the cancel "
+                "frame has not been captured over SNC or WebSocket RFC"
+            )
+        inner = getattr(ac._transport, "_inner", None)
+        if inner is None:
+            return bool(self._loop_thread.run(ac.cancel()))
+        # The call blocks the loop thread in a socket read (a sync transport behind
+        # the async shim), so the loop cannot run a cancel coroutine until the call
+        # is over. Write the frame from this thread instead: one thread may send on a
+        # socket while another is blocked reading it.
+        if ac._in_flight is None or ac._cancel_sent:
+            return False
+        ac._cancel_sent = True
+        handle = ac._session.handle or b"        "
+        inner.send_message(_build_cancel_frame(handle, ac._session.conn_idx))
+        return True
+
     def check_metadata(self) -> list[str]:
         """Invalidate cached interfaces the server reports as changed (#112).
 
@@ -5665,6 +5825,14 @@ class AsyncConnection:
         self._anon_cache_key: str | None = metadata_cache_key
         self._struct_desc_cache: dict[str, TypeDesc] = {}
         self._line_types_pending: set[str] = set()
+        # Server callbacks (DESTINATION 'BACK', #79): name -> (handler, descriptor).
+        self._callbacks: dict[
+            str, tuple[Callable[[dict[str, Any]], dict[str, Any]], FunctionDesc | None]
+        ] = {}
+        # The call a cancel() would cut off (#82); None between calls.
+        self._in_flight: str | None = None
+        self._cancel_sent = False
+        self._callback_failed: str | None = None
         # Retry + durable-store attributes (D-01/D-02/D-03/D-03b)
         self._max_retries = max_retries  # max auto-retry attempts (D-02)
         self._retry_delay = retry_delay  # base backoff delay in seconds (D-02)
@@ -6182,11 +6350,15 @@ class AsyncConnection:
                 request = Connection._build_invoke_frame(
                     handle, request_tlv, conn_idx=self._session.conn_idx
                 )
+                await self._resolve_callback_descs()
                 with _fail_closed(self._session, func_name):
-                    await self._send_request(request)
-                    tlv_response = await _join_response_frames_async(
-                        self._transport.recv_message, func_name
-                    )
+                    self._in_flight = func_name
+                    self._cancel_sent = False
+                    try:
+                        await self._send_request(request)
+                        tlv_response = await self._read_reply(func_name)
+                    finally:
+                        self._in_flight = None
                     # Read the server's timing before parsing, so a call that
                     # raises an ABAP error still reports how long the server spent
                     # on it -- that is often the interesting case.
@@ -6218,6 +6390,95 @@ class AsyncConnection:
             raise
         ret = await self.call("BAPI_TRANSACTION_COMMIT", WAIT="X" if wait else "")
         _raise_for_bapi_return("BAPI_TRANSACTION_COMMIT", ret.get("RETURN"))
+
+    def add_callback(
+        self,
+        func_name: str,
+        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        desc: FunctionDesc | None = None,
+    ) -> None:
+        """Serve ``func_name`` when the server calls back during a call (#79).
+
+        ABAP's ``CALL FUNCTION ... DESTINATION 'BACK'`` asks the caller to run a
+        function in the middle of its own call. ``handler`` gets the callback's
+        importing values as a dict and returns its exporting values, as for an
+        :class:`~saprfclib.RfcServer` handler. ``desc`` is the function's interface;
+        without one it is fetched from the server before the next call goes out
+        (nothing can be fetched while a call is waiting for its reply). A callback for
+        a function with no handler is answered with the ABAP exception
+        ``FU_NOT_FOUND``, which the calling ABAP can catch; the call goes on. A
+        handler that raises is answered with ``SYSTEM_FAILURE``, which ends the
+        server's conversation: the outer call raises ``CommunicationError`` and the
+        connection is retired (docs/protocol/framing.md, "Callbacks").
+        """
+        self._callbacks[func_name.upper()] = (handler, desc)
+
+    async def _resolve_callback_descs(self) -> None:
+        for name, (handler, desc) in list(self._callbacks.items()):
+            if desc is None:
+                self._callbacks[name] = (handler, await self._desc_for(name))
+
+    async def _recv_or_cancelled(self) -> bytes:
+        raw = await self._transport.recv_message()
+        if raw[:2] == _GW_TYPE_CANCEL_ACK:
+            raise CallCancelledError(self._in_flight or "call")
+        return raw
+
+    async def _read_reply(self, func_name: str) -> bytes:
+        """The reply to the call in flight, serving the server's callbacks on the way."""
+        self._callback_failed = None
+        for _ in range(_MAX_CALLBACKS_PER_CALL + 1):
+            tlv = await _join_response_frames_async(self._recv_or_cancelled, func_name)
+            if self._callback_failed is not None and not tlv:
+                raise CommunicationError(
+                    f"{func_name}: the handler for the server's callback to "
+                    f"{self._callback_failed} raised; the server ended the conversation "
+                    "(a failed callback is a SYSTEM_FAILURE for the whole call)"
+                )
+            if not _is_callback_request(tlv):
+                return tlv
+            answer = self._answer_callback(tlv)
+            handle = self._session.handle or b"        "
+            await self._send_request(
+                Connection._build_invoke_frame(handle, answer, conn_idx=self._session.conn_idx)
+            )
+        raise CommunicationError(
+            f"{func_name}: the server called back more than {_MAX_CALLBACKS_PER_CALL} times"
+        )
+
+    def _answer_callback(self, tlv: bytes) -> bytes:
+        from saprfclib.server import RfcServer, _response_tlv
+
+        name = _callback_function_name(tlv)
+        entry = self._callbacks.get(name.upper())
+        if entry is None or entry[1] is None:
+            _logger.info("server callback to %s: no handler, answered FU_NOT_FOUND", name)
+            return _callback_not_found_tlv(name)
+        handler, desc = entry
+        try:
+            request = RfcServer._deserialize_request(tlv, desc)
+            result = handler(request) or {}
+            return _response_tlv(desc, result)
+        except Exception as exc:  # noqa: BLE001 - reported to ABAP, as the SDK does
+            _logger.warning("server callback to %s failed: %s", name, type(exc).__name__)
+            self._callback_failed = name
+            return _callback_failure_tlv(self._session, f"{name}: {type(exc).__name__}: {exc}")
+
+    async def cancel(self) -> bool:
+        """Cancel the call in flight, from another task (#82).
+
+        Sends the gateway's cancel frame on the call's connection. The call then
+        raises :class:`~saprfclib.CallCancelledError`, the server stops the function
+        module (live probe, docs/protocol/framing.md), and the gateway closes the
+        connection, so it is retired; a pool replaces it. Returns False when no
+        call was in flight (nothing was sent).
+        """
+        if self._in_flight is None or self._cancel_sent:
+            return False
+        self._cancel_sent = True
+        handle = self._session.handle or b"        "
+        await self._transport.send_message(_build_cancel_frame(handle, self._session.conn_idx))
+        return True
 
     async def check_metadata(self) -> list[str]:
         """Async twin of :meth:`Connection.check_metadata`."""
@@ -6933,6 +7194,18 @@ class _ThreadedAsyncConnection(AsyncConnection):
 
     async def reset_server_context(self) -> None:
         await self._run(self._sync.reset_server_context)
+
+    def add_callback(
+        self,
+        func_name: str,
+        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        desc: FunctionDesc | None = None,
+    ) -> None:
+        self._sync.add_callback(func_name, handler, desc)
+
+    async def cancel(self) -> bool:
+        # Not queued behind the worker: the call it cancels is what occupies it.
+        return self._sync.cancel()
 
     async def check_metadata(self) -> list[str]:
         result: list[str] = await self._run(self._sync.check_metadata)
