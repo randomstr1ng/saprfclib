@@ -92,9 +92,9 @@ type of the binary path: a NUMC as its zero-padded digits, a RAW as its full wid
 
 An `RfcServer` handler receives and returns them in the same shape.
 
-Not supported yet, and refused with a clear error: deep parameters inside tRFC/qRFC/bgRFC
-units, components with namespaced names (`/ABC/FIELD`), and tables whose rows are not
-structures.
+A table whose rows are not structures (`STRING_TABLE`, a table of a data element) is a list
+of plain values: `IT_STRS=["a", "b"]`. Components in a namespace keep their DDIC names as
+keys (`{"/AIF/NSMSGCAT": "NS1"}`). Deep parameters work in `call_transactional()` too.
 
 ## Tips
 

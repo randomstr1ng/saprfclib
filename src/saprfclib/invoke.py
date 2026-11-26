@@ -651,11 +651,8 @@ def build_invoke_request(
             # XML_CHUNK_BYTES. An empty table is still sent, as an empty element.
             # Source: live captures of the reference client, 2026-11-26
             # (tests/golden/serialization/deep_*, xmlparam module docstring).
-            if transactional:
-                raise NotImplementedError(
-                    f"{func_name}: deep parameter {field.name!r} in a tRFC/qRFC call; "
-                    "how it is serialized inside a unit has not been captured"
-                )
+            # Inside a tRFC/qRFC unit the serialized call carries the same brackets
+            # (live capture of the reference client submitting a unit, 2026-11-26).
             parts.extend(xml_parameter_records(field, value))
         elif field.rfctype == _RFCTYPE_TABLE:
             # TABLE protocol: 0x0301(name) + 0x0330(dm_id) + 0x0302(info) + 0x0303*(rows) + 0x0306

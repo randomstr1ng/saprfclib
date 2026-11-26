@@ -295,13 +295,14 @@ def test_struct_bootstrap_resolves_rfcsi_via_ddif_fieldinfo() -> None:
 def test_struct_bootstrap_falls_back_to_rsd_when_ddif_is_empty() -> None:
     """When DDIF returns no field rows, fall back to RFC_GET_STRUCTURE_DEFINITION.
 
-    Both replies here are the endpoint's empty success (rc 0, no FIELDS table), so
-    the fallback is attempted and, being empty too, the layout genuinely cannot be
-    resolved and 'no DFIES rows' is raised. The point is that the fallback ran:
-    both function names appear on the wire, DDIF first.
+    Every reply here is the endpoint's empty success (rc 0, no FIELDS table). A type
+    with no DFIES rows is asked again with DFIES_WA declared (the line of a table
+    type, #85); that is empty too, so the fallback is attempted and, being empty as
+    well, the layout genuinely cannot be resolved and 'no DFIES rows' is raised. The
+    point is that the fallback ran: both function names appear on the wire, DDIF first.
     """
     empty = (GOLDEN / "struct_definition_empty_response.bin").read_bytes()
-    conn = _conn_with(empty, empty)
+    conn = _conn_with(empty, empty, empty)
 
     with pytest.raises(ValueError, match="no DFIES rows"):
         conn._call_struct_bootstrap("RFCSI")

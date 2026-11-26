@@ -28,18 +28,6 @@
    "what": "RFC_GET_STRUCTURE_DEFINITION reply for BAPIRET2_T: the 14 fields of its line type BAPIRET2"
   },
   {
-   "file": "rgsd_stfccplxt_t_response.bin",
-   "dir": "S>C",
-   "client": "saprfclib",
-   "what": "RFC_GET_STRUCTURE_DEFINITION reply for STFCCPLXT_T: the 4 fields of STFCCPLXT"
-  },
-  {
-   "file": "ddif_flat_response.bin",
-   "dir": "S>C",
-   "client": "saprfclib",
-   "what": "DDIF_FIELDINFO_GET reply for ZSAPRFCLIB_FLAT"
-  },
-  {
    "file": "echo_reference_request.bin",
    "dir": "C>S",
    "client": "reference",
@@ -74,12 +62,6 @@
    "dir": "S>C",
    "client": "reference",
    "what": "reply: the server also escapes the quote and the apostrophe"
-  },
-  {
-   "file": "ddif_ttyp_stfccplxt_t_response.bin",
-   "dir": "S>C",
-   "client": "saprfclib",
-   "what": "DDIF_FIELDINFO_GET reply for the table type STFCCPLXT_T: no DFIES_TAB rows"
   },
   {
    "file": "echo_saprfclib_request.bin",
@@ -128,6 +110,30 @@
    "dir": "C>S",
    "client": "saprfclib",
    "what": "saprfclib's RfcServer answering the STFC_DEEP_STRUCTURE call; ABAP read the structure back"
+  },
+  {
+   "file": "deep2_reference_request.bin",
+   "dir": "C>S",
+   "client": "reference",
+   "what": "Z_SAPRFCLIB_DEEP2 with IT_NS (/AIF/MSG_CAT_STR_T, namespaced component names), IT_STRS (STRING_TABLE), IT_XSTRS (XSTRING_TABLE), IT_NAMES (SDMI_TABNAMES, CHAR30 rows), IT_INTS (SRT_INT_TAB, INT4 rows)"
+  },
+  {
+   "file": "deep2_reference_response.bin",
+   "dir": "S>C",
+   "client": "reference",
+   "what": "reply: ET_* echo the tables, ES_DEEP initial"
+  },
+  {
+   "file": "deep2_saprfclib_request.bin",
+   "dir": "C>S",
+   "client": "saprfclib",
+   "what": "the same call from saprfclib"
+  },
+  {
+   "file": "deep2_saprfclib_response.bin",
+   "dir": "S>C",
+   "client": "saprfclib",
+   "what": "reply to it"
   }
  ],
  "reference_call_values": {
@@ -189,14 +195,6 @@
   "note": "the reference client decoded ES_DEEP and ES_FLAT back to these values, NUMC as '000042'"
  },
  "large_value": "not stored (230 KB): the reference client sent a 2000-row IT_CPLX as 0x3c05 records of 16384 bytes each and a last one of 3857, in GW request chunks of type 0x0608",
- "saprfclib_metadata_sequence": [
-  "gfi_response.bin",
-  "ddif_deep_response.bin",
-  "ddif_ttyp_response.bin",
-  "rgsd_bapiret2_t_response.bin",
-  "ddif_ttyp_stfccplxt_t_response.bin",
-  "rgsd_stfccplxt_t_response.bin",
-  "ddif_flat_response.bin"
- ],
- "server_side": "RFC server captures, 2026-11-26: destination ZSAPRFCLIB_BXML (TCP/IP, registered program, BASXML_ACTIVE='1'), called from a purpose-built module Z_SAPRFCLIB_BXML_CALL. 'S>C' here is the gateway sending the call to the registered server. Neither the reference SDK's server nor saprfclib's received the binary BXML form; both got the plain XML a client sends. The lab address is replaced by 198.51.100.9 (same length)."
+ "server_side": "RFC server captures, 2026-11-26: destination ZSAPRFCLIB_BXML (TCP/IP, registered program, BASXML_ACTIVE='1'), called from a purpose-built module Z_SAPRFCLIB_BXML_CALL. 'S>C' here is the gateway sending the call to the registered server. Neither the reference SDK's server nor saprfclib's received the binary BXML form; both got the plain XML a client sends. The lab address is replaced by 198.51.100.9 (same length).",
+ "metadata_sequences": "deep_metadata.json (Z_SAPRFCLIB_DEEP) and deep2_metadata.json (Z_SAPRFCLIB_DEEP2): saprfclib's metadata exchanges, server replies in order. rgsd_bapiret2_t_response.bin shows the last fallback, RFC_GET_STRUCTURE_DEFINITION, answering a table type with its line's fields."
 }

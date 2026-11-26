@@ -119,7 +119,9 @@ ffff                           the stream ends FF FF 00 00 FF FF
 ```
 
 The call part differs from an ordinary call in three ways: no `0x0512`, no `0x0205`
-declarations (nothing comes back) and no `0x0330` table ids. The same header precedes the
+declarations (nothing comes back) and no `0x0330` table ids. Deep parameters travel in it as
+in an ordinary call, one `0x3c02`/`0x3c05` XML bracket each ([Serialization](serialization.md#deep-parameters-xml-in-0x3c02-0x3c05);
+tRFC and qRFC capture 2026-11-26, `tests/golden/serialization/deep/deep_unit_calls.json`). The same header precedes the
 calls inside a bgRFC unit's `SDATA` (below), from a separate capture.
 
 ### Confirm

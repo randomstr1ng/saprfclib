@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does, with values typed as on the binary path. Nested components come back as nested dicts.
   Captured against ABAP Platform 2025 for every scalar type, nested flat and deep structures and
   nested tables (`tests/golden/serialization/deep/`). `RfcServer` handlers receive and return
-  them the same way; its replies match the reference SDK's server byte for byte. tRFC units and
-  namespaced component names refuse deep values with `NotImplementedError` until captured.
+  them the same way; its replies match the reference SDK's server byte for byte. They also work
+  inside tRFC and qRFC units, in tables whose rows are not structures (`STRING_TABLE`, a table
+  of a data element: a list of plain values) and with component names in a namespace
+  (`/AIF/NSMSGCAT`, written `_-AIF_-NSMSGCAT`).
 - **`invalidate_metadata(name=None)`** on `Connection`, `AsyncConnection`, both pools and
   `MetadataCache` (#80) forgets cached function interfaces and the DDIC layouts cached with
   them, so the next call fetches them again. A live probe showed why it is needed and why it is
@@ -84,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   level and the component itself was left unresolved, so reading such a structure raised
   `IncompleteDescriptorError`. It is now a nested dict, as with the reference client.
 - **The async DDIC lookup read only the first frame** of a multi-frame reply.
+- **A table type whose line is not resolvable by `RFC_GET_STRUCTURE_DEFINITION`** (`DDFIELDS`,
+  refused with `TABLE_NOT_ACTIVE`) had no layout, so `DDIF_FIELDINFO_GET`'s own `LINES_DESCR`
+  could not be read. Table types are now resolved from `DDIF_FIELDINFO_GET`'s `DFIES_WA`.
 
 - **A unit's buffered call could be changed after `unit.call(...)`** (#86): only the top-level
   dict was copied, so editing a row before the unit was submitted changed what was sent. The

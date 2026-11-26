@@ -96,19 +96,16 @@ def _binary_values(frame: bytes) -> dict[str, bytes]:
     }
 
 
-METADATA_SEQUENCE = [
-    "gfi_response.bin",
-    "ddif_deep_response.bin",
-    "ddif_ttyp_response.bin",
-    "rgsd_bapiret2_t_response.bin",
-    "ddif_ttyp_stfccplxt_t_response.bin",
-    "rgsd_stfccplxt_t_response.bin",
-    "ddif_flat_response.bin",
-]
+def _metadata_replies() -> list[bytes]:
+    """saprfclib's metadata exchange for Z_SAPRFCLIB_DEEP, server replies in order."""
+    import json
+
+    data = json.loads((DEEP / "deep_metadata.json").read_text())
+    return [bytes.fromhex(h) for h in data["replies_hex"]]
 
 
 def _connection(*after: bytes) -> tuple[Connection, MockTransport]:
-    responses = _handshake_responses() + [_frame(n) for n in METADATA_SEQUENCE] + list(after)
+    responses = _handshake_responses() + _metadata_replies() + list(after)
     transport = MockTransport(responses)
     conn = Connection(transport)
     conn._handshake(client="001", user="DEVELOPER", passwd="secret")
@@ -309,13 +306,6 @@ def test_escaping_matches_the_reference_client() -> None:
     assert b"<STR>H\xc3\xa4llo &#60;&#38;&#62; 'x\"</STR>" in xml
 
 
-def test_a_deep_parameter_in_a_trfc_unit_is_refused() -> None:
-    with pytest.raises(NotImplementedError, match="tRFC"):
-        build_invoke_request(
-            "Z_SAPRFCLIB_DEEP", _desc(), {"IS_DEEP": {"ID": 1}}, transactional=True
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Replies
 # --------------------------------------------------------------------------- #
@@ -372,7 +362,7 @@ def test_a_saprfclib_call_end_to_end() -> None:
 
 def test_an_async_connection_resolves_and_calls_the_same_way() -> None:
     async def main() -> dict[str, Any]:
-        responses = [_frame(n) for n in METADATA_SEQUENCE] + [_frame("echo_saprfclib_response.bin")]
+        responses = _metadata_replies() + [_frame("echo_saprfclib_response.bin")]
         sync_conn, _ = _connection()
         transport = AsyncMockTransport(responses)
         conn = AsyncConnection(transport)
@@ -420,13 +410,6 @@ def _cplx_param() -> FieldDesc:
 def test_malformed_xml_is_refused_with_its_place(payload: bytes, match: str) -> None:
     with pytest.raises(ValueError, match=match):
         decode_xml_parameter(_cplx_param(), payload)
-
-
-def test_a_namespaced_component_name_is_refused_not_guessed() -> None:
-    row = TypeDesc("ZROW", [FieldDesc("/ABC/F", RFCTYPE_CHAR, 2, 0, 4, 0, 0)], 2, 4)
-    field = FieldDesc("IT", RFCTYPE_TABLE, 0, 0, 0, 0, 0, type_desc=row, direction=RFC_IMPORT)
-    with pytest.raises(NotImplementedError, match="namespaced"):
-        encode_xml_parameter(field, [{"/ABC/F": "x"}])
 
 
 def test_an_unresolved_table_type_is_refused() -> None:
@@ -579,3 +562,104 @@ def test_the_live_saprfclib_server_replies_are_what_the_code_writes() -> None:
         ("server_deep_structure_request.bin", "server_deep_structure_saprfclib_reply.bin"),
     ):
         assert _xml_params(server.dispatch_inbound(_frame(request))) == _xml_params(_frame(live))
+
+
+# --------------------------------------------------------------------------- #
+# Namespaced names, tables of elementary rows, deep values in units
+# --------------------------------------------------------------------------- #
+# Z_SAPRFCLIB_DEEP2 (deep.json): IT_NS of /AIF/MSG_CAT_STR_T (namespaced component
+# names), IT_STRS of STRING_TABLE, IT_XSTRS of XSTRING_TABLE, IT_NAMES of
+# SDMI_TABNAMES (CHAR30 rows), IT_INTS of SRT_INT_TAB (INT4 rows), echoed as ET_*.
+
+import json as _json  # noqa: E402
+
+DEEP2_VALUES: dict[str, Any] = {
+    "IT_NS": [{"/AIF/NSMSGCAT": "NS1", "/AIF/MSGCATEGORY": "cat <&>"}],
+    "IT_STRS": ["eins", "", "drei <&> ü"],
+    "IT_XSTRS": [b"\x00\x01", b""],
+    "IT_NAMES": ["T000", "USR02"],
+    "IT_INTS": [1, -2, 2147483647],
+}
+
+_DESC2: FunctionDesc | None = None
+
+
+def _desc2() -> FunctionDesc:
+    global _DESC2
+    if _DESC2 is None:
+        replies = _json.loads((DEEP / "deep2_metadata.json").read_text())["replies_hex"]
+        transport = MockTransport(_handshake_responses() + [bytes.fromhex(h) for h in replies])
+        conn = Connection(transport)
+        conn._handshake(client="001", user="DEVELOPER", passwd="secret")
+        _DESC2 = conn._call_bootstrap("Z_SAPRFCLIB_DEEP2")
+    return _DESC2
+
+
+def _param2(name: str) -> FieldDesc:
+    return next(p for p in _desc2().parameters if p.name == name)
+
+
+def test_table_types_resolve_through_dfies_wa() -> None:
+    def line(name: str) -> TypeDesc:
+        td = _param2(name).type_desc
+        assert td is not None, name
+        return td
+
+    # Elementary rows: one unnamed field of the line's type.
+    assert [(f.name, f.rfctype) for f in line("IT_STRS").fields] == [("", 29)]
+    assert [(f.name, f.rfctype) for f in line("IT_XSTRS").fields] == [("", 30)]
+    names = line("IT_NAMES").fields
+    assert [(f.name, f.rfctype, f.uc_length) for f in names] == [("", RFCTYPE_CHAR, 60)]
+    assert [(f.name, f.rfctype) for f in line("IT_INTS").fields] == [("", 8)]
+    # Structured rows by the structure DFIES_WA names.
+    assert [f.name for f in line("IT_NS").fields] == ["/AIF/NSMSGCAT", "/AIF/MSGCATEGORY"]
+
+
+def test_namespaced_and_elementary_tables_match_the_reference_client() -> None:
+    request = build_invoke_request("Z_SAPRFCLIB_DEEP2", _desc2(), dict(DEEP2_VALUES))
+    assert _xml_params(request) == _xml_params(_frame("deep2_reference_request.bin"))
+    assert b"<_-AIF_-NSMSGCAT>NS1</_-AIF_-NSMSGCAT>" in b"".join(_xml_params(request))
+    live = _frame("deep2_saprfclib_request.bin")
+    assert _xml_params(request) == _xml_params(live)
+
+
+def test_namespaced_and_elementary_tables_decode_from_the_reply() -> None:
+    result = parse_invoke_response(
+        _strip_gw_header(_frame("deep2_reference_response.bin")), _desc2()
+    )
+    for name, value in DEEP2_VALUES.items():
+        assert result["ET_" + name[3:]] == value
+
+
+def test_deep_values_in_a_unit_are_serialized_as_the_reference_client_does() -> None:
+    from saprfclib.invoke import TrfcOrigin, build_trfc_call
+
+    calls = _json.loads((DEEP / "deep_unit_calls.json").read_text())["calls_hex"]
+    origin = TrfcOrigin(
+        b"\x00" * 16, "127.0.0.1", "E", "754", "h", "p", "916 ", "198.51.100.9", "s"
+    )
+    params = {
+        "IV_MODE": "S",
+        "IS_DEEP": {
+            "ID": 77,
+            "STR": "unit <&>",
+            "XSTR": b"\x0a\x0b",
+            "RETS": [{"TYPE": "I", "MESSAGE": "in unit"}],
+            "CPLXT": [{"I": 1, "C": "u", "STR": "s", "XSTR": b"\x01"}],
+        },
+        **DEEP2_VALUES,
+    }
+    for kind, ident in (("trfc", 77), ("qrfc", 78)):
+        params["IS_DEEP"]["ID"] = ident
+        built = build_trfc_call("Z_SAPRFCLIB_DEEP2", _desc2(), params, origin)
+        ours = built[len(origin.header()) :]
+        ref = bytes.fromhex(calls[kind])
+        # Same records in the same order; binary values byte for byte.
+        assert [t for t, _ in _iter_tlv_records(ours)] == [t for t, _ in _iter_tlv_records(ref)]
+        assert _binary_values(ours) == _binary_values(ref)
+        # XML equal in value: the client writes an untouched component as an empty
+        # element where saprfclib writes its initial value (see above).
+        for a, b in zip(_xml_params(ours), _xml_params(ref), strict=True):
+            name = a[1 : a.index(b">")].decode()
+            field = next(p for p in _desc2().parameters if p.name == name)
+            assert decode_xml_parameter(field, a) == decode_xml_parameter(field, b)
