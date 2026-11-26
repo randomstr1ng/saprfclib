@@ -37,8 +37,13 @@ XSTRING     base64 (``AAH/3q0=``); empty is an empty element
 DECFLOAT    plain decimal (``12.5``, ``-0.001``)
 UTCLONG     the signed 64-bit value of the binary form, as a decimal integer
 structure   one element per component, in layout order
-table       one ``<item>`` per row; an empty table is an empty element
+table       one ``<item>`` per row; an empty table is an empty element; a row that
+            is not a structure (STRING_TABLE, a table of CHAR30) is the item's text
 =========== ======================================================================
+
+A component name in a namespace is written with each ``/`` as ``_-``
+(``<_-AIF_-NSMSGCAT>``). Inside a tRFC or qRFC unit the serialized call carries the same
+brackets.
 
 Escaping: the client writes ``&``, ``<`` and ``>`` as ``&#38;``, ``&#60;``, ``&#62;``
 and every other character, controls and non-ASCII included, as itself. The server
@@ -83,6 +88,7 @@ from .codec import (
 from .types import RFC_TABLES, FieldDesc, TypeDesc
 
 __all__ = [
+    "ELEMENTARY_LINE",
     "XML_CHUNK_BYTES",
     "decode_xml_parameter",
     "encode_xml_parameter",
@@ -102,11 +108,31 @@ _MAX_DEPTH = 66  # the same bound invoke.snapshot_params applies to arguments
 # The tag a table row travels under (every capture).
 _ROW_TAG = "item"
 
-# Component names the element syntax can carry. A DDIC name may also contain "/"
-# (a namespace, /ABC/FIELD); how such a name is written as an element has not been
-# captured, and writing it as it is would produce a closing tag that ends the wrong
-# element, so it is refused rather than guessed.
-_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# A component name in a namespace (/AIF/NSMSGCAT) is written with each "/" as "_-":
+# <_-AIF_-NSMSGCAT>, by the reference client and by the server (live capture,
+# 2026-11-26, a table of /AIF/MSG_CATEGORY_STR rows). A DDIC name cannot contain "-",
+# so the mapping is reversible.
+_DDIC_NAME_RE = re.compile(r"[A-Za-z_/][A-Za-z0-9_/]*\Z")
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*\Z")
+
+# The name of the one field of a row layout whose rows are not structures (a table of
+# STRING, of CHAR30, of INT4): the row is the value itself. Such a table travels as
+# <item>value</item> per row (live capture, 2026-11-26: STRING_TABLE, XSTRING_TABLE,
+# SDMI_TABNAMES, SRT_INT_TAB).
+ELEMENTARY_LINE = ""
+
+
+def _is_elementary(layout: TypeDesc) -> bool:
+    return len(layout.fields) == 1 and layout.fields[0].name == ELEMENTARY_LINE
+
+
+def _xml_name(ddic_name: str) -> str:
+    return ddic_name.replace("/", "_-")
+
+
+def _ddic_name(xml_name: str) -> str:
+    return xml_name.replace("_-", "/")
+
 
 # Escapes the reference client writes (see the module docstring).
 _ESCAPES = (("&", "&#38;"), ("<", "&#60;"), (">", "&#62;"))
@@ -171,13 +197,9 @@ def _escape(text: str) -> str:
 
 
 def _element_name(field: FieldDesc, path: str) -> str:
-    if not _NAME_RE.match(field.name):
-        raise NotImplementedError(
-            f"{path}: the name {field.name!r} cannot be written as an XML element; how "
-            "the server spells a namespaced name in a deep parameter has not been "
-            "captured (docs/protocol/serialization.md, Known Gaps)"
-        )
-    return field.name
+    if not _DDIC_NAME_RE.match(field.name):
+        raise ValueError(f"{path}: {field.name!r} is not a DDIC component name")
+    return _xml_name(field.name)
 
 
 def _require_layout(field: FieldDesc, path: str) -> TypeDesc:
@@ -261,6 +283,12 @@ def _value_text(field: FieldDesc, value: Any, path: str, depth: int) -> str:
         layout = _require_layout(field, path)
         if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Iterable):
             raise TypeError(f"{path}: a table takes a list of rows, not {type(value).__name__}")
+        if _is_elementary(layout):
+            line = layout.fields[0]
+            return "".join(
+                f"<{_ROW_TAG}>{_value_text(line, row, f'{path}[{i}]', depth + 1)}</{_ROW_TAG}>"
+                for i, row in enumerate(value)
+            )
         return "".join(
             f"<{_ROW_TAG}>{_structure_text(layout, row, f'{path}[{i}]', depth + 1)}</{_ROW_TAG}>"
             for i, row in enumerate(value)
@@ -281,7 +309,7 @@ def _structure_text(layout: TypeDesc, value: Any, path: str, depth: int) -> str:
             # value; a component the caller left out gets its type's initial value.
             child_value = _default_field_value(child)
         parts.append(
-            f"<{name}>{_value_text(child, child_value, f'{path}-{name}', depth + 1)}</{name}>"
+            f"<{name}>{_value_text(child, child_value, f'{path}-{child.name}', depth + 1)}</{name}>"
         )
     return "".join(parts)
 
@@ -439,10 +467,14 @@ def _element_value(field: FieldDesc, element: _Element, path: str, depth: int) -
         if element.text:
             raise ValueError(f"{path}: a table holds <{_ROW_TAG}> elements, not text")
         rows = []
+        elementary = _is_elementary(layout)
         for i, item in enumerate(element.children):
             if item.name != _ROW_TAG:
                 raise ValueError(f"{path}: unexpected <{item.name}> in a table")
-            rows.append(_structure_value(layout, item, f"{path}[{i}]", depth + 1))
+            if elementary:
+                rows.append(_element_value(layout.fields[0], item, f"{path}[{i}]", depth + 1))
+            else:
+                rows.append(_structure_value(layout, item, f"{path}[{i}]", depth + 1))
         return rows
     if element.children:
         raise ValueError(f"{path}: a {field.name!r} value cannot contain elements")
@@ -459,7 +491,7 @@ def _structure_value(layout: TypeDesc, element: _Element, path: str, depth: int)
     by_name = {c.name.upper(): c for c in layout.fields}
     result: dict[str, Any] = {}
     for child in element.children:
-        field = by_name.get(child.name.upper())
+        field = by_name.get(_ddic_name(child.name).upper())
         if field is None:
             # A component the descriptor does not know: most likely the type changed
             # in the system after its layout was cached (see invalidate_metadata).
@@ -489,6 +521,6 @@ def decode_xml_parameter(field: FieldDesc, payload: bytes) -> Any:
     except UnicodeDecodeError as exc:
         raise ValueError(f"{field.name}: XML payload is not UTF-8 at byte {exc.start}") from None
     root = _parse(text, field.name)
-    if root.name.upper() != field.name.upper():
+    if _ddic_name(root.name).upper() != field.name.upper():
         raise ValueError(f"{field.name}: XML payload is for <{root.name}>")
     return _element_value(field, root, field.name, 0)

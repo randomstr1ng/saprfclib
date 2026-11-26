@@ -1286,13 +1286,20 @@ component arrives as a single `TTYP` row, and the DDIC name of the type of both 
 So the components inside a `STRU` row's `[OFFSET, OFFSET + INTLEN)` belong to it, and
 saprfclib rebuilds them as a nested structure with offsets relative to it; a caller passes
 and gets back a nested dict, as with the reference client. A `TTYP` component's row layout
-is looked up by its `ROLLNAME`. `DDIF_FIELDINFO_GET` on a table type answers with no
-`DFIES_TAB` rows (`ddif_ttyp_response.bin`); the `RFC_GET_STRUCTURE_DEFINITION` fallback
-answers with the fields of its line type (`rgsd_bapiret2_t_response.bin`: `BAPIRET2_T` →
-`BAPIRET2`'s 14 fields). The reference client instead asks `DDIF_FIELDINFO_GET` with
-`UCLEN` and `LFIELDNAME` set and reads the line type from `DFIES_WA` and `LINES_DESCR`; that
-variant is not implemented. How deep values travel is in
-[Serialization](serialization.md#deep-parameters-xml-in-0x3c02-0x3c05).
+is looked up by its `ROLLNAME`.
+
+A table type has no `DFIES_TAB` rows (`ddif_ttyp_response.bin`). Its line is in `DFIES_WA`,
+the work-area export, which the server fills when the request declares it (`0x0205`):
+`DATATYPE` `STRU` with the row structure in `ROLLNAME`, or the elementary type of the rows
+with its `LENG`, `INTLEN` and `DECIMALS`. Live replies, 2026-11-26: `BAPIRET2_T` → `STRU`
+`BAPIRET2`; `DDFIELDS` → `STRU` `DFIES`; `STRING_TABLE` → `STRG`; `XSTRING_TABLE` → `RSTR`;
+`SDMI_TABNAMES` → `CHAR`, `LENG` 30; `SRT_INT_TAB` → `INT4`. So saprfclib asks a second time
+for a type that came back without rows, now declaring `DFIES_WA`, and resolves the line from
+it; the first request stays as captured. The reference client asks with `UCLEN` and
+`LFIELDNAME` set as well, and reads `LINES_DESCR` too. `RFC_GET_STRUCTURE_DEFINITION` remains
+the last fallback; it answers some table types with their line's fields
+(`rgsd_bapiret2_t_response.bin`) and refuses others (`DDFIELDS`: `TABLE_NOT_ACTIVE`). How deep
+values travel is in [Serialization](serialization.md#deep-parameters-xml-in-0x3c02-0x3c05).
 
 ##### Row width: the structure's padded width
 A structure's width is the end of its last field **rounded up to the largest alignment among

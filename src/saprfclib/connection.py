@@ -67,6 +67,7 @@ from saprfclib.invoke import (
     TrfcOrigin,
     _decode_error_text,
     _extract_name_value_pairs,
+    _iter_tlv_records,
     bgrfc_unit_id_bytes,
     bgrfc_unit_kind,
     build_bgrfc_request,
@@ -113,6 +114,7 @@ from saprfclib.transport import (
     connect_tcp,
     connect_tcp_async,
 )
+from saprfclib.xmlparam import ELEMENTARY_LINE
 
 if TYPE_CHECKING:
     from saprfclib.krb5.client import Principal
@@ -1604,6 +1606,64 @@ def _ddif_table_types(rows: list[tuple[Any, ...]]) -> list[str]:
     return names
 
 
+def _parse_ddif_wa(response: bytes) -> tuple[str, str, int, int, int] | None:
+    """(DATATYPE, ROLLNAME, LENG, INTLEN, DECIMALS) of a reply's DFIES_WA, if it has one.
+
+    DFIES_WA is one DFIES row (same offsets as DFIES_TAB). For a table type it
+    describes the line: DATATYPE STRU with the row structure in ROLLNAME, or the
+    elementary type of the rows. Live replies, 2026-11-26: BAPIRET2_T -> STRU
+    BAPIRET2; STRING_TABLE -> STRG; XSTRING_TABLE -> RSTR; SDMI_TABNAMES -> CHAR,
+    LENG 30; SRT_INT_TAB -> INT4 (tests/golden/serialization/deep/ddif_wa_*).
+    """
+    recs = list(_iter_records(_strip_gw_header(response)))
+    for i in range(len(recs) - 1):
+        tag, value = recs[i]
+        if tag != 0x0201 or value.decode("utf-16-le", "replace").rstrip("\x00 ") != "DFIES_WA":
+            continue
+        tag2, data = recs[i + 1]
+        if tag2 != 0x0203 or len(data) < _DDIF_MIN_ROW:
+            return None
+        try:
+            datatype = data[_DDIF_DATATYPE].decode("utf-16-le").rstrip(" \x00")
+            rollname = data[_DDIF_ROLLNAME].decode("utf-16-le").strip(" \x00")
+            leng = int(data[_DDIF_LENG].decode("utf-16-le").strip() or "0")
+            intlen = int(data[_DDIF_INTLEN].decode("utf-16-le").strip() or "0")
+            decimals = int(data[_DDIF_DECIMALS].decode("utf-16-le").strip() or "0")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        return datatype, rollname, leng, intlen, decimals
+    return None
+
+
+def _elementary_line(
+    tabname: str, datatype: str, leng: int, intlen: int, decimals: int
+) -> TypeDesc:
+    """The row layout of a table whose rows are not structures: one unnamed field."""
+    doubled = datatype in _DOUBLED_DATATYPES
+    field = FieldDesc(
+        name=ELEMENTARY_LINE,
+        rfctype=_DATATYPE_TO_RFCTYPE[datatype],
+        nuc_length=leng if doubled else intlen,
+        nuc_offset=0,
+        uc_length=leng * 2 if doubled else intlen,
+        uc_offset=0,
+        decimals=decimals,
+        unicode_mode=True,
+        direction=RFC_IMPORT,
+    )
+    return TypeDesc(
+        name=tabname, fields=[field], nuc_size=field.nuc_length, uc_size=field.uc_length
+    )
+
+
+def _iter_records(data: bytes) -> Iterator[tuple[int, bytes]]:
+    """TLV records of a reply, stopping quietly at a malformed one."""
+    try:
+        yield from _iter_tlv_records(data)
+    except ValueError:
+        return
+
+
 def _ddif_tree(
     rows: list[tuple[Any, ...]],
     i: int,
@@ -1683,7 +1743,7 @@ def _packed_type_desc_from_ddif(tabname: str, rows: list[tuple[Any, ...]]) -> Ty
     return TypeDesc(name=tabname, fields=fields, nuc_size=packed_nuc, uc_size=packed_uc)
 
 
-def _build_ddif_fieldinfo_desc(unicode_mode: bool) -> FunctionDesc:
+def _build_ddif_fieldinfo_desc(unicode_mode: bool, *, with_wa: bool = False) -> FunctionDesc:
     """The DDIF_FIELDINFO_GET interface, hardcoded to break the bootstrap cycle.
 
     Mirrors the reference client's call byte-for-byte in tag order: the three
@@ -1712,6 +1772,9 @@ def _build_ddif_fieldinfo_desc(unicode_mode: bool) -> FunctionDesc:
         parameters=[
             # 0x0205 declarations, in the reference client's order.
             _f("DDOBJTYPE", RFC_EXPORT, 12),
+            # DFIES_WA describes a table type's line, which DFIES_TAB leaves empty;
+            # asked for only then, so the ordinary request stays as captured.
+            *([_f("DFIES_WA", RFC_EXPORT, 0)] if with_wa else []),
             _f("DFIES_TAB", RFC_EXPORT, 0),
             _f("FIXED_VALUES", RFC_EXPORT, 0),
             # 0x0201/0x0203 importing values, in the reference client's order.
@@ -3293,22 +3356,48 @@ class Connection:
         raise_for_rfc_error(_strip_gw_header(response))
         rows = _parse_ddif_dfies_rows(response)
         if not rows:
-            return None
+            return self._table_type_via_ddif(tabname, unicode_mode)
         lines: dict[str, TypeDesc | None] = {}
         for line_type in _ddif_table_types(rows):
             lines[line_type] = self._line_type(line_type)
         return _build_type_desc_from_ddif(tabname, rows, lines.get)
 
+    def _table_type_via_ddif(self, tabname: str, unicode_mode: bool) -> TypeDesc | None:
+        """The row layout of a table type, from DDIF_FIELDINFO_GET's DFIES_WA.
+
+        A table type has no DFIES_TAB rows (ddif_ttyp_response.bin). Asked again with
+        DFIES_WA declared, the reply names its line: a structure, resolved like any
+        other, or an elementary type. None when neither, so the caller falls back.
+        """
+        desc = _build_ddif_fieldinfo_desc(unicode_mode, with_wa=True)
+        request_tlv = build_invoke_request(
+            "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
+        )
+        handle = self._session.handle or b"        "
+        frame = self._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
+        self._send_invoke_frame(frame)
+        response = _join_response_frames(self._transport.recv_message, "DDIF_FIELDINFO_GET")
+        raise_for_rfc_error(_strip_gw_header(response))
+        wa = _parse_ddif_wa(response)
+        if wa is None:
+            return None
+        datatype, rollname, leng, intlen, decimals = wa
+        if datatype == "STRU" and rollname:
+            return self._line_type(rollname)
+        if datatype in _DATATYPE_TO_RFCTYPE and datatype not in ("STRU", "TTYP"):
+            return _elementary_line(tabname, datatype, leng, intlen, decimals)
+        return None
+
     def _line_type(self, name: str) -> TypeDesc | None:
         """The row layout of a table type named by a TTYP component, cached per name.
 
         Resolved through _call_struct_bootstrap like any other type. For a table type,
-        DDIF_FIELDINFO_GET answers with no field rows, and the fallback
-        RFC_GET_STRUCTURE_DEFINITION answers with the fields of its line type (live,
-        2026-11-26: BAPIRET2_T came back as BAPIRET2's 14 fields, STFCCPLXT_T as
-        STFCCPLXT's 4; tests/golden/serialization/deep_*). A lookup that fails leaves
-        the component unresolved, so a value for it is refused with
-        IncompleteDescriptorError rather than guessed.
+        DDIF_FIELDINFO_GET answers with no field rows; _table_type_via_ddif then reads
+        its line from DFIES_WA. RFC_GET_STRUCTURE_DEFINITION, the last fallback, does
+        answer some table types with their line's fields (BAPIRET2_T) but refuses others
+        (DDFIELDS: TABLE_NOT_ACTIVE, live 2026-11-26). A lookup that fails leaves the
+        component unresolved, so a value for it is refused with IncompleteDescriptorError
+        rather than guessed.
         """
         if name in self._struct_desc_cache:
             return self._struct_desc_cache[name]
@@ -5703,11 +5792,34 @@ class AsyncConnection:
         raise_for_rfc_error(_strip_gw_header(response))
         rows = _parse_ddif_dfies_rows(response)
         if not rows:
-            return None
+            return await self._table_type_via_ddif(tabname, unicode_mode)
         lines: dict[str, TypeDesc | None] = {}
         for line_type in _ddif_table_types(rows):
             lines[line_type] = await self._line_type(line_type)
         return _build_type_desc_from_ddif(tabname, rows, lines.get)
+
+    async def _table_type_via_ddif(self, tabname: str, unicode_mode: bool) -> TypeDesc | None:
+        """Async twin of Connection._table_type_via_ddif."""
+        desc = _build_ddif_fieldinfo_desc(unicode_mode, with_wa=True)
+        request_tlv = build_invoke_request(
+            "DDIF_FIELDINFO_GET", desc, _ddif_fieldinfo_params(tabname)
+        )
+        handle = self._session.handle or b"        "
+        frame = Connection._build_invoke_frame(handle, request_tlv, conn_idx=self._session.conn_idx)
+        await self._send_request(frame)
+        response = await _join_response_frames_async(
+            self._transport.recv_message, "DDIF_FIELDINFO_GET"
+        )
+        raise_for_rfc_error(_strip_gw_header(response))
+        wa = _parse_ddif_wa(response)
+        if wa is None:
+            return None
+        datatype, rollname, leng, intlen, decimals = wa
+        if datatype == "STRU" and rollname:
+            return await self._line_type(rollname)
+        if datatype in _DATATYPE_TO_RFCTYPE and datatype not in ("STRU", "TTYP"):
+            return _elementary_line(tabname, datatype, leng, intlen, decimals)
+        return None
 
     async def _line_type(self, name: str) -> TypeDesc | None:
         """Async twin of Connection._line_type."""

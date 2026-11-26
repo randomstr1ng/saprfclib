@@ -422,6 +422,21 @@ tag), so a reader joins the records of a bracket before parsing.
 | UTCLONG | the signed 64-bit value of the binary form | `639314660961234568`; initial `0` |
 | structure | one element per component, in layout order | |
 | table | one `<item>` element per row; an empty table is an empty element | `<IT></IT>` |
+| table of elementary rows | the row's value as the item's text | `<item>eins</item>`, `<item>-2</item>`, `<item>AAE=</item>` |
+
+**Component names in a namespace.** Each `/` is written as `_-`: the component
+`/AIF/NSMSGCAT` travels as `<_-AIF_-NSMSGCAT>`, from the client and from the server
+(`deep2_reference_*`). A DDIC name cannot contain `-`, so the mapping reverses exactly.
+
+**Tables of elementary rows.** A table type whose line is not a structure (`STRING_TABLE`,
+`XSTRING_TABLE`, `SDMI_TABNAMES` with CHAR30 rows, `SRT_INT_TAB` with INT4 rows) carries the
+value of each row directly in its `<item>`, in the same form as a component of that type.
+saprfclib passes and returns such a table as a list of plain values.
+
+**Inside tRFC and qRFC units.** The serialized call in `ARFC_DEST_SHIP`'s DATA rows carries
+deep parameters in the same brackets ([tRFC](trfc.md#a-serialized-call)). Captured from the
+reference client submitting a tRFC and a qRFC unit; both units ran and stored the values sent,
+read back afterwards, and so did the same units from saprfclib (`deep_unit_calls.json`).
 
 **Escaping.** The client writes `&`, `<`, `>` as `&#38;`, `&#60;`, `&#62;` and every other
 character as itself: newline, tab, `]]>` (as `]]&#62;`), non-ASCII and characters outside the
@@ -776,13 +791,8 @@ probe module would settle it with one more case writing such a byte pattern.
 
 ### Deep parameters: what is not captured
 
-- **tRFC, qRFC and bgRFC units.** No capture of a deep parameter inside a unit; refused with
-  `NotImplementedError`.
-- **Namespaced component names** (`/ABC/FIELD`). How such a name is written as an element
-  is not captured; a deep value with one is refused.
-- **Tables whose line type is not a structure** (a table of STRING, for example). No capture
-  of the row form; the layout stays unresolved and a value is refused with
-  `IncompleteDescriptorError`.
+- **bgRFC units.** A bgRFC submit carries no payload yet (#34), so neither flat nor deep
+  values go into one.
 - **SAP's binary BASXML** (`BXML` magic), issue #18: a different format, still refused and
   still never seen. Switching basXML on in the destination (`BASXML_ACTIVE='1'`) did not
   produce it: the registered server, whether the reference SDK's or saprfclib's, received the
