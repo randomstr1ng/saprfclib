@@ -48,8 +48,8 @@ __all__ = ["encode", "decode"]
 # RFCTYPE integer constants: the library's numbering of the types. On the wire the
 # metadata names a type by its EXID character (metadata._EXID_TO_RFCTYPE); the numbers
 # match the NW RFC SDK's public RFCTYPE values. INT8 (31) and UTCLONG (32) are captured
-# (tests/golden/serialization/int8_utclong.json); 33-40 are [ASSUMED], see
-# docs/protocol/serialization.md [A1].
+# (tests/golden/serialization/int8_utclong.json); 33-40 are not seen on any release
+# saprfclib has met, see docs/protocol/serialization.md [A1].
 # --------------------------------------------------------------------------- #
 RFCTYPE_CHAR = 0
 RFCTYPE_DATE = 1
@@ -89,11 +89,11 @@ RFCTYPE_CDAY = 40
 # 10 32 54 76 98 ba dc fe, and the reference client sent -2 as fe ff .. ff
 # (tests/golden/serialization/int8_utclong.json, live 2026-11-12).
 # UTCLONG has its own encoding, see _encode_utclong.
-# Types 33-40: [ASSUMED] little-endian integers of 8 (UTCSECOND, UTCMINUTE), 4 (DTDAY,
-# DTWEEK, DTMONTH, TSECOND) or 2 (TMINUTE, CDAY) bytes, by analogy with INT/INT2/INT8.
-# Kernel 793's dictionary has no data type for any of them (domain DATATYPE lists
-# INT8, UTCL, DATN, TIMN but none of these), so no RFC interface on that release can
-# carry one; a release that has them, and a function module using them, would settle it.
+# Types 33-40: binary integers of 8 (UTCSECOND, UTCMINUTE), 4 (DTDAY, DTWEEK, DTMONTH,
+# TSECOND) or 2 (TMINUTE, CDAY) bytes in the sender's integer format, converted like
+# INT, INT2 and INT8 when it differs from the receiver's: little-endian from every
+# little-endian sender (docs/protocol/serialization.md [A1]). Signed is [ASSUMED].
+# No release saprfclib has met has them (kernel 793's and 916's dictionaries do not).
 # INT4 little-endian is CONFIRMED, not inferred: the STFC_CHANGING golden pair
 # settles it by arithmetic. The request carries START_VALUE=0a000000 and
 # COUNTER=01000000; the response carries RESULT=0b000000 and COUNTER=02000000. The
@@ -106,14 +106,14 @@ _INT_FORMATS: dict[int, str] = {
     RFCTYPE_INT: "<i",  # signed 32-bit
     RFCTYPE_INT2: "<h",  # signed 16-bit
     RFCTYPE_INT8: "<q",  # signed 64-bit, confirmed above
-    RFCTYPE_UTCSECOND: "<q",  # [ASSUMED]
-    RFCTYPE_UTCMINUTE: "<q",  # [ASSUMED]
-    RFCTYPE_DTDAY: "<i",  # [ASSUMED]
-    RFCTYPE_DTWEEK: "<i",  # [ASSUMED]
-    RFCTYPE_DTMONTH: "<i",  # [ASSUMED]
-    RFCTYPE_TSECOND: "<i",  # [ASSUMED]
-    RFCTYPE_TMINUTE: "<h",  # [ASSUMED]
-    RFCTYPE_CDAY: "<h",  # [ASSUMED]
+    RFCTYPE_UTCSECOND: "<q",
+    RFCTYPE_UTCMINUTE: "<q",
+    RFCTYPE_DTDAY: "<i",
+    RFCTYPE_DTWEEK: "<i",
+    RFCTYPE_DTMONTH: "<i",
+    RFCTYPE_TSECOND: "<i",
+    RFCTYPE_TMINUTE: "<h",
+    RFCTYPE_CDAY: "<h",
 }
 
 # GAP-B-01 (DecFloat16/34) is CLOSED. Source: golden fixture

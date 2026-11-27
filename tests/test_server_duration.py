@@ -145,3 +145,11 @@ def test_call_stats_defaults_to_none() -> None:
 
     stats = CallStats(func_name="X", duration_s=0.1, request_bytes=1, response_bytes=2)
     assert stats.server_duration_s is None
+
+
+def test_a_partner_below_release_7_reports_milliseconds() -> None:
+    frame = tr(0x0667, struct.pack("<d", 250.0))
+    assert extract_server_duration(frame, "640 ") == 0.25
+    assert extract_server_duration(frame, "753 ") == 250.0 / 1e6
+    assert extract_server_duration(frame, "916 ") == 250.0 / 1e6
+    assert extract_server_duration(frame, "") == 250.0 / 1e6

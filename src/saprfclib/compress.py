@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import struct
 import zlib
-from typing import Any
+from typing import Any, Literal
 
 __all__ = [
     "CompressError",
@@ -35,7 +35,7 @@ __all__ = [
     "sapcompress_compress_lzc",
     "sapcompress_decompress",
     "lz4_block_decompress",
-    "sap_lz4_frame_decompress",
+    "lz4_packages_decompress",
 ]
 
 # ---------------------------------------------------------------------------
@@ -975,7 +975,7 @@ def sapcompress_decompress(data: bytes, out_length: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def lz4_block_decompress(src: bytes, max_output: int = 0) -> bytes:
+def lz4_block_decompress(src: bytes, max_output: int = 0, dictionary: bytes = b"") -> bytes:
     """Decompress an LZ4 block (no frame header/checksum — raw block only).
 
     `max_output` caps the output size; pass 0 for no cap. The cap is enforced before
@@ -983,15 +983,19 @@ def lz4_block_decompress(src: bytes, max_output: int = 0) -> bytes:
     far more output than the caller allows is refused without that output being
     built first: memory use stays bounded by the caller, not by the peer.
 
+    `dictionary` is data the block's matches may reach back into, as if it preceded
+    the output (LZ4's external dictionary); it is not part of the result.
+
     Raises DecompressError on malformed input or when the output would exceed the cap.
     """
-    out = bytearray()
+    base = len(dictionary)
+    out = bytearray(dictionary)
 
     def check_room(extra: int) -> None:
-        if max_output and len(out) + extra > max_output:
+        if max_output and len(out) - base + extra > max_output:
             raise DecompressError(
                 f"LZ4 block: output would exceed {max_output} bytes "
-                f"({len(out)} written, {extra} more requested)"
+                f"({len(out) - base} written, {extra} more requested)"
             )
 
     pos = 0
@@ -1045,7 +1049,8 @@ def lz4_block_decompress(src: bytes, max_output: int = 0) -> bytes:
             copy_from = len(out) - offset
             if copy_from < 0:
                 raise DecompressError(
-                    f"LZ4 block: offset {offset} exceeds output length {len(out)}"
+                    f"LZ4 block: offset {offset} exceeds output length {len(out) - base}"
+                    + (f" and dictionary {base}" if base else "")
                 )
             check_room(match_len)
             for i in range(match_len):
@@ -1056,54 +1061,63 @@ def lz4_block_decompress(src: bytes, max_output: int = 0) -> bytes:
     except Exception as exc:
         raise DecompressError(f"LZ4 block decompression error: {exc}") from exc
 
-    return bytes(out)
+    return bytes(out[base:])
 
 
 # ---------------------------------------------------------------------------
-# SAP LZ4 frame decompressor (wRFC / NgRFC WebSocket path)
+# LZ4 packages of the column-wise serialization (0x5000 / 0x5001)
 # ---------------------------------------------------------------------------
 
-_SAP_LZ4_MARKER = 0x34  # ASCII '4' [ASSUMED] — see sap_lz4_frame_decompress
 # Upper bound on LZ4 output per input byte. Not a wire value: it follows from the block
 # format, where every length-extension byte adds at most 255 to a length.
 _LZ4_MAX_EXPANSION = 255
+# How far back a package may reach into the output of the one before it.
+_LZ4_DICTIONARY = 0x10000
 
 
-def sap_lz4_frame_decompress(data: bytes) -> bytes:
-    """Decompress a SAP wRFC LZ4 frame.
+def lz4_packages_decompress(data: bytes, byteorder: Literal["little", "big"] = "little") -> bytes:
+    """Decompress consecutive LZ4 packages, as the column-wise serialization sends them.
 
-    Frame layout [ASSUMED] — no captured LZ4-compressed wRFC response exists in this
-    repository; a capture of one would settle the marker and both length fields:
-      [0]    0x34 '4' marker byte
-      [1-4]  LE uint32 uncompressed length
-      [5-8]  LE uint32 compressed length
-      [9..]  LZ4 block data (compressed length bytes)
+    Each package is the uncompressed length and the compressed length, 4-byte integers
+    in the sender's integer format (``byteorder``, from the logon's ``0x0101`` byte 1),
+    then one LZ4 block. A package after the first may refer back into the last 64 KB of
+    the one before it, as LZ4's streaming mode does. There is no marker byte.
 
     Raises DecompressError on any format or decompression error.
     """
-    if not data:
-        raise DecompressError("empty SAP LZ4 frame")
-    if data[0] != _SAP_LZ4_MARKER:
-        raise DecompressError(f"SAP LZ4 frame: expected marker 0x34, got 0x{data[0]:02x}")
-    if len(data) < 9:
-        raise DecompressError(f"SAP LZ4 frame too short: {len(data)} bytes")
-    uncomp_len = struct.unpack_from("<I", data, 1)[0]
-    comp_len = struct.unpack_from("<I", data, 5)[0]
-    if len(data) < 9 + comp_len:
-        raise DecompressError(
-            f"SAP LZ4 frame truncated: need {9 + comp_len} bytes, have {len(data)}"
+    out = bytearray()
+    previous = b""
+    pos = 0
+    while pos < len(data):
+        if len(data) - pos < 8:
+            raise DecompressError(f"LZ4 package header cut short at byte {pos}")
+        uncomp_len = int.from_bytes(data[pos : pos + 4], byteorder, signed=True)
+        comp_len = int.from_bytes(data[pos + 4 : pos + 8], byteorder, signed=True)
+        pos += 8
+        if uncomp_len < 0 or comp_len < 0:
+            raise DecompressError("LZ4 package with a negative length")
+        if len(data) - pos < comp_len:
+            raise DecompressError(
+                f"LZ4 package truncated: need {comp_len} bytes, have {len(data) - pos}"
+            )
+        # No LZ4 block can expand by more than 255 bytes per input byte: a length is
+        # extended one byte at a time, each adding at most 255. A declared size beyond
+        # that is impossible, and refusing it here keeps a forged header from setting a
+        # multi-gigabyte cap for the decoder below.
+        if uncomp_len > _LZ4_MAX_EXPANSION * max(comp_len, 1):
+            raise DecompressError(
+                f"LZ4 package declares {uncomp_len} bytes from {comp_len} compressed bytes, "
+                f"more than an LZ4 block can produce"
+            )
+        block = data[pos : pos + comp_len]
+        pos += comp_len
+        result = lz4_block_decompress(
+            block, max_output=uncomp_len, dictionary=previous[-_LZ4_DICTIONARY:]
         )
-    block = data[9 : 9 + comp_len]
-    # No LZ4 block can expand by more than 255 bytes per input byte: a length is
-    # extended one byte at a time, each adding at most 255. A declared size beyond
-    # that is impossible, and refusing it here keeps a forged header from setting a
-    # multi-gigabyte cap for the decoder below.
-    if uncomp_len > _LZ4_MAX_EXPANSION * comp_len:
-        raise DecompressError(
-            f"SAP LZ4 frame declares {uncomp_len} bytes from {comp_len} compressed bytes, "
-            f"more than an LZ4 block can produce"
-        )
-    result = lz4_block_decompress(block, max_output=uncomp_len)
-    if len(result) != uncomp_len:
-        raise DecompressError(f"SAP LZ4 decompressed {len(result)} bytes, expected {uncomp_len}")
-    return result
+        if len(result) != uncomp_len:
+            raise DecompressError(
+                f"LZ4 package decompressed to {len(result)} bytes, expected {uncomp_len}"
+            )
+        out += result
+        previous = result
+    return bytes(out)

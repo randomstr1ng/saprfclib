@@ -22,7 +22,7 @@ from hypothesis import strategies as st
 from saprfclib.compress import (
     DecompressError,
     lz4_block_decompress,
-    sap_lz4_frame_decompress,
+    lz4_packages_decompress,
     sapcompress_decompress,
 )
 from saprfclib.invoke import _extract_name_value_pairs
@@ -239,53 +239,44 @@ class TestLZ4OutputBound:
 # ---------------------------------------------------------------------------
 
 
-class TestSapLZ4Frame:
-    def _make_frame(self, data: bytes) -> bytes:
-        block = bytes([data.__len__() << 4]) + data if len(data) <= 15 else None
-        if block is None:
-            # fall back for longer data: literal-only token
-            n = len(data)
-            block = bytes([0xF0]) + (n - 15).to_bytes(1, "little") + data
-            if n - 15 > 255:
-                extra_bytes = bytearray()
-                remaining = n - 15
-                while remaining >= 255:
-                    extra_bytes.append(255)
-                    remaining -= 255
-                extra_bytes.append(remaining)
-                block = bytes([0xFF]) + bytes(extra_bytes) + data
-        uncomp = len(data)
-        comp = len(block)
-        return b"\x34" + struct.pack("<II", uncomp, comp) + block
+class TestLz4Packages:
+    """LZ4 packages of the column-wise serialization: two lengths, then a block."""
 
-    def test_hello(self):
-        frame = b"\x34" + struct.pack("<II", 5, 6) + bytes([0x50]) + b"HELLO"
-        assert sap_lz4_frame_decompress(frame) == b"HELLO"
+    @staticmethod
+    def _package(plain_len: int, block: bytes, order: str = "<") -> bytes:
+        return struct.pack(f"{order}ii", plain_len, len(block)) + block
 
-    def test_wrong_marker_raises(self):
-        bad = b"\x33" + struct.pack("<II", 5, 6) + bytes([0x50]) + b"HELLO"
-        with pytest.raises(DecompressError, match="marker"):
-            sap_lz4_frame_decompress(bad)
+    def test_one_package(self):
+        assert lz4_packages_decompress(self._package(5, bytes([0x50]) + b"HELLO")) == b"HELLO"
 
-    def test_empty_input_raises(self):
-        with pytest.raises(DecompressError):
-            sap_lz4_frame_decompress(b"")
+    def test_a_later_package_reaches_into_the_one_before(self):
+        first = self._package(10, bytes([0xA0]) + b"HELLOWORLD")
+        # No literals, a 4-byte match 10 back (into the first package), then "X".
+        second = self._package(5, bytes([0x00]) + struct.pack("<H", 10) + bytes([0x10]) + b"X")
+        assert lz4_packages_decompress(first + second) == b"HELLOWORLDHELLX"
 
-    def test_truncated_raises(self):
-        with pytest.raises(DecompressError):
-            sap_lz4_frame_decompress(b"\x34\x05\x00\x00")
+    def test_big_endian_lengths(self):
+        data = self._package(5, bytes([0x50]) + b"HELLO", ">")
+        assert lz4_packages_decompress(data, byteorder="big") == b"HELLO"
 
-    def test_comp_len_exceeds_data_raises(self):
-        # claim 100 compressed bytes but only have 3
-        frame = b"\x34" + struct.pack("<II", 5, 100) + b"ABC"
+    def test_empty_input_is_empty(self):
+        assert lz4_packages_decompress(b"") == b""
+
+    def test_header_cut_short_raises(self):
+        with pytest.raises(DecompressError, match="cut short"):
+            lz4_packages_decompress(b"\x05\x00\x00\x00")
+
+    def test_block_cut_short_raises(self):
         with pytest.raises(DecompressError, match="truncated"):
-            sap_lz4_frame_decompress(frame)
+            lz4_packages_decompress(struct.pack("<ii", 5, 100) + b"ABC")
 
-    def test_uncomp_len_mismatch_raises(self):
-        # Build a valid block for 'HELLO' but declare uncomp_len=9
-        frame = b"\x34" + struct.pack("<II", 9, 6) + bytes([0x50]) + b"HELLO"
+    def test_wrong_declared_length_raises(self):
         with pytest.raises(DecompressError, match="expected"):
-            sap_lz4_frame_decompress(frame)
+            lz4_packages_decompress(self._package(9, bytes([0x50]) + b"HELLO"))
+
+    def test_negative_length_raises(self):
+        with pytest.raises(DecompressError, match="negative"):
+            lz4_packages_decompress(struct.pack("<ii", -1, 1) + b"\x00")
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +479,6 @@ def test_lzc_honours_a_non_default_code_length_limit() -> None:
 def test_a_frame_declaring_more_than_lz4_can_produce_is_refused() -> None:
     """A forged header must not set a multi-gigabyte cap for the decoder (#76)."""
     block = bytes([0x50]) + b"HELLO"
-    frame = b"\x34" + struct.pack("<II", 0xFFFFFFFF, len(block)) + block
+    frame = struct.pack("<iI", 0x7FFFFFFF, len(block)) + block
     with pytest.raises(DecompressError, match="more than an LZ4 block can produce"):
-        sap_lz4_frame_decompress(frame)
+        lz4_packages_decompress(frame)

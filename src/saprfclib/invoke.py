@@ -2050,6 +2050,22 @@ def _basxml_open_tag(chunk: bytes) -> str | None:
     return None if name.startswith("/") or not name else name
 
 
+def _expand_compressed_row(value: bytes, row_size: int, table: str) -> bytes:
+    """A 0x0304 row at its full width: the rest filled with its last byte, repeated.
+
+    A sender cuts a row after the last byte that differs from what follows, so a row
+    ending in a run of one byte value goes out short; the receiver restores the run
+    from the row width 0x0302 declares. A row already at full width is unchanged.
+    ABAP sends ARFC_DEST_SHIP's STATE rows this way: 955 of 972 bytes, the last 17
+    zeros (tests/golden/trfc/trfc_inbound.json).
+    """
+    if len(value) >= row_size:
+        return value
+    if not value:
+        raise ValueError(f"TABLE {table!r}: an empty compressed row (0x0304)")
+    return value + value[-1:] * (row_size - len(value))
+
+
 def _extract_name_value_pairs(
     data: bytes,
     dm_table_names: dict[int, str] | None = None,
@@ -2091,6 +2107,7 @@ def _extract_name_value_pairs(
     in_table: bool = False
     table_rows: bytearray = bytearray()
     table_lz: list[bytes] = []  # 0x0305 fragments of one compressed stream
+    row_size = 0  # the current table's declared row width (0x0302)
     basxml_chunks: dict[str, list[bytes]] = {}  # table name -> 0x3c05 fragments
     basxml_current: str | None = None  # None outside a block, _BASXML_PENDING inside
     # one whose name is not yet known
@@ -2161,6 +2178,7 @@ def _extract_name_value_pairs(
             in_table = True
             table_rows = bytearray()
             table_lz = []
+            row_size = 0
 
         # --- BASXML-encoded table ---
         # An empty 0x3c02 brackets the block on both sides; the fragments between are
@@ -2187,19 +2205,21 @@ def _extract_name_value_pairs(
 
         # --- Table data tags ---
         elif tag == _TAG_TABLE_INFO and in_table:  # 0x0302
-            # The row COUNT is what is worth carrying out of here, not the row
-            # size beside it. The size reports the padded DDIC width on both
-            # serialization paths, so it is wrong whenever the server packed the
-            # rows instead; the count is a tally of what was actually sent and
-            # cannot disagree with the serializer. The width is then measured
-            # from the buffer -- see codec._decode_table.
+            # The row COUNT is what is worth carrying out of here; the size beside it
+            # reports the padded DDIC width on both serialization paths, so it is
+            # wrong whenever the server packed the rows instead. The width is then
+            # measured from the buffer -- see codec._decode_table. The size is used
+            # only to restore 0x0304 rows to full width (_expand_compressed_row).
+            if len(value) >= 4:
+                row_size = struct.unpack_from(">I", value, 0)[0]
             if row_counts_out is not None and current_name is not None and len(value) >= 8:
                 _declared_size, declared_count = struct.unpack_from(">II", value, 0)
                 if declared_count > 0:
                     row_counts_out[current_name] = declared_count
-        elif tag in (_TAG_TABLE_CONTENT, _TAG_TABLE_CONTENT_ALT) and in_table:  # 0x0303/0x0304
-            # CONFIRMED: both tags carry raw uncompressed row bytes (the deserializer path)
+        elif tag == _TAG_TABLE_CONTENT and in_table:  # 0x0303: one row as it is
             table_rows.extend(value)
+        elif tag == _TAG_TABLE_CONTENT_ALT and in_table:  # 0x0304: one compressed row
+            table_rows.extend(_expand_compressed_row(value, row_size, current_name or ""))
         elif tag == _TAG_TABLE_CONTENT_LZ and in_table:  # 0x0305
             # One record is a fragment, never a self-contained block — collect and
             # decompress once the table ends (see decompress_table_stream).
@@ -2283,8 +2303,18 @@ def _decode_utf16le(value: bytes | None) -> str:
 _TAG_SERVER_DURATION = 0x0667
 
 
-def extract_server_duration(tlv: bytes) -> float | None:
+def _duration_unit(kernel_rel: str | None) -> float:
+    """Units of 0x0667 per second: 1e3 for a partner kernel release below 7, else 1e6."""
+    first = (kernel_rel or "").strip()[:1]
+    return 1_000.0 if first.isdigit() and first < "7" else 1_000_000.0
+
+
+def extract_server_duration(tlv: bytes, kernel_rel: str | None = None) -> float | None:
     """Server-side duration of the answered call, in **seconds**, or None.
+
+    The value is in microseconds, and in milliseconds when the partner's kernel
+    release (``kernel_rel``, from the logon reply's 0x0013) begins with a digit below
+    7. Without a release, microseconds.
 
     ``None`` means the tag was not in this response, and it means exactly that.
     No release rule has been established that requires the field, so absence is
@@ -2312,9 +2342,9 @@ def extract_server_duration(tlv: bytes) -> float | None:
         if pos + length > n:
             break
         if tag == _TAG_SERVER_DURATION and length == 8:
-            # Microseconds on the wire; seconds in the public surface, to match
-            # CallStats.duration_s so the two are directly comparable.
-            found = struct.unpack_from("<d", tlv, pos)[0] / 1_000_000.0
+            # Seconds in the public surface, to match CallStats.duration_s so the
+            # two are directly comparable.
+            found = struct.unpack_from("<d", tlv, pos)[0] / _duration_unit(kernel_rel)
         pos += length
         if pos + 2 <= n and struct.unpack_from(">H", tlv, pos)[0] == tag:
             pos += 2

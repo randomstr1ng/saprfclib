@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from saprfclib.invoke import _iter_tlv_records
-from saprfclib.server import RfcServer, _extract_name_value_pairs, _rows_present, _trfc_luw
+from saprfclib.server import RfcServer, _extract_name_value_pairs, _rows, _trfc_luw
 
 from ._trfc_fixture import SHIP, STFC_CONNECTION, forged_inbound_trfc, trfc_descriptors
 
@@ -53,7 +53,7 @@ def _state(side: str, case: str) -> list[dict[str, Any]]:
     counts: dict[str, int] = {}
     raw = dict(_extract_name_value_pairs(_frame(side, case, "ship"), row_counts_out=counts))
     field = next(f for f in SHIP.parameters if f.name == "STATE")
-    return _rows_present(raw["STATE"], field, counts["STATE"])
+    return _rows(raw["STATE"], field, counts["STATE"])
 
 
 # --------------------------------------------------------------------------- #
@@ -79,11 +79,14 @@ def test_abap_sends_the_luw_in_state_and_data_rows(case: str, calls: list[str]) 
         assert names == [name]
 
 
-def test_state_rows_reach_through_arfcreserv_and_cut_hash_short() -> None:
-    # 0x0304 records of 955 bytes where ARFCRSTATE is 972: HASH, RAW(40) at 932,
-    # arrives as 23 bytes and is left out rather than read from a guess.
+def test_state_rows_are_compressed_and_restored_to_full_width() -> None:
+    # 0x0304 records of 955 bytes where ARFCRSTATE is 972: the row is cut after its
+    # last byte, 0x00, and restored by repeating it. HASH is RAW(40) at 932.
+    raw = bytes.fromhex(FX["reference"]["one_call"]["ship"])
+    records = [v for t, v in _iter_tlv_records(raw) if t == 0x0304]
+    assert {len(r) for r in records} == {955} and records[0][-1] == 0
     row = _state("reference", "one_call")[0]
-    assert "HASH" not in row
+    assert row["HASH"][:23] == records[0][932:] and row["HASH"][23:] == bytes(17)
     assert row["ARFCDEST"].strip() == "ZSAPRFCLIB_BXML"
     assert row["ARFCFNAM"].strip() == "STFC_CONNECTION"
 
@@ -207,3 +210,13 @@ def test_a_confirm_without_a_readable_callid_is_refused() -> None:
     )
     assert "ARFC_DEST_CONFIRM" in _failure(server.dispatch_inbound(bad))
     assert events == []
+
+
+def test_a_compressed_row_is_restored_by_repeating_its_last_byte() -> None:
+    from saprfclib.invoke import _expand_compressed_row
+
+    assert _expand_compressed_row(b"ab\x00", 6, "T") == b"ab\x00\x00\x00\x00"
+    assert _expand_compressed_row(b"a b ", 7, "T") == b"a b    "
+    assert _expand_compressed_row(b"full", 4, "T") == b"full"  # nothing to restore
+    with pytest.raises(ValueError, match="empty compressed row"):
+        _expand_compressed_row(b"", 4, "T")

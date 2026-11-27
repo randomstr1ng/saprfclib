@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **RFC types 33–40 are read and written.** Their metadata type codes (`n w d 7 x t i c`) are
+  mapped, and their values travel as integers of 8, 4 or 2 bytes in the sender's integer
+  format, like INT8. No release saprfclib has been run against has such a type.
+
 - **`RfcServer` receives tRFC and qRFC LUWs from ABAP** (#122). ABAP sends a LUW to a
   registered server as `ARFC_DEST_SHIP` with the `STATE` and `DATA` rows a client submits; the
   server reads the TID and the calls from them, with the system's own row layouts given once
@@ -116,6 +120,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The LZ4 decoder now reads the packages of the column-wise serialization: two 4-byte lengths
+  in the sender's integer format and a block that may refer back into the previous package
+  (`compress.lz4_packages_decompress`). It replaces `sap_lz4_frame_decompress`, which expected a
+  marker byte this format does not have; nothing in the library used it.
+- `parse_sapms_server_list` checks the server list's version and refuses one whose entries are
+  not the 160-byte version 4 it reads, instead of slicing them as if they were.
+
 - An unsupplied optional flat CHANGING parameter is now sent with its initial value, and a
   deep one left out, as the reference client does; requests are byte-identical to its. ABAP
   treats a declared CHANGING parameter as supplied either way, so results do not change.
@@ -128,6 +139,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md`.
 
 ### Fixed
+
+- **Compressed table rows (`0x0304`) are restored to full width.** A sender cuts such a row
+  after its last byte and the receiver repeats that byte to the declared width; saprfclib took
+  the short row as it came, so a table sent this way (ABAP's `ARFC_DEST_SHIP` `STATE` rows)
+  decoded misaligned, and inbound tRFC had to skip the last field (`HASH`). It now has it.
+- **Server call duration from an older partner.** Tag `0x0667` is in milliseconds when the
+  partner's kernel release begins with a digit below 7, and microseconds otherwise; saprfclib
+  always read microseconds. `extract_server_duration` now takes the partner's release.
 
 - **A failed bgRFC unit is reported as `ROLLED_BACK`.** `get_unit_state()` knew the failure
   state as 22209, a value no system was seen to send; a live unit whose call failed answers
@@ -273,6 +292,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   damaged-reply case and the reconnecting tRFC retry.
 
 ### Documentation
+
+- framing.md: the meaning of the gateway-header bytes (request types, flag bytes, CPI-C and SAP
+  return codes), of tags `0x0128`/`0x0131` (SAP Passport), `0x0160`, `0x0337`, `0x0421`,
+  `0x0670`/`0x0671` (SSO ticket), `0x4000`–`0x4004` (binary basXML) and `0x5000`/`0x5001`
+  (column-wise serialization), and the full message-server header and server-list entry.
+  handshake.md: what each byte of `0x0101` means.
 
 - `docs/protocol/serialization.md` lists every RFC type (0–42) with its metadata type code,
   the type codes that cannot travel over RFC, and how each DDIC data type is sent.

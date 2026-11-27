@@ -107,46 +107,63 @@ APPC (Advanced Program-to-Program Communications) transport layer that CPI-C use
 
 ```
 Offset  Length  Notes
-  0      2      GW message type: 06=data CB=RFC_DATA (06CE and 0609 also observed)
-  2      2      Protocol version: 02 00
+  0      1      header version: 0x06 on every frame
+  1      1      request type (below): 0xCB on RFC data frames
+  2      1      connection protocol: 0x02 on every RFC frame
+  3      1      mode: 0x00
   4      4      Max NI message size BE uint32 (FF FF 00 00 in client frames)
   8      2      zero in all 85 frames observed
- 10      1      Sub-protocol version (0x01 in registration response)
+ 10      1      info flags 2: 0x01 a long LU name follows (0x0601 frames), 0x02 a
+                  long host address, 0x04 immediate, 0x08 SNC active, 0x20 SNC
+                  initialisation phase, 0x40 stateless, 0x80 no state check
  11      2      zero in all 85 frames observed
  13      1      FRAME SEQUENCE NUMBER within one response, 1-based. 0 on client
                   requests and on empty 06CE frames. Confirmed: a 22-frame reply
                   numbered its frames 1..22 consecutively with no exceptions.
  14      2      zero in all 85 frames observed
- 16      1      1 on server responses, 0 on client requests (all 85 frames)
+ 16      1      info flags 3: 0x01 the frame carries a codepage (set on server
+                  responses, which carry "4103" at [69:73]; 0 on client requests,
+                  all 85 frames), 0x02 asynchronous RFC, 0x04 hard cancel, 0x08 soft
+                  cancel, 0x10 GUI timeout, 0x20 terminal I/O error, 0x40 extended
+                  init options, 0x80 distributed trace (0xC0 on 0x0601)
  17      4      BE int32. 500 on a frame that completes the response, -1 on one
                   that does not. See "multi-frame responses" below: this tracks
                   continuation but must NOT drive reassembly, because it also
                   reads -1 on complete terminal replies.
- 21      1      Frame sub-type (0x06 in registration response; echoed by the peer)
+ 21      1      info flags 4: 0x01 debug control, 0x02 streaming, 0x04 an RFC
+                  destination follows (0x04 in a client's 0x0601, 0x06 in the
+                  gateway's reply)
  22      2      zero in all 85 frames observed
  24      4      CPIC handle/sequence (0x00000175 = 373 in registration response)
  28      2      zero in all 85 frames observed
- 30      2      BE uint16 POSITION MARKER, consistent across 76 frames:
+ 30      1      info flags: 0x01 synchronous CPI-C function, 0x02 with host
+                  address, 0x04 an SAP parameter header follows, 0x08 synchronous
+                  request, 0x10 with error information, 0x20/0x40 data with
+                  terminal output/input
+ 31      1      vector: what the sender did — 0x01 initialise conversation, 0x02
+                  allocate, 0x04 send data, 0x08 receive, 0x10 flush.
+                Bytes 30–31 together, consistent across 76 frames:
                   0x0108  this frame does not complete the response — the first
                           frame of a multi-frame reply, and also a single-frame
                           reply that does not complete the exchange (a refused
-                          logon, an incomplete signon)
+                          logon, an incomplete signon): the sender goes on to
+                          receive
                   0x0100  a middle frame of a multi-frame reply
                   0x050C  this frame completes the response (including every
-                          single-frame reply, and client requests)
- 32      2      zero in all 85 frames observed
- 34      1      0x00 in every GW-framed golden fixture. Meaning not established.
- 35      1      0x12 on every frame that ends a conversation by failure or
-                  cancel, 0 on all others. Seen on the two refusals in the golden
-                  fixtures (cpic_logon_error_response, signon_incomplete_752_response)
-                  and, over 3122 frames of live captures on 2026-11-26/27: a refused
+                          single-frame reply, and client requests): data sent,
+                          then receive
+ 32      4      BE int32: the CPI-C return code. 0 on all frames but those ending
+                  a conversation by failure or cancel, which carry 18, "deallocated
+                  normal": the two refusals in the golden fixtures
+                  (cpic_logon_error_response, signon_incomplete_752_response) and,
+                  over 3122 frames of live captures on 2026-11-26/27, a refused
                   logon, ABAP reporting a short dump (0x0402), ABAP's answer to a
                   client that reported a failing callback handler, and the gateway's
-                  cancel acknowledgement 0x06D6 (8 frames). An ABAP exception (0x0401),
-                  a normal reply, has 0.
- 36      4      zero in every frame captured, the failures and cancels above
-                  included. Meaning not established.
- 40      8      GW connection handle, 8 ASCII characters (session.py
+                  cancel acknowledgement 0x06D6 (8 frames). An ABAP exception
+                  (0x0401), a normal reply, has 0.
+ 36      4      BE int32: the SAP return code beside it. 0 in every frame
+                  captured, the failures and cancels above included.
+ 40      8      GW connection handle (the conversation ID), 8 ASCII characters (session.py
                   _GW_HANDLE_OFFSET = 40; e.g. stfc_connection_response.bin). 8
                   blanks on the outbound 0x0601 connect.
  48      4      BE uint32 on 0x06xx data frames: 0 on client requests; 28000,
@@ -168,6 +185,16 @@ Offset  Length  Notes
 differential analysis over 85 GW-framed captures — every golden fixture, a
 2-frame `RFC_READ_TABLE` reply and a 22-frame one.*
 
+**Request types (byte 1).** `0x01` initialise conversation, `0x03` accept conversation, `0x05`
+allocate, `0x07`/`0x08` send / asynchronous send, `0x09`/`0x0A` receive / asynchronous
+receive, `0x0B` deallocate, `0x0D` set TP name, `0x0F` set partner LU name, `0x1B` flush; and
+the SAP extensions `0xC9` SAP allocate, `0xCA` SAP init, `0xCB` SAP send, `0xCC` asynchronous SAP
+send, `0xCD` sync, `0xCE` ping, `0xCF` register a program, `0xD0` unregister it, `0xD1` accept on
+a registered program, `0xD2` end that accept, `0xD3` cancel a registered program, `0xD4` set
+user ID, `0xD5` cancel, `0xD6` cancelled, `0xD7`/`0xD8` stop / continue streaming. The frames
+saprfclib sends and reads are `0x01`, `0x03`, `0x05`, `0x08`, `0x09`, `0x0B`, `0x0F`, `0xCB`,
+`0xCF`, `0xD0`, `0xD1`, `0xD2`, `0xD5` and `0xD6`.
+
 **Corrections to an earlier version of this table.** Three entries were wrong, and
 each was wrong in a way that looked plausible:
 
@@ -178,8 +205,8 @@ each was wrong in a way that looked plausible:
   later: 16 is a single flag byte, and 17–20 is the BE int32 above. Splitting it
   at 16 makes the int32 read as 0x01000001 / 0x01FFFFFF, which looks like a flags
   word and is not one.
-- **30 and 31 were two separate unknown bytes.** They are one BE uint16, and the
-  three values it takes are the position marker documented above.
+- **30 and 31 were two unrelated unknown bytes.** They are the info and vector flag
+  bytes, and the three combinations they take are the position marker documented above.
 
 **Key observation from capture:**
 - All client→server RFC data frames share an **identical** 76-byte APPC header within a session
@@ -290,8 +317,8 @@ which catches a desynchronised parse immediately rather than 200 bytes later.
 ### Known TLV Tags
 
 Evidence column: **capture** = the tag was observed on the wire in a committed fixture;
-**[ASSUMED]** = not seen in any capture, so neither its existence on the wire nor its role is
-established.
+**established** = its role is known but no committed fixture shows it; **[ASSUMED]** = neither
+its existence on the wire nor its role is established.
 
 Captures drawn on: STFC_CONNECTION, STFC_EXCEPTION, STFC_DEEP_TABLE, RFC_READ_TABLE,
 STFC_CHANGING, STFC_STRUCTURE, RFC_GET_FUNCTION_INTERFACE, DDIF_FIELDINFO_GET, and the
@@ -305,15 +332,16 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0103    | capture     | 4 bytes: `00000e0b` in a logon, `00000e09` in a tRFC call header     |
 | 0x0106    | capture     | 11 bytes, codepage descriptor (logon_request.bin)                    |
 | 0x0130    | capture     | Program name: in replies UTF-16LE padded to 80 bytes (e.g. "SAPLSTFC"); in the logon frame 7-byte ASCII "python3" (logon_request.bin) |
-| 0x0131    | capture     | 230 bytes starting `*TH*`, in every call ABAP sends to a registered server (trfc_inbound.json, bgrfc_inbound.json). Its fields are not established; saprfclib does not read it |
-| 0x0160    | [ASSUMED]   | Int16 field                                                           |
+| 0x0128    | established | The SAP Passport, as `0x0131`                                         |
+| 0x0131    | capture     | The SAP Passport (extended passport: root context ID, transaction ID, connection ID and counter), 230 bytes starting `*TH*`, in every call ABAP sends to a registered server (trfc_inbound.json, bgrfc_inbound.json). Read only by a receiver that tracks passports; saprfclib skips it |
+| 0x0160    | established | Skipped by receivers; carries nothing a call needs                    |
 | 0x0201    | capture     | Parameter name (UTF-16LE, scalar IMPORTING/EXPORTING pair)           |
 | 0x0203    | capture     | Parameter value CHAR (UTF-16LE, fixed-width space-padded)            |
 | 0x0205    | capture     | Output table/param declaration (name UTF-16LE, one per return param) |
 | 0x0301    | capture     | TABLE param name (UTF-16LE) — binary row format                      |
 | 0x0302    | capture     | TABLE row descriptor (8 bytes; contains row count + row size)        |
 | 0x0303    | capture     | TABLE row data, one record per row, uncompressed (17 × 402 bytes in gfi_uncompressed_params_response.bin) |
-| 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length). ABAP's `ARFC_DEST_SHIP` to a registered server sends `STATE` rows as 955-byte `0x0304` records against a 972-byte layout, the last field cut short ([trfc.md](trfc.md#inbound-trfc)) |
+| 0x0304    | capture     | One TABLE row, compressed: cut after its last byte, and restored to the row width `0x0302` declares by repeating that byte. A row with nothing to cut arrives at full width. ABAP's `ARFC_DEST_SHIP` to a registered server sends `STATE` rows as 955-byte records against a 972-byte layout, the last 17 bytes zeros ([trfc.md](trfc.md#inbound-trfc)) |
 | 0x0330    | capture     | TABLE DM table id, 4-byte BE uint32 (see "Binary TABLE descriptor layout") |
 | 0x0305    | capture     | SAPCOMPRESS-compressed TABLE rows, fragments of one stream (gfi_compressed_params_response.bin) |
 | 0x0306    | capture     | Empty; table end (gfi_compressed_params_response.bin, ddif_fieldinfo_rfcsi_response.bin) |
@@ -324,7 +352,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0334    | capture     | The row of a preceding `0x0333` edit (table_delta.json) |
 | 0x0335    | capture     | Returned form of a table the client sent: 12 bytes, three BE uint32 `[10, dm_table_id, row_count]`, followed by `0x0302` and `0x0304` rows (basxml_et_data_response.bin: `[10, 1, 4]`) |
 | 0x0336    | capture     | 4-byte BE DM table id: closes the section `0x0331` opened (basxml_et_data_response.bin, table_delta.json) |
-| 0x0337    | capture     | Empty record, after `0x0130` in every call ABAP sends to a registered server (trfc_inbound.json, bgrfc_inbound.json). Its role is not established |
+| 0x0337    | capture     | Empty record, after `0x0130` in every call ABAP sends to a registered server (trfc_inbound.json, bgrfc_inbound.json). Skipped by receivers |
 | 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
 | 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
 | 0x0403    | capture     | ABAP exception key/name (kernel 752; alternative to 0x0401)          |
@@ -334,7 +362,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0417    | capture     | ABAP exception/message number (3 chars, e.g. "000", "341")           |
 | 0x0418    | capture     | ABAP call-stack breadcrumb (`;W=…,E=…;S=…;D=…`); only `E=<n>` is read, on the wRFC logon path |
 | 0x0420    | capture     | RFC return code (4B BE uint32; 0=success)                            |
-| 0x0421    | [ASSUMED]   | Auth / call context                                                   |
+| 0x0421    | established | Empty: the sender accepts class-based exceptions for this call       |
 | 0x0500    | capture     | Call-end / response-start marker (empty record)                      |
 | 0x0504    | capture     | Empty; first record of an ARFC_DEST_SHIP (tRFC submit) request       |
 | 0x0513    | capture     | Empty; first record of an API_CLEAR_TID (tRFC confirm) request       |
@@ -343,9 +371,15 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0512    | capture     | Parameter section start / end of RFC exchange                        |
 | 0x0514    | capture     | Session token / connection ID (16B binary, random per session)       |
 | 0x0523    | capture     | Empty; last record of the reply to a server context reset (`reset_server_context.json`) |
-| 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds        |
+| 0x0667    | capture+probe | 8-byte float64 LE: server-side call duration, microseconds; milliseconds when the partner's kernel release (`0x0013`) begins with a digit below 7 |
+| 0x0670, 0x0671 | established | SAP logon ticket (`MYSAPSSO2`), UTF-16, at most 4096 characters (issue #78) |
 | 0x3c02    | capture     | BASXML section marker (empty; `<` = 0x3C, `,` = 0x02)               |
 | 0x3c05    | capture     | BASXML content — XML text in UTF-8 (NOT UTF-16LE)                    |
+| 0x4000    | established | Binary basXML (`BXML`, issue #18): opens the parameters              |
+| 0x4001    | established | Binary basXML segment                                                 |
+| 0x4002    | established | Binary basXML segment, compressed                                    |
+| 0x4004    | established | Binary basXML: closes the parameters                                 |
+| 0x5000, 0x5001 | established | Parameters in the newer column-wise serialization ([trfc.md](trfc.md#the-0x5001-block-of-2026-07-05)) |
 | 0xFFFF    | capture     | TLV stream terminator (empty record, mandatory last)                 |
 
 ---
@@ -597,6 +631,20 @@ Trailing bytes after the compressed stream pad the last record to its fixed size
     by the row count `0x0302` declares, and refuses a byte count that does not divide
     evenly. That gives 402 for the per-row form and 404 for the compressed one.
 
+
+### Column-wise serialization (`0x5000` / `0x5001`)
+
+Besides the classic records and basXML there is a third way to carry a call's parameters: one
+or more `0x5000`/`0x5001` records, each a container of at most 28000 bytes. A container starts with `^` or `$`, then
+an `H` header: the protocol version, the serializer version the sender understands, and a
+16-bit flag word in the sender's integer format, whose `0x4000` bit selects LZ4 compression and
+`0x8000` zlib. Compressed data is a sequence of LZ4 packages — two 4-byte lengths in the
+sender's integer format, uncompressed then compressed, and one LZ4 block, which may refer back
+into the previous package — decoded by `compress.lz4_packages_decompress`. The values
+themselves are written column by column. saprfclib does not implement this serialization:
+nothing it sends selects it, and only the July capture under Known Gaps in trfc.md showed a
+`0x5001` record arriving.
+
 ### Exception Response (server → client when ABAP exception raised)
 
 Confirmed from live STFC_EXCEPTION call capture (2026-06-28). Golden fixture:
@@ -694,8 +742,8 @@ excluded).
 `06ce` on an idle registration (golden fixture `server_idle_06ce.bin`): the SDK answers it
 with a TCP ACK only and keeps listening; saprfclib, sending nothing, stayed registered for
 12 minutes. Its [40:48] is `"0000007\0"`, not a conversation ID — every call is preceded by
-a `06cf` carrying the real one. What the frame is for, and whether the interval is a
-gateway setting, is not established. Not the same context as the `06ce` run in the client
+a `06cf` carrying the real one. The frame is the gateway's ping (request type `0xCE`, see
+the request-type list above); whether its interval is a gateway setting is not established. Not the same context as the `06ce` run in the client
 capture described under "One unexplained observation".
 
 After the 0608 reply the SDK sends 060b, 06d2 (same as 06d1 but type 06d2, the gateway
@@ -1204,61 +1252,58 @@ The `**MESSAGE**` server-list frame is parsed by `parse_sapms_server_list` in
 `src/saprfclib/router.py` and validated against `tests/golden/router/sapms_server_list.bin`
 (598 bytes, 3 entries).
 
-**SAPMS MESSAGE frame layout** (server-list response, wire-captured 2026-06-27):
+**SAPMS MESSAGE frame layout** (server-list response, `sapms_server_list.bin`, wire-captured
+2026-06-27; frame offsets, so the 110-byte message-server header of
+[message_server.md](message_server.md#header-110-bytes) starts at 4):
 
 ```
 Offset  Size  Field              Notes
 ------  ----  -----              -----
- 0       4    NI length prefix   BE uint32 = frame_total - 4. wire-captured.
- 4      11    magic              "**MESSAGE**" (ASCII). wire-captured.
-15       1    key                0x00. [ASSUMED] purpose unknown. wire-captured value.
-16       1    version            0x04. wire-captured.
-17       1    padding            0x00. wire-captured value.
-18       1    sender_type        0x2D ('-') in server responses. wire-captured.
-19      40    sender_name        Space-padded ASCII + null, 40 bytes total. wire-captured.
-59      11    zeros              11 zero bytes. wire-captured value.
-70       1    msg_type           0x03 = MSG_SERVER class. [ASSUMED] purpose. wire-captured.
-71       1    direction          0x01 = server→client response. [ASSUMED]. wire-captured.
-72      10    opcode_name        "MSG_SERVER" (ASCII, space-padded). wire-captured.
-82      30    opcode_padding     30 space bytes. wire-captured.
-112      2    unknown            0x0000. wire-captured value.
-114      2    opcode_field       0x0500 in server-list response. [ASSUMED]. wire-captured.
-116      2    sub_opcode         0x0403. [ASSUMED]. wire-captured.
-118   N×160   server entries     N = (frame_total - 118) / 160. wire-captured entry size.
+ 0       4    NI length prefix   BE uint32 = frame_total - 4
+ 4      12    eyecatcher         "**MESSAGE**" and its NUL (the 0x00 at 15)
+16       1    version            0x04
+17       1    errorno            signed; 0
+18      40    toname             "-", space-padded
+58       1    msgtype            0
+62       8    key                zeros
+70       1    flag               0x03: a reply
+71       1    operation          0x01
+72      40    fromname           "MSG_SERVER", space-padded
+112      2    zeros
+114      4    opcode block       05 00 04 03: opcode 0x05 (binary server list), error 0,
+                                 list version 4, 0x03 on a reply
+118   N×160   server entries     N = (frame_total - 118) / 160
 ```
 
-**Per-server entry layout** (160 bytes each, wire-captured from 3 entries):
+The list has no entry count. Entries follow the opcode block at a size the list version
+fixes — 67, 115 and 150 bytes for versions 1 to 3, 160 for version 4 — and their number is the
+payload length divided by it. `parse_sapms_server_list` reads version 4 and refuses any
+other, and refuses a payload the entries do not fill exactly.
+
+**Per-server entry, list version 4** (160 bytes; the three entries of the capture fit it):
 
 ```
 Entry  Size  Field              Notes
 -----  ----  -----              -----
-  0     40   instance_name      Space-padded ASCII (e.g. "vhcala4hci_A4H_00"). wire-captured.
- 40     40   hostname_string    Space-padded ASCII dotted-IPv4 or hostname. wire-captured.
- 80     40   field3             [ASSUMED] secondary name / "tick-port" string. wire-captured.
-120     15   unknown_zeros      Leading space(s) then zero bytes. wire-captured.
-135      2   ffff_marker        0xFFFF. Confirmed in all 3 entries. wire-captured.
-137      4   ip_addr_primary    4-byte BE IPv4 (e.g. 0xC6336407 = 198.51.100.7). wire-captured.
-141      4   ip_addr_secondary  Duplicate of primary. [ASSUMED]. wire-captured.
-145      2   port               BE uint16; 0 = inactive, 0x0C80 = 3200. wire-captured.
-147     13   trailing_flags     [ASSUMED] flags/load score. wire-captured values vary.
+  0     40   name               instance name, space-padded ("vhcala4hci_A4H_00"; "-" for
+                                 the two non-server entries)
+ 40     64   host               host name or dotted address, space-padded
+104     20   service            service name, space-padded ("tick-port")
+124      1   msgtypes           the services the instance offers, a bit field; 187 for the
+                                 application server, 0 for the others
+125     16   host address       IPv6, IPv4-mapped (::ffff:a.b.c.d)
+141      4   IPv4 address       the same address as IPv4
+145      2   port               BE uint16, the dispatcher port: 3200, or 0
+147      1   state              1 for the active application server, 5 for the others
+148      4   —                  zeros
+152      8   —                  zeros
 ```
 
-**Entry count:** `N = (frame_size - 118) / 160`. No confirmed count field exists in the header
-— the count is inferred from the remaining bytes. [ASSUMED] that a frame always contains whole
-entries (`size % 160 == 0`).
-
-**Server selection:** `parse_sapms_server_list` returns every entry, port 0 included,
-and leaves the choice to the caller. In the captured frame one of the three entries has a
-non-zero port, 3200, which is a dispatcher port (3200 + sysnr). Where the library derives a
-system number from a message-server port, on the HTTP server-list path, it computes
-`sysnr = port - 3200` and rejects results outside 0–99 (`router.py`). [ASSUMED] that a
-non-zero port marks an active server: the capture has a single active server, so a
-capture with several would settle it.
-
-**Still [ASSUMED]:** `key` (offset 15), `msg_type` / `direction` (70/71), `opcode_field` /
-`sub_opcode` (114/116), `field3` (80-120), `ip_addr_secondary` (141), `trailing_flags` (147),
-and the inferred entry-count mechanism. None of these block correct server selection, which is
-why they remain open.
+**Server selection:** `parse_sapms_server_list` returns every entry and leaves the choice to
+the caller. The active application server is the entry with state 1, here also the one with a
+non-zero port; its port is a dispatcher port (3200 + sysnr). Where the library derives a system
+number from a message-server port, on the HTTP server-list path, it computes `sysnr = port -
+3200` and rejects results outside 0–99 (`router.py`).
 
 ### Function-interface metadata column layout
 `RFC_GET_FUNCTION_INTERFACE` returns 12 columns: `PARAMCLASS, PARAMETER, TABNAME, FIELDNAME,
@@ -1640,6 +1685,11 @@ Four independent things fall out of those three rows:
 
 The `[ASSUMED]` labels on this tag are removed. The timeout reading is disproven,
 not merely unconfirmed.
+
+**The unit depends on the partner.** A partner whose kernel release (`0x0013` in the logon
+reply) begins with a digit below 7 writes milliseconds; every later one microseconds, as above.
+`extract_server_duration` converts by the release the session recorded, and takes
+microseconds when it has none.
 
 #### Why this is worth having
 

@@ -42,7 +42,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import inspect
 import logging
 import struct
@@ -486,33 +485,17 @@ def _bgrfc_unit_of(tlv: bytes) -> tuple[str, str] | None:
 # layouts are ARFC_DEST_SHIP's, from the system's metadata (set_trfc_descriptors).
 
 
-def _rows_present(raw: bytes, field: FieldDesc, count: int | None) -> list[dict[str, Any]]:
-    """A table's rows, decoded as far as each row reaches.
+def _rows(raw: bytes, field: FieldDesc, count: int | None) -> list[dict[str, Any]]:
+    """A table's rows, decoded at the width they arrived in (codec._decode_table).
 
-    ABAP sends STATE's rows as 0x0304 records of 955 bytes where the layout is 972:
-    everything through ARFCRESERV, then 23 bytes of HASH, RAW(40) (live, same
-    capture). What the short record stands for is not established, so a field the
-    row does not reach in full is left out rather than read from a guess.
+    ABAP sends STATE's rows as compressed 0x0304 records, which the table reader has
+    already restored to full width (invoke._expand_compressed_row).
     """
     if field.type_desc is None:
         raise ValueError(f"the descriptor has no row layout for {field.name}")
     if not count:
         return []
-    if len(raw) % count:
-        raise ValueError(f"{field.name}: {len(raw)} bytes do not divide into {count} rows")
-    width = len(raw) // count
-    fields = [
-        f
-        for f in field.type_desc.fields
-        if (f.uc_offset + f.uc_length if field.unicode_mode else f.nuc_offset + f.nuc_length)
-        <= width
-    ]
-    if not fields:
-        raise ValueError(f"{field.name}: a {width}-byte row holds none of its fields")
-    present = dataclasses.replace(
-        field, type_desc=dataclasses.replace(field.type_desc, fields=fields)
-    )
-    rows: list[dict[str, Any]] = decode(RFCTYPE_TABLE, raw, present, count)
+    rows: list[dict[str, Any]] = decode(RFCTYPE_TABLE, raw, field, count)
     return rows
 
 
@@ -538,8 +521,8 @@ def _trfc_luw(tlv: bytes, ship: FunctionDesc) -> tuple[str, list[tuple[str, byte
     raw = {
         name.upper(): value for name, value in _extract_name_value_pairs(tlv, row_counts_out=counts)
     }
-    state = _rows_present(raw.get("STATE", b""), tables["STATE"], counts.get("STATE"))
-    data = _rows_present(raw.get("DATA", b""), tables["DATA"], counts.get("DATA"))
+    state = _rows(raw.get("STATE", b""), tables["STATE"], counts.get("STATE"))
+    data = _rows(raw.get("DATA", b""), tables["DATA"], counts.get("DATA"))
     if not state:
         raise ValueError("the LUW has no STATE rows")
     tids = {_tid_of(row) for row in state} | {_tid_of(row) for row in data}

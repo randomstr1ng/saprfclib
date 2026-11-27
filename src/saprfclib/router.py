@@ -305,6 +305,8 @@ _SAPMS_ENTRY_SIZE = 160  # wire-captured
 # while the address IS mapped. A server answering with a real IPv6 address would
 # have yielded four bytes from the middle of it, which is a plausible-looking
 # address rather than an error.
+# The version of the server list (byte 2 of the opcode block) whose entries these are.
+_SAPMS_LIST_VERSION = 4
 _ENTRY_HOSTADDRV6_OFFSET = 125
 _ENTRY_HOSTADDRV4_OFFSET = 141
 _ENTRY_PORT_OFFSET = 145
@@ -357,19 +359,19 @@ def parse_sapms_server_list(frame: bytes) -> list[tuple[str, int]]:
             magic_str = repr(magic)
         raise ValueError(f"SAPMS frame invalid magic: expected '**MESSAGE**', got {magic_str!r}")
 
-    # Determine how many complete 160-byte entries fit in the remaining payload.
-    # [ASSUMED] no count field. The entry count is derived from the payload length
-    # instead. Searching the 110-byte header of the captured reply for the value 3
-    # finds candidates at byte 70, BE16 at 69 and BE32 at 67 -- which is what
-    # searching a header of that size for a small integer will always find, so
-    # none of them is evidence. A capture from a system returning a different
-    # number of entries would separate a real field from the coincidence.
-    #
-    # Deriving from the length is safe while every entry is the same width, and
-    # the exact-multiple check below is what enforces that: a payload the entries
-    # do not fill exactly is rejected rather than truncated to fit. What it cannot
-    # survive is the server appending anything after the last entry, which is
-    # precisely what a count field would make harmless.
+    # The list carries no entry count: after the 4-byte opcode block (opcode, error,
+    # list version, direction) come entries whose size follows from the list version
+    # -- 160 bytes for version 4, the one captured -- and their number from the
+    # payload length. A list of another version has entries of another size and
+    # layout, so it is refused rather than cut into 160-byte pieces.
+    list_version = frame[_SAPMS_HEADER_SIZE - 2]
+    if list_version != _SAPMS_LIST_VERSION:
+        raise ValueError(
+            f"SAPMS server list version {list_version}: only version "
+            f"{_SAPMS_LIST_VERSION} entries ({_SAPMS_ENTRY_SIZE} bytes) are read"
+        )
+    # The exact-multiple check below rejects a payload the entries do not fill
+    # rather than truncating it to fit.
     entries_payload = len(frame) - _SAPMS_HEADER_SIZE
     if entries_payload % _SAPMS_ENTRY_SIZE != 0:
         # Frame size is not an exact multiple — it's truncated or corrupt.

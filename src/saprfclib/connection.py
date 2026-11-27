@@ -2201,6 +2201,12 @@ def _validate_sysnr(sysnr: str | int) -> int:
     return value
 
 
+def _kernel_rel(session: Session) -> str | None:
+    """The partner's kernel release from the logon reply, if the session has one."""
+    attrs = session.attributes
+    return attrs.kernel_rel if attrs is not None else None
+
+
 @dataclass(frozen=True)
 class CallStats:
     """What one RFC call cost, measured by this client.
@@ -4276,7 +4282,9 @@ class Connection:
                     with _fail_closed(self._session, func_name):
                         self._transport.send_message(frame)
                         response = _join_response_frames(self._transport.recv_message, func_name)
-                        self._last_server_duration_s = extract_server_duration(response)
+                        self._last_server_duration_s = extract_server_duration(
+                            response, _kernel_rel(self._session)
+                        )
                         result = parse_invoke_response(response, desc)
                 else:
                     # Classic GW-framed invoke (TCP / SNC).
@@ -4298,7 +4306,9 @@ class Connection:
                         tlv_response = _join_response_frames(
                             self._transport.recv_message, func_name
                         )
-                        self._last_server_duration_s = extract_server_duration(tlv_response)
+                        self._last_server_duration_s = extract_server_duration(
+                            tlv_response, _kernel_rel(self._session)
+                        )
                         result = parse_invoke_response(tlv_response, desc, dm_names, call_params)
 
                 result = _convert_date_time_fields(result, desc)
@@ -6368,7 +6378,9 @@ class AsyncConnection:
                     # Read the server's timing before parsing, so a call that
                     # raises an ABAP error still reports how long the server spent
                     # on it -- that is often the interesting case.
-                    self._last_server_duration_s = extract_server_duration(tlv_response)
+                    self._last_server_duration_s = extract_server_duration(
+                        tlv_response, _kernel_rel(self._session)
+                    )
                     result = parse_invoke_response(tlv_response, desc, dm_names, call_params)
                 result = _convert_date_time_fields(result, desc)
                 return result

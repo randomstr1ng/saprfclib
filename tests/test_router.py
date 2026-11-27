@@ -855,3 +855,17 @@ def test_saprouter_with_wshost_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="wshost"):
         saprfclib.connect(ashost="x", sysnr="00", client="001", wshost="h", saprouter="/H/r/S/3299")
+
+
+def test_a_server_list_of_another_version_is_refused() -> None:
+    from pathlib import Path
+
+    from saprfclib.router import parse_sapms_server_list
+
+    frame = bytearray(
+        (Path(__file__).parent / "golden" / "router" / "sapms_server_list.bin").read_bytes()
+    )
+    assert frame[116] == 4  # list version in the opcode block 05 00 04 03
+    frame[116] = 3
+    with pytest.raises(ValueError, match="list version 3"):
+        parse_sapms_server_list(bytes(frame))

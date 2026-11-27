@@ -211,7 +211,7 @@ that is what lets golden fixtures drive the state machines directly.
 src/saprfclib/
   types.py           descriptor dataclasses (field/type/function metadata)
   codec.py           ABAP type encode/decode, keyed on RFCTYPE  — sans-I/O
-  compress.py        SAPCOMPRESS (LZH/LZC) + SAP LZ4 frames     — sans-I/O
+  compress.py        SAPCOMPRESS (LZH/LZC) + LZ4 packages       — sans-I/O
   invoke.py          RFC call TLV builder + response parser     — sans-I/O
   session.py         client RFC session state machine           — sans-I/O
   server_session.py  server-side registration/listen machine    — sans-I/O
@@ -323,6 +323,6 @@ hatch run lint:type                   # mypy strict over src/
 - When a capture contradicts this document, the capture wins — and update this document.
 - Propose changes as PRs; don't push directly to `main`.
 - For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, Kerberos suite `0x0008`,
-  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`, RFC types 33–40, SAP LZ4 frames, the
-  inbound `0x5001` parameter block),
+  SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`, RFC types 33–40 (signedness), the
+  column-wise `0x5000`/`0x5001` serialization),
   check the GitHub issues before starting — a capture requirement may be blocking.

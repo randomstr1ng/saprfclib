@@ -135,7 +135,7 @@ carries the same labels (`tests/api/public_api.json`).
 |---|---|
 | SOCKS5 proxy authentication with a JWT (method `0x80`), message-server logon through the proxy | Not verified live (`docs/protocol/socks5.md`) |
 | RFC types 33–40 (UTCSECOND … CDAY) | No system exposes them; widths `[ASSUMED]` |
-| SAP LZ4 frames, LZC compression on send | Frame layout `[ASSUMED]`; no capture of a client sending LZC (bgRFC units are sent LZH-compressed, as the reference client sends them) |
+| LZ4 packages of the column-wise serialization, LZC compression on send | The LZ4 packages decode, but the column-wise serialization around them (`0x5000`/`0x5001`) is not implemented; no capture of a client sending LZC (bgRFC units are sent LZH-compressed, as the reference client sends them) |
 | SDK-format traces (`RfcTrace`) | Tested offline only |
 
 **Not implemented**

@@ -63,6 +63,14 @@ RFCTYPE_STRING = 29
 RFCTYPE_XSTRING = 30
 RFCTYPE_INT8 = 31
 RFCTYPE_UTCLONG = 32
+RFCTYPE_UTCSECOND = 33
+RFCTYPE_UTCMINUTE = 34
+RFCTYPE_DTDAY = 35
+RFCTYPE_DTWEEK = 36
+RFCTYPE_DTMONTH = 37
+RFCTYPE_TSECOND = 38
+RFCTYPE_TMINUTE = 39
+RFCTYPE_CDAY = 40
 
 
 # DDIC DATATYPE (the 4-char type name, DFIES column DATATYPE) -> RFCTYPE.
@@ -382,6 +390,16 @@ _EXID_TO_RFCTYPE: dict[str, int] = {
     # UTCLONG parameters (A4H kernel 793, 2026-11-12). Unknown before, so every
     # UTCLONG parameter was dropped from the descriptor with a warning.
     "p": RFCTYPE_UTCLONG,
+    # The codes of types 33-40. No release saprfclib has met has such a parameter
+    # (docs/protocol/serialization.md [A1]); mapped so one is decoded, not refused.
+    "n": RFCTYPE_UTCSECOND,
+    "w": RFCTYPE_UTCMINUTE,
+    "d": RFCTYPE_DTDAY,
+    "7": RFCTYPE_DTWEEK,
+    "x": RFCTYPE_DTMONTH,
+    "t": RFCTYPE_TSECOND,
+    "i": RFCTYPE_TMINUTE,
+    "c": RFCTYPE_CDAY,
 }
 
 # RFCTYPE values for char-like types where unicode doubles the byte width.

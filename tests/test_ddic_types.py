@@ -111,3 +111,21 @@ def test_the_reply_decodes_with_the_values_abap_computed() -> None:
         _piece(FX["reference"]["reply_xml"], "ES_G").encode(),
     )
     assert es_g["A_GEOM_EWKB"] == bytes.fromhex(FX["sent"]["IS_G"]["A_GEOM_EWKB"])
+
+
+@pytest.mark.parametrize(
+    ("code", "rfctype", "width"),
+    [("n", 33, 8), ("w", 34, 8), ("d", 35, 4), ("7", 36, 4), ("x", 37, 4), ("t", 38, 4),
+     ("i", 39, 2), ("c", 40, 2)],
+)  # fmt: skip
+def test_the_type_codes_of_types_33_to_40_decode_as_little_endian_integers(
+    code: str, rfctype: int, width: int
+) -> None:
+    from saprfclib.codec import decode, encode
+    from saprfclib.metadata import _EXID_TO_RFCTYPE
+
+    assert _EXID_TO_RFCTYPE[code] == rfctype
+    field = FieldDesc("F", rfctype, width, 0, width, 0, 0)
+    raw = encode(rfctype, 258, field)
+    assert raw == (258).to_bytes(width, "little")
+    assert decode(rfctype, raw, field) == 258

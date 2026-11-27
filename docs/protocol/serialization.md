@@ -55,7 +55,7 @@ number (`metadata._EXID_TO_RFCTYPE`). A code it does not know is refused, not gu
 | 9 | `RFCTYPE_INT2` | `s` | 2 bytes | Signed 16-bit integer |
 | 10 | `RFCTYPE_INT1` | `b` | 1 byte | Unsigned 8-bit integer |
 | 14 | `RFCTYPE_NULL` | — | — | Not supported |
-| 16 | `RFCTYPE_ABAPOBJECT` | `*`, `+` **[ASSUMED]** | — | ABAP object; not supported by saprfclib |
+| 16 | `RFCTYPE_ABAPOBJECT` | `*`, `+` | — | ABAP object; not supported by saprfclib |
 | 17 | `RFCTYPE_STRUCTURE` | `u` flat, `v` deep | — | Structure, descriptor-driven; a deep one travels as XML |
 | 23 | `RFCTYPE_DECF16` | `a` | 8 bytes | IEEE 754-2008 DPD decimal float, **little-endian** wire |
 | 24 | `RFCTYPE_DECF34` | `e` | 16 bytes | IEEE 754-2008 DPD decimal float, **little-endian** wire |
@@ -64,14 +64,14 @@ number (`metadata._EXID_TO_RFCTYPE`). A code it does not know is refused, not gu
 | 30 | `RFCTYPE_XSTRING` | `y` | variable | Raw bytes; the TLV header carries the byte count |
 | 31 | `RFCTYPE_INT8` | `8` | 8 bytes | Signed 64-bit integer, little-endian |
 | 32 | `RFCTYPE_UTCLONG` | `p` | 8 bytes | UTC timestamp, 100 ns ticks (see below) |
-| 33 | `RFCTYPE_UTCSECOND` | `n` [A1] | 8 bytes [A1] | UTC timestamp/second (8-byte integer) |
-| 34 | `RFCTYPE_UTCMINUTE` | `w` [A1] | 8 bytes [A1] | UTC timestamp/minute (8-byte integer) |
-| 35 | `RFCTYPE_DTDAY` | `d` [A1] | 4 bytes [A1] | Date/day (4-byte integer) |
-| 36 | `RFCTYPE_DTWEEK` | `7` [A1] | 4 bytes [A1] | Date/week (4-byte integer) |
-| 37 | `RFCTYPE_DTMONTH` | `x` [A1] | 4 bytes [A1] | Date/month (4-byte integer) |
-| 38 | `RFCTYPE_TSECOND` | `t` [A1] | 4 bytes [A1] | Time/second (4-byte integer) |
-| 39 | `RFCTYPE_TMINUTE` | `i` [A1] | 2 bytes [A1] | Time/minute (2-byte integer) |
-| 40 | `RFCTYPE_CDAY` | `c` [A1] | 2 bytes [A1] | Calendar day (2-byte integer) |
+| 33 | `RFCTYPE_UTCSECOND` | `n` | 8 bytes | UTC timestamp/second (8-byte integer) |
+| 34 | `RFCTYPE_UTCMINUTE` | `w` | 8 bytes | UTC timestamp/minute (8-byte integer) |
+| 35 | `RFCTYPE_DTDAY` | `d` | 4 bytes | Date/day (4-byte integer) |
+| 36 | `RFCTYPE_DTWEEK` | `7` | 4 bytes | Date/week (4-byte integer) |
+| 37 | `RFCTYPE_DTMONTH` | `x` | 4 bytes | Date/month (4-byte integer) |
+| 38 | `RFCTYPE_TSECOND` | `t` | 4 bytes | Time/second (4-byte integer) |
+| 39 | `RFCTYPE_TMINUTE` | `i` | 2 bytes | Time/minute (2-byte integer) |
+| 40 | `RFCTYPE_CDAY` | `c` | 2 bytes | Calendar day (2-byte integer) |
 | 41 | `RFCTYPE_BOX` | — | — | Boxed structure; not supported over RFC |
 | 42 | `RFCTYPE_GENERIC_BOX` | — | — | Boxed client-dependent structure; not supported over RFC |
 
@@ -84,12 +84,14 @@ beside it (below).
 `r` and `l` (object and data references), `j` and `k` (static and generic boxed components)
 and `z` (node line). None of them can travel over RFC; saprfclib refuses them.
 
-**[A1]** Types 33–40 do not occur on ABAP Platform 2025 (kernel 916): its `INTTYPE` domain
-has none of the codes `n w d 7 x t i c`, no dictionary field uses them, and there is no
-dictionary data type for them. Kernel 793's dictionary has no data type for them either. So
-no RFC interface on these releases can carry one. The type codes and widths shown are **[ASSUMED]**, and so is little-endian byte order. A
-release that has these types, and a function module using them, would settle it. saprfclib
-defines the numbers but does not map the codes, so such a parameter is refused.
+**[A1]** Types 33–40 are binary integers of the widths shown, in the sender's integer format
+(`0x0101` byte 1): a receiver converts them when that format differs from its own, as it does
+INT, INT2 and INT8, so a little-endian sender writes them little-endian. Their type codes are
+`n w d 7 x t i c`, and saprfclib maps them. Whether they are signed is **[ASSUMED]** (signed).
+They do not occur on ABAP Platform 2025 (kernel 916): its `INTTYPE` domain has none of the
+codes, no dictionary field uses them, and there is no dictionary data type for them; kernel
+793's dictionary has none either. So no RFC interface on these releases carries one, and none
+has been captured.
 
 ### DDIC data types
 
@@ -681,7 +683,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `utcsecond_value` | — | Signed 8-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 8 | int64-LE | `utcsecond_value` | — | 8-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -689,7 +691,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 8 | int64-LE | `utcminute_value` | — | Signed 8-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 8 | int64-LE | `utcminute_value` | — | 8-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -697,7 +699,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `dtday_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 4 | int32-LE | `dtday_value` | — | 4-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -705,7 +707,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `dtweek_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 4 | int32-LE | `dtweek_value` | — | 4-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -713,7 +715,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `dtmonth_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 4 | int32-LE | `dtmonth_value` | — | 4-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -721,7 +723,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 4 | int32-LE | `tsecond_value` | — | 4-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 4 | int32-LE | `tsecond_value` | — | 4-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -729,7 +731,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 2 | int16-LE | `tminute_value` | — | 2-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 2 | int16-LE | `tminute_value` | — | 2-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -737,7 +739,7 @@ refuses a date in the 1582 gap and a space instead of `T`. saprfclib returns tha
 
 | Offset | Length | Type | Name | Value (example) | Notes |
 |--------|--------|------|------|-----------------|-------|
-| 0x00 | 2 | int16-LE | `cday_value` | — | 2-byte integer **[ASSUMED]**, see [A1] |
+| 0x00 | 2 | int16-LE | `cday_value` | — | 2-byte integer, little-endian from a little-endian sender; signed **[ASSUMED]**, see [A1] |
 
 ---
 
@@ -814,7 +816,7 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 | DECF16, DECF34 | Live capture, purpose-built function module; little-endian DPD (`decfloat_response.bin`) |
 | INT8, UTCLONG | Live capture, purpose-built function module, 2026-11-12 (`int8_utclong.json`) |
 | STRUCTURE | Unicode layout from live `DDIF_FIELDINFO_GET` (see framing.md) |
-| UTCSECOND…CDAY (33–40) | **[ASSUMED]**, see [A1] |
+| UTCSECOND…CDAY (33–40) | Width and byte order established, not captured (no release here has them); signedness **[ASSUMED]**, see [A1] |
 | DDIC PREC, GGM1, D16S, D34S | Live echo, 2026-11-27 (`ddic_types.json`) |
 
 ---
@@ -823,9 +825,9 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 
 ### Types 33–40
 
-No dictionary type on kernel 793 or 916 carries them, so no capture is possible there; type
-codes, widths and byte order are **[ASSUMED]** (see [A1]). A release that has them, and a
-function module using them, would settle it.
+No dictionary type on kernel 793 or 916 carries them, so none has been captured; whether they
+are signed is **[ASSUMED]** (see [A1]). A release that has them, and a function module using
+them, would settle it.
 
 ### A digit in a packed field's sign position
 

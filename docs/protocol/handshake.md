@@ -313,7 +313,7 @@ should read it from the authoritative source — `RFC_SYSTEM_INFO`'s `RFCSYSID` 
 `"NPL"` live, with `RFCDEST` equal to the `0x0008` instance name) — and treat it as a
 derived value from an explicit call, not a logon attribute.
 
-### The `0x0101` encoding header (live 7.52; byte order `[ASSUMED]`)
+### The `0x0101` encoding header (live 7.52)
 
 The logon response carries an 8-byte **`0x0101`** element whose value negotiates the
 on-wire encoding. Live 7.52 capture (NPL):
@@ -321,20 +321,21 @@ on-wire encoding. Live 7.52 capture (NPL):
 ```
 0x0101 = 01 01 01 05 04 01 00 03
           │  │  │  │  └──────── bytes 4–7: codepage digits (0x04 0x01 0x00 0x03 → "4103")
-          │  │  │  └─────────── byte 3:    unicode flag (5 = Unicode, UTF-16; else non-Unicode)
-          │  │  └────────────── byte 2:    float-format marker          [ASSUMED]
-          │  └───────────────── byte 1:    integer byte-order marker    [ASSUMED]
-          └──────────────────── byte 0:    RFC protocol version (client rejects > 5)
+          │  │  │  └─────────── byte 3:    character size (5 = 2-byte Unicode, 1 = 1-byte)
+          │  │  └────────────── byte 2:    float format
+          │  └───────────────── byte 1:    integer format
+          └──────────────────── byte 0:    RFC protocol version (a receiver refuses > 5)
 ```
 
 - **Shown by this capture:** byte 0 = protocol version; byte 3 = `5` = Unicode (agrees
   with the negotiated codepage 4103); bytes 4–7 = the codepage, one digit per byte with
   `byte + 0x30` giving the ASCII digit. `0x0016` separately echoes the client codepage
   ("1100") as UTF-16LE.
-- **`[ASSUMED]`:** bytes 1 and 2 are the integer and float byte-order markers. Only a
-  little-endian value (`01`) has ever been captured, so the *swap* semantics (a value
-  differing from the receiver's native marker selects byte-swapping) are inferred, not
-  wire-confirmed. Confirming them needs a big-endian capture, which we do not have.
+- **Bytes 1 and 2** are the sender's integer and float formats. A receiver compares each with
+  its own: a different integer format makes it convert every binary number it reads, a
+  different float format every float. `01` is the little-endian format on both bytes, the
+  value every little-endian sender writes (each capture here, the reference client and ABAP
+  alike). The value a big-endian sender writes was never captured and is not established.
 
 **Endianness, unicode, and codepage are four independent bytes here**, not one signal. In
 practice they co-vary — a Unicode little-endian server sends byte 3 = 5 with codepage 4103,

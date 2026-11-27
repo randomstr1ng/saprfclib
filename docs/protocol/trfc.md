@@ -484,10 +484,9 @@ submits (Submit, above): one `STATE` row per call, and each call serialized into
 How the rows arrive differs from a client's submit:
 
 * `DATA` rows come as `0x0303` records of 1917 bytes, the used width of the 1918-byte layout.
-* `STATE` rows come as `0x0304` records of **955** bytes, where the layout is 972. Everything
-  through `ARFCRESERV` (ends at 932) is laid out normally. `HASH`, RAW(40) at 932, is present as
-  23 bytes, `00 02` + 20 bytes + `00`, in every row seen. Its meaning is not established, and
-  `RfcServer` decodes only the fields a row reaches in full, so `HASH` is left out.
+* `STATE` rows come as compressed `0x0304` records of **955** bytes, where the layout is 972:
+  each row is cut after its last byte, `00`, and restored by repeating it to the declared width
+  (framing.md, `0x0304`). So `HASH`, RAW(40) at 932, is `00 02` + 20 bytes + 18 zero bytes.
 * ABAP fills the columns a client leaves blank: `ARFCDEST` (the destination), `ARFCSTATE`
   (`SENDED`), the time, date and user. A qRFC LUW carries `O` + the queue name from character
   44 of `ARFCRESERV`; a client's inbound qRFC submit writes `I` there.
@@ -587,12 +586,11 @@ A capture on 2026-07-05 of a tRFC the SAP system sent to a registered server sho
 compact block encoding: CHAR values as `0x43 [len] 0x80 [value]`, the TID fields at offsets
 504 / 515 / 522 / 533 as 8 + 4 + 8 + 4 uppercase hex characters, `ARFCFNAM` at 1716, and an
 unexplained 11-byte preamble `34 08 0c 00 00 4c 07 00 00 f1 31` at offset 14. The captures
-of 2026-11-27 (Inbound tRFC, above) show no such block, with basXML on or off; which systems or
-settings produce it is not known. `RfcServer` no longer reads a TID from it.
-
-### The short `STATE` rows
-What `HASH`'s 23 bytes in ABAP's 955-byte `STATE` records stand for, and whether a short
-`0x0304` record means the rest of the row is zero (Inbound tRFC, above).
+of 2026-11-27 (Inbound tRFC, above) show no such block, with basXML on or off. The block is the
+newer column-wise parameter serialization (tags `0x5000`/`0x5001`), not the classic or basXML
+one; which destination setting selects it was not captured. `RfcServer` no longer reads a TID
+from it, and its parser of the block's CHAR values (`server._extract_5001_params`) remains
+**[ASSUMED]**: a capture with that serialization selected would settle the layout.
 
 ### Several calls in one LUW (not in the public API)
 
