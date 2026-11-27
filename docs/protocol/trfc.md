@@ -320,21 +320,18 @@ conn.get_unit_state(identifier)
 ## Server-Side Dispatch
 
 When a registered RFC server receives an inbound call, the function name is matched before the
-normal handler lookup. **[ASSUMED]**: the server takes the TID from a parameter named
-`ARFCTID` and, failing that, from the 8 + 4 + 8 + 4 characters of the inbound `0x5001`
-block; neither is the client format above. No capture of a SAP system sending tRFC to a
-registered server exists to settle what arrives.
+normal handler lookup. ABAP sends a tRFC or qRFC LUW as `ARFC_DEST_SHIP` and a bgRFC unit as
+`BGRFC_DEST_SHIP` (Inbound tRFC and Inbound bgRFC, below).
 
 ```
 inbound frame
   → decode function name from TLV 0x0102
        │
-       ├─ "ARFC_DEST_SHIP"     → read the TID (see above)
+       ├─ "ARFC_DEST_SHIP"     → the TID and the calls from STATE / DATA (Inbound tRFC)
        │                         → on_check(tid), or the TID store
-       │                              16 (executed) → skip the handler, report success
-       │                              0 (new)       → mark received, run the handler
-       │
-       ├─ "ARFC_DEST_CONFIRM"  → placeholder: answers OK and does nothing
+       │                              16 (executed) → run nothing, answer success
+       │                              0 (new)       → mark received, run the calls
+       ├─ "ARFC_DEST_CONFIRM"  → the TID from CALLID; confirms it
        ├─ "BGRFC_DEST_SHIP"    → the unit from SSTATE, its calls from SDATA (Inbound bgRFC,
        │                         below); checks the unit, then runs its calls in order
        ├─ "BGRFC_DEST_CONFIRM" → UNIT_ID / UNIT_KIND; confirms the unit
@@ -350,17 +347,17 @@ inbound frame
 | 16 (`RFC_EXECUTED`) | TID already known and executed → skip the handler, return success |
 | 0 (`RFC_OK`) | New TID → persist it and execute |
 
-The reply's return code is 0 for success, 16 for an executed TID and 3 for a failure; 16 and
-3 are **[ASSUMED]** (`server.py`, `_RC_EXECUTED`).
+16 is the callback's answer, as in the SDK's API, not a wire value: an executed TID is answered
+as a LUW that ran (Inbound tRFC, below), and a failure as `0x0402` with the message.
 
 ### Callback order
 
 ```
 on_check(tid)                     → 16? → skip
 mark_received(tid) BEFORE execute ← crash safety: persist before you run
-run_handler()
+run the calls, in order, stopping at the first failure
   ├─ success → mark_executed(tid); on_commit(tid)   (on_confirm only on a confirm)
-  └─ error   → on_rollback(tid)
+  └─ error   → mark_rolled_back(tid); on_rollback(tid)
 ```
 
 `mark_received` **before** execution is what makes exactly-once survive a crash mid-handler. If
@@ -472,6 +469,54 @@ deep-parameter unit ran and stored exactly the values sent. The system had no su
 destination configured (`BGRFC_CUST_SUPER` empty): units still ran, inline in the submit, so
 the note under Backend tables below does not hold for direct submits on this release.
 
+## Inbound tRFC
+
+How ABAP sends a tRFC or qRFC LUW to a registered server. From live captures on ABAP Platform
+2025 (kernel 916), 2026-11-27 (`tests/golden/trfc/trfc_inbound.json`, sanitised): ABAP ran
+`CALL FUNCTION ... IN BACKGROUND TASK DESTINATION` for a registered TCP/IP destination, and for
+qRFC called `TRFC_SET_QUEUE_NAME` first. The receiving server was first one built on the NW RFC
+SDK 7.50 with its transaction handlers installed, then `RfcServer`. Three LUWs: one call;
+three calls, the second with a deep structure and a string table; and one call in a qRFC queue.
+The destination had basXML on; with it off, the same LUWs arrived in the same form.
+
+**The LUW** arrives as an `ARFC_DEST_SHIP` call with the `STATE` and `DATA` tables a client
+submits (Submit, above): one `STATE` row per call, and each call serialized into the
+`ARFCDATAnn` columns of its `DATA` rows. The TID is in the first four columns of every row.
+How the rows arrive differs from a client's submit:
+
+* `DATA` rows come as `0x0303` records of 1917 bytes, the used width of the 1918-byte layout.
+* `STATE` rows come as `0x0304` records of **955** bytes, where the layout is 972. Everything
+  through `ARFCRESERV` (ends at 932) is laid out normally. `HASH`, RAW(40) at 932, is present as
+  23 bytes, `00 02` + 20 bytes + `00`, in every row seen. Its meaning is not established, and
+  `RfcServer` decodes only the fields a row reaches in full, so `HASH` is left out.
+* ABAP fills the columns a client leaves blank: `ARFCDEST` (the destination), `ARFCSTATE`
+  (`SENDED`), the time, date and user. A qRFC LUW carries `O` + the queue name from character
+  44 of `ARFCRESERV`; a client's inbound qRFC submit writes `I` there.
+* Each serialized call has the logon header, then the call with its `0x0512` and `0x0205`
+  declarations and its values, deep ones as XML. A client's call has no `0x0512`/`0x0205`.
+
+The row layouts are `ARFC_DEST_SHIP`'s, so `RfcServer` reads them with the system's own
+descriptor, given once with `set_trfc_descriptors()`. Without it, a LUW is answered with a
+failure that names the method.
+
+**The answers.**
+
+| Case | SDK server's answer | `RfcServer`'s answer | Then ABAP (both servers) |
+|------|---------------------|----------------------|--------------------------|
+| LUW ran | `STATE` and `DATA` at their declared widths, no rows | the same tables, after `0x0500` / `0x0420` 0 | sent `ARFC_DEST_CONFIRM`, `ERRORSTATUS` 0, and removed the TID from its state table |
+| a call raised | `0x0402` with the message | the same | sent `ARFC_DEST_CONFIRM`, `ERRORSTATUS` 1, in a new conversation; kept the TID as `SYSFAIL` with the message, to retry |
+| check reported the TID as executed | `STATE` and `DATA` with their rows echoed | as for a LUW that ran | sent `ARFC_DEST_CONFIRM`, `ERRORSTATUS` 0 |
+
+The SDK server's answer kept the conversation open (`0x06CB`), and ABAP sent the confirm in it.
+`RfcServer` closes it (`0x0608`), and ABAP sent the confirm in a new conversation. Both worked.
+
+**`ARFC_DEST_CONFIRM`** carries `CALLID` (`ARFCCALLID`: the four TID columns, `ARFCDEST`,
+`ARFCLUWCNT`), `ERRORSTATUS` and `RETUDATA`. The SDK server's handlers saw a confirm after a
+failure too, and `RfcServer` releases the TID either way, as the SDK does.
+
+The compact `0x5001` block recorded on 2026-07-05 (Known Gaps) did not appear in these
+captures, with basXML on or off.
+
 ## Inbound bgRFC
 
 How ABAP sends a bgRFC unit to a registered server. From live captures on ABAP Platform 2025
@@ -538,12 +583,17 @@ destination (`BGRFC_SET_SUPERVISOR_DEST`). basXML was on.
 
 ## Known Gaps
 
-### Inbound tRFC (SAP to a registered server)
+### The `0x5001` block of 2026-07-05
 A capture on 2026-07-05 of a tRFC the SAP system sent to a registered server showed a
 compact block encoding: CHAR values as `0x43 [len] 0x80 [value]`, the TID fields at offsets
 504 / 515 / 522 / 533 as 8 + 4 + 8 + 4 uppercase hex characters, `ARFCFNAM` at 1716, and an
-unexplained 11-byte preamble `34 08 0c 00 00 4c 07 00 00 f1 31` at offset 14. The server's
-inbound handler does not parse it yet ([ASSUMED] in `server.py`).
+unexplained 11-byte preamble `34 08 0c 00 00 4c 07 00 00 f1 31` at offset 14. The captures
+of 2026-11-27 (Inbound tRFC, above) show no such block, with basXML on or off; which systems or
+settings produce it is not known. `RfcServer` no longer reads a TID from it.
+
+### The short `STATE` rows
+What `HASH`'s 23 bytes in ABAP's 955-byte `STATE` records stand for, and whether a short
+`0x0304` record means the rest of the row is zero (Inbound tRFC, above).
 
 ### Several calls in one LUW (not in the public API)
 

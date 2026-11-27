@@ -6,7 +6,7 @@
 # Plan 06-04. All behavior tests are marked xfail(strict=False).
 #
 # Requirement coverage:
-#   TRFC-03: server returns RFC_EXECUTED for a known TID (duplicate detection);
+#   TRFC-03: a known TID is answered as done and not run again (duplicate detection);
 #            persists new TIDs before executing the handler (crash-safety)
 #   TRFC-07: bgRFC server callbacks fire in check→persist→execute→commit/confirm order
 #
@@ -32,7 +32,7 @@ assert len(_KNOWN_TID) == 24, f"Test TID must be 24 chars, got {len(_KNOWN_TID)}
 
 
 def test_duplicate_tid_short_circuits() -> None:
-    """Server returns RFC_EXECUTED for a TID already in the store.
+    """A TID already in the store is answered as done and not run again.
 
     RED: dispatch_inbound transactional branch + TidStore integration absent.
     GREEN: Plan 06-04.
@@ -41,7 +41,8 @@ def test_duplicate_tid_short_circuits() -> None:
     1. Pre-load a TID into InMemoryTidStore as "executed".
     2. Deliver an inbound ARFC_DEST_SHIP frame carrying that TID.
     3. Assert: handler is NOT called (dedup short-circuit).
-    4. Assert: response frame encodes RFC_EXECUTED (0x10 = 16, [ASSUMED]).
+    4. Assert: the answer is a success: ABAP confirms a LUW answered so (live probe,
+       tests/golden/trfc/trfc_inbound.json "already_executed").
 
     The handler must persist the TID *before* execution (crash-safety per
     Pattern 2 in docs/protocol/trfc.md §"Server-Side Dispatch").
@@ -68,8 +69,9 @@ def test_duplicate_tid_short_circuits() -> None:
 
     # Build a minimal synthetic ARFC_DEST_SHIP frame for dispatch_inbound.
     # forged_inbound_trfc(tid, func_name) — tid first, func_name second (Plan 06-03 API).
-    from tests._trfc_fixture import forged_inbound_trfc
+    from tests._trfc_fixture import forged_inbound_trfc, trfc_descriptors
 
+    server.set_trfc_descriptors(*trfc_descriptors())
     frame = forged_inbound_trfc(_KNOWN_TID, "STFC_CONNECTION")
 
     response = server.dispatch_inbound(frame)
@@ -77,7 +79,7 @@ def test_duplicate_tid_short_circuits() -> None:
     assert not handler_called, (
         "Handler must NOT be called for a duplicate TID (RFC_EXECUTED short-circuit)"
     )
-    # RFC_EXECUTED (0x10 = 16) must be signalled in the response
+    # Answered as a LUW that ran (ABAP confirms it: trfc_inbound.json)
     assert response is not None, "dispatch_inbound must return a response for duplicates"
 
 
@@ -111,8 +113,9 @@ def test_new_tid_persists_before_execute() -> None:
         return {}
 
     # forged_inbound_trfc(tid, func_name) — Plan 06-03 API (tid first, func_name second).
-    from tests._trfc_fixture import forged_inbound_trfc
+    from tests._trfc_fixture import forged_inbound_trfc, trfc_descriptors
 
+    server.set_trfc_descriptors(*trfc_descriptors())
     frame = forged_inbound_trfc(new_tid, "STFC_CONNECTION")
 
     server.dispatch_inbound(frame)  # type: ignore[attr-defined]

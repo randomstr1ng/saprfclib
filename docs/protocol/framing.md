@@ -311,7 +311,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0301    | capture     | TABLE param name (UTF-16LE) — binary row format                      |
 | 0x0302    | capture     | TABLE row descriptor (8 bytes; contains row count + row size)        |
 | 0x0303    | capture     | TABLE row data, one record per row, uncompressed (17 × 402 bytes in gfi_uncompressed_params_response.bin) |
-| 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length)     |
+| 0x0304    | capture     | TABLE row data (UTF-16LE, fixed-width padded to ABAP row length). ABAP's `ARFC_DEST_SHIP` to a registered server sends `STATE` rows as 955-byte `0x0304` records against a 972-byte layout, the last field cut short ([trfc.md](trfc.md#inbound-trfc)) |
 | 0x0330    | capture     | TABLE DM table id, 4-byte BE uint32 (see "Binary TABLE descriptor layout") |
 | 0x0305    | capture     | SAPCOMPRESS-compressed TABLE rows, fragments of one stream (gfi_compressed_params_response.bin) |
 | 0x0306    | capture     | Empty; table end (gfi_compressed_params_response.bin, ddif_fieldinfo_rfcsi_response.bin) |

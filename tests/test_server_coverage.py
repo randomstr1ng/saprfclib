@@ -20,13 +20,14 @@ from saprfclib.server import (
     RfcServer,
     _dispatcher_svc_8,
     _gwserv_port,
-    _scan_5001_char_values,
 )
-from tests._trfc_fixture import forged_inbound_trfc
+from tests._trfc_fixture import forged_inbound_trfc, trfc_descriptors
 
 
 def _server() -> RfcServer:
-    return RfcServer({"program_id": "TEST", "gwhost": "localhost", "gwserv": "sapgw00"})
+    server = RfcServer({"program_id": "TEST", "gwhost": "localhost", "gwserv": "sapgw00"})
+    server.set_trfc_descriptors(*trfc_descriptors())
+    return server
 
 
 def _rc(response: bytes) -> int:
@@ -118,38 +119,6 @@ def test_a_port_in_neither_gateway_range_is_refused() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Inbound 0x5001 scanning — a trust boundary
-# --------------------------------------------------------------------------- #
-
-
-def test_scanner_never_reads_past_the_buffer() -> None:
-    """A declared length longer than the data must be ignored, not trusted.
-
-    This parses a frame from the network, so a length field that overruns is the
-    first thing an attacker reaches for.
-    """
-    # 0x43, declared length 200, marker 0x80, but only 4 bytes follow.
-    truncated = bytes([0x43, 200, 0x80]) + b"ABCD"
-    assert _scan_5001_char_values(truncated) == []
-
-    # Exactly-fitting value is accepted.
-    exact = bytes([0x43, 4, 0x80]) + b"ABCD"
-    assert _scan_5001_char_values(exact) == [(0, 4, b"ABCD")]
-
-
-def test_scanner_handles_empty_and_tiny_inputs() -> None:
-    for data in (b"", b"\x43", b"\x43\x04", b"\x43\x04\x80"):
-        assert _scan_5001_char_values(data) == []
-
-
-def test_scanner_skips_past_a_match_so_values_do_not_nest() -> None:
-    """A value whose bytes contain 0x43..0x80 must not yield a phantom second hit."""
-    inner = bytes([0x43, 1, 0x80, 0x41])
-    data = bytes([0x43, len(inner), 0x80]) + inner
-    assert _scan_5001_char_values(data) == [(0, 4, inner)]
-
-
-# --------------------------------------------------------------------------- #
 # Inbound tRFC frame validation
 # --------------------------------------------------------------------------- #
 
@@ -159,11 +128,11 @@ def _forge_trfc(tid: str) -> bytes:
 
     The server must not depend on the peer sending a valid TID: a hostile or
     simply broken system sends whatever it likes. So the value is patched in
-    after the fact.
+    after the fact, in the STATE and the DATA rows alike.
     """
     valid = "A" * 24
     frame = forged_inbound_trfc(valid, "Z_FUNC")
-    return frame.replace(valid.encode("utf-16-le"), tid.encode("utf-16-le"), 1)
+    return frame.replace(valid.encode("utf-16-le"), tid.encode("utf-16-le"))
 
 
 def test_a_trfc_frame_without_a_tid_is_refused() -> None:
@@ -172,7 +141,7 @@ def test_a_trfc_frame_without_a_tid_is_refused() -> None:
     server.install_transaction_handlers()
     frame = forged_inbound_trfc("A" * 24, "Z_FUNC")
     # Blank the TID characters, leaving the frame otherwise intact.
-    blanked = frame.replace(("A" * 24).encode("utf-16-le"), (" " * 24).encode("utf-16-le"), 1)
+    blanked = frame.replace(("A" * 24).encode("utf-16-le"), (" " * 24).encode("utf-16-le"))
     assert _rc(server.dispatch_inbound(blanked)) != 0
 
 

@@ -96,9 +96,37 @@ server.serve_forever()
   IMPORTING/EXPORTING/CHANGING parameter) arrive as nested dicts and lists, and are returned
   the same way, provided the `FunctionDesc` carries their layout. The simplest way to get one
   is to fetch it from the system with a client connection.
-- For tRFC/qRFC inbound calls the handler still needs a `FunctionDesc` to see its
-  parameters: without one it is called with `{}`. Only a duplicate TID skips the handler
-  before the request is decoded.
+
+## Receiving tRFC and qRFC LUWs
+
+ABAP sends a tRFC LUW (`CALL FUNCTION ... IN BACKGROUND TASK DESTINATION`, or a qRFC one after
+`TRFC_SET_QUEUE_NAME`) to a registered server as rows of the system's own tRFC tables. The
+server reads them with the system's descriptors, which it needs once:
+
+```python
+import saprfclib
+
+with saprfclib.connect(ashost="sap-host", sysnr=0, client="100",
+                       user="RFC_USER", passwd="secret") as conn:
+    server.set_trfc_descriptors(
+        saprfclib.get_function_desc(conn, "ARFC_DEST_SHIP"),
+        saprfclib.get_function_desc(conn, "ARFC_DEST_CONFIRM"),
+    )
+
+server.install_transaction_handlers(
+    on_check=lambda tid: 16 if db.tid_done(tid) else 0,  # 16: already ran
+    on_commit=lambda tid: db.commit(tid),                # every call of the LUW ran
+    on_rollback=lambda tid: db.rollback(tid),            # a call raised
+    on_confirm=lambda tid: db.forget(tid),               # ABAP is done with the TID
+)
+```
+
+The LUW's calls run in order with the handlers registered for them; each needs a
+`FunctionDesc` to see its values. If one raises, the rest do not run, `on_rollback` runs, and
+ABAP is told the LUW failed: it keeps it and sends it again later. A TID that `on_check` (or the
+TID store, `set_tid_store`) reports as executed is answered as done without running anything.
+`on_confirm` runs when ABAP confirms the TID, after success and after failure alike. The wire
+format is in [tRFC / qRFC / bgRFC](../protocol/trfc.md#inbound-trfc).
 
 ## Receiving bgRFC units
 
