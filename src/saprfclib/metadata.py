@@ -105,7 +105,12 @@ _DATATYPE_TO_RFCTYPE: dict[str, int] = {
     # raw / byte
     "RAW": RFCTYPE_BYTE,
     "LRAW": RFCTYPE_BYTE,
-    "PREC": RFCTYPE_BYTE,  # precision field, 2-byte binary
+    # PREC is a 2-byte integer: DDIF_FIELDINFO_GET reports INTTYPE 's', INTLEN 2 for
+    # every PREC field sampled (VERI_TYPES_CV, UJD_UT_S_BASIS_TYPE, UMGSIUUC1; DD03L
+    # stores 'X', as it does for INT2 and INT4), and ABAP accepted the echo of one sent
+    # as an INT2 (ABAP Platform 2025, 2026-11-27, ddic_types.json). Sent as RAW before,
+    # it travelled as base64 in XML and ABAP refused it (CONVT_NO_NUMBER).
+    "PREC": RFCTYPE_INT2,
     # deep / variable-length (fixed handle slot in a structure)
     "STRG": RFCTYPE_STRING,
     "SSTR": RFCTYPE_STRING,  # short string
@@ -117,6 +122,16 @@ _DATATYPE_TO_RFCTYPE: dict[str, int] = {
     "D34D": RFCTYPE_DECF34,
     "D34R": RFCTYPE_DECF34,
     "D34N": RFCTYPE_DECF34,
+    # D16S / D34S (decfloat with a scale field) and GGM1 (geometry, EWKB) report
+    # INTTYPE 'a', 'e' and 'y' in DDIF_FIELDINFO_GET, INTLEN 8 / 16 / 8 (VERI_TYPES_CV,
+    # SADL_V_GEOM_EWKB), and travel as DECFLOAT16 / DECFLOAT34 / XSTRING: a live echo
+    # through a module taking both structures returned every value, ABAP Platform 2025,
+    # 2026-11-27 (tests/golden/serialization/ddic_types.json). Unknown before, so the
+    # fields were dropped from the layout and ABAP refused the call
+    # (CALL_FUNCTION_WRONG_VALUE_LENG).
+    "D16S": RFCTYPE_DECF16,
+    "D34S": RFCTYPE_DECF34,
+    "GGM1": RFCTYPE_XSTRING,
     # timestamp
     "UTCL": RFCTYPE_UTCLONG,
     # nested — typed so the field is recognised; the row layout is a separate

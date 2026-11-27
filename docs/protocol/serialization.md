@@ -35,53 +35,97 @@ DECFLOAT section below (`decfloat_response.bin`).
 
 ## RFCTYPE Enum Values
 
-The 29 numbered type codes `saprfclib` defines (`src/saprfclib/codec.py`). Values 31–40 (`RFCTYPE_INT8` through
-`RFCTYPE_CDAY`) continue the sequence from `RFCTYPE_XSTRING = 30`; see **[A1]** for what is
-known about them.
+Every RFC type there is: the numbers run from 0 to 42, and the ones not listed (11–13, 15,
+18–22, 25–27) are not defined. On the wire a parameter's or field's type is not this number
+but the one-character type code of its metadata (`EXID` in `RFC_GET_FUNCTION_INTERFACE`'s
+`PARAMS`, `INTTYPE` in `DDIF_FIELDINFO_GET`'s `DFIES` rows), which saprfclib maps to the
+number (`metadata._EXID_TO_RFCTYPE`). A code it does not know is refused, not guessed.
 
-| Value | Name | Wire Size | ABAP Type | Description |
+| Value | Name | Type code | Wire Size | Description |
 |-------|------|-----------|-----------|-------------|
-| 0 | `RFCTYPE_CHAR` | N × 2 bytes (UTF-16) | C | Fixed-length char, blank-padded in UC mode |
-| 1 | `RFCTYPE_DATE` | 16 bytes (8 UC chars) | D | Date: YYYYMMDD in UTF-16 |
-| 2 | `RFCTYPE_BCD` | 1–16 bytes | P | Packed BCD decimal; length from descriptor |
-| 3 | `RFCTYPE_TIME` | 12 bytes (6 UC chars) | T | Time: HHMMSS in UTF-16 |
-| 4 | `RFCTYPE_BYTE` | N bytes | X | Raw binary, fixed length from descriptor |
-| 5 | `RFCTYPE_TABLE` | — | — | Internal table (container, not scalar) |
-| 6 | `RFCTYPE_NUM` | N × 2 bytes (UTF-16) | N | Numeric string, leading-zero-padded, UTF-16 |
-| 7 | `RFCTYPE_FLOAT` | 8 bytes | F | IEEE 754 double-precision float |
-| 8 | `RFCTYPE_INT` | 4 bytes | I | Signed 32-bit integer, little-endian |
-| 9 | `RFCTYPE_INT2` | 2 bytes | — | Signed 16-bit integer (obsolete) |
-| 10 | `RFCTYPE_INT1` | 1 byte | — | Unsigned 8-bit integer (obsolete) |
-| 14 | `RFCTYPE_NULL` | — | — | Not supported — skip on wire |
-| 16 | `RFCTYPE_ABAPOBJECT` | — | — | ABAP object handle — skip on wire |
-| 17 | `RFCTYPE_STRUCTURE` | — | — | Nested structure, descriptor-driven |
-| 23 | `RFCTYPE_DECF16` | 8 bytes | DECFLOAT16 | IEEE 754-2008 DPD decimal float, **little-endian** wire |
-| 24 | `RFCTYPE_DECF34` | 16 bytes | DECFLOAT34 | IEEE 754-2008 DPD decimal float, **little-endian** wire |
-| 28 | `RFCTYPE_XMLDATA` | — | — | No longer used — skip |
-| 29 | `RFCTYPE_STRING` | variable | STRING | UTF-8 plus a terminating NUL; no length prefix, the TLV header carries the byte count |
-| 30 | `RFCTYPE_XSTRING` | variable | XSTRING | Raw bytes; no internal prefix, the TLV header carries the byte count |
-| 31 | `RFCTYPE_INT8` | 8 bytes | INT8 | Signed 64-bit integer, little-endian (live) |
-| 32 | `RFCTYPE_UTCLONG` | 8 bytes | UTCLONG | UTC timestamp, 100 ns ticks (live, see below) |
-| 33 [A1] | `RFCTYPE_UTCSECOND` | 8 bytes | UTCSECOND | UTC timestamp/second (8-byte integer) |
-| 34 [A1] | `RFCTYPE_UTCMINUTE` | 8 bytes | UTCMINUTE | UTC timestamp/minute (8-byte integer) |
-| 35 [A1] | `RFCTYPE_DTDAY` | 4 bytes | DTDAY | Date/day (4-byte integer) |
-| 36 [A1] | `RFCTYPE_DTWEEK` | 4 bytes | DTWEEK | Date/week (4-byte integer) |
-| 37 [A1] | `RFCTYPE_DTMONTH` | 4 bytes | DTMONTH | Date/month (4-byte integer) |
-| 38 [A1] | `RFCTYPE_TSECOND` | 4 bytes | TSECOND | Time/second (4-byte integer) |
-| 39 [A1] | `RFCTYPE_TMINUTE` | 2 bytes | TMINUTE | Time/minute (2-byte integer) |
-| 40 [A1] | `RFCTYPE_CDAY` | 2 bytes | CDAY | Calendar day (2-byte integer) |
-| — | `RFCTYPE_BOX` | — | — | Out of scope: never seen on the wire |
-| — | `RFCTYPE_GENERIC_BOX` | — | — | Out of scope: never seen on the wire |
+| 0 | `RFCTYPE_CHAR` | `C` | N × 2 bytes (UTF-16) | Fixed-length char, blank-padded in UC mode |
+| 1 | `RFCTYPE_DATE` | `D` | 16 bytes (8 UC chars) | Date: YYYYMMDD in UTF-16 |
+| 2 | `RFCTYPE_BCD` | `P` | 1–16 bytes | Packed BCD decimal; length from descriptor |
+| 3 | `RFCTYPE_TIME` | `T` | 12 bytes (6 UC chars) | Time: HHMMSS in UTF-16 |
+| 4 | `RFCTYPE_BYTE` | `X` | N bytes | Raw binary, fixed length from descriptor |
+| 5 | `RFCTYPE_TABLE` | `h` | — | Internal table (container, not scalar) |
+| 6 | `RFCTYPE_NUM` | `N` | N × 2 bytes (UTF-16) | Numeric string, leading-zero-padded, UTF-16 |
+| 7 | `RFCTYPE_FLOAT` | `F` | 8 bytes | IEEE 754 double-precision float |
+| 8 | `RFCTYPE_INT` | `I` | 4 bytes | Signed 32-bit integer, little-endian |
+| 9 | `RFCTYPE_INT2` | `s` | 2 bytes | Signed 16-bit integer |
+| 10 | `RFCTYPE_INT1` | `b` | 1 byte | Unsigned 8-bit integer |
+| 14 | `RFCTYPE_NULL` | — | — | Not supported |
+| 16 | `RFCTYPE_ABAPOBJECT` | `*`, `+` **[ASSUMED]** | — | ABAP object; not supported by saprfclib |
+| 17 | `RFCTYPE_STRUCTURE` | `u` flat, `v` deep | — | Structure, descriptor-driven; a deep one travels as XML |
+| 23 | `RFCTYPE_DECF16` | `a` | 8 bytes | IEEE 754-2008 DPD decimal float, **little-endian** wire |
+| 24 | `RFCTYPE_DECF34` | `e` | 16 bytes | IEEE 754-2008 DPD decimal float, **little-endian** wire |
+| 28 | `RFCTYPE_XMLDATA` | — | — | No longer used |
+| 29 | `RFCTYPE_STRING` | `g` | variable | UTF-8 plus a terminating NUL; the TLV header carries the byte count |
+| 30 | `RFCTYPE_XSTRING` | `y` | variable | Raw bytes; the TLV header carries the byte count |
+| 31 | `RFCTYPE_INT8` | `8` | 8 bytes | Signed 64-bit integer, little-endian |
+| 32 | `RFCTYPE_UTCLONG` | `p` | 8 bytes | UTC timestamp, 100 ns ticks (see below) |
+| 33 | `RFCTYPE_UTCSECOND` | `n` [A1] | 8 bytes [A1] | UTC timestamp/second (8-byte integer) |
+| 34 | `RFCTYPE_UTCMINUTE` | `w` [A1] | 8 bytes [A1] | UTC timestamp/minute (8-byte integer) |
+| 35 | `RFCTYPE_DTDAY` | `d` [A1] | 4 bytes [A1] | Date/day (4-byte integer) |
+| 36 | `RFCTYPE_DTWEEK` | `7` [A1] | 4 bytes [A1] | Date/week (4-byte integer) |
+| 37 | `RFCTYPE_DTMONTH` | `x` [A1] | 4 bytes [A1] | Date/month (4-byte integer) |
+| 38 | `RFCTYPE_TSECOND` | `t` [A1] | 4 bytes [A1] | Time/second (4-byte integer) |
+| 39 | `RFCTYPE_TMINUTE` | `i` [A1] | 2 bytes [A1] | Time/minute (2-byte integer) |
+| 40 | `RFCTYPE_CDAY` | `c` [A1] | 2 bytes [A1] | Calendar day (2-byte integer) |
+| 41 | `RFCTYPE_BOX` | — | — | Boxed structure; not supported over RFC |
+| 42 | `RFCTYPE_GENERIC_BOX` | — | — | Boxed client-dependent structure; not supported over RFC |
 
-**[A1]** On the wire a parameter's type is the EXID character of its metadata row; the
-numbers in this table are saprfclib's own constants. Live (A4H kernel 793, 2026-11-12, a
-purpose-built function module, fixture `tests/golden/serialization/int8_utclong.json`):
-INT8 is EXID `8`, 8 bytes, and UTCLONG is EXID `p`, 8 bytes; the dictionary types DATN and
-TIMN are reported as `D` and `T` and travel exactly like DATE and TIME. Types 33–40 are
-**[ASSUMED]** little-endian integers of the widths shown: kernel 793's dictionary has no data
-type for any of them (domain `DATATYPE` lists `INT8`, `UTCL`, `DATN`, `TIMN` and none of
-these), so no RFC interface on that release can carry one. A release that has them, and a
-function module using them, would settle it.
+The type codes from `C` to `p` are each seen in live metadata (`metadata._EXID_TO_RFCTYPE`
+cites the capture of each). In the DDIC, INT1, INT2 and INT4 fields report `X` in `DD03L` but
+`b`, `s` and `I` in `DDIF_FIELDINFO_GET`; saprfclib reads the latter, and the DDIC data type
+beside it (below).
+
+**Type codes with no RFC type.** The system's `INTTYPE` domain also has `V` (the old VARC),
+`r` and `l` (object and data references), `j` and `k` (static and generic boxed components)
+and `z` (node line). None of them can travel over RFC; saprfclib refuses them.
+
+**[A1]** Types 33–40 do not occur on ABAP Platform 2025 (kernel 916): its `INTTYPE` domain
+has none of the codes `n w d 7 x t i c`, no dictionary field uses them, and there is no
+dictionary data type for them. Kernel 793's dictionary has no data type for them either. So
+no RFC interface on these releases can carry one. The type codes and widths shown are **[ASSUMED]**, and so is little-endian byte order. A
+release that has these types, and a function module using them, would settle it. saprfclib
+defines the numbers but does not map the codes, so such a parameter is refused.
+
+### DDIC data types
+
+A structure's layout comes from `DDIF_FIELDINFO_GET`, which gives each field its DDIC data
+type (`DATATYPE`) and type code. saprfclib types a field by its data type
+(`metadata._DATATYPE_TO_RFCTYPE`), because the type code alone does not separate every case.
+
+| DDIC data type | Type code | RFC type |
+|----------------|-----------|----------|
+| CHAR, CLNT, LANG, CUKY, UNIT, LCHR | `C` | CHAR |
+| NUMC, ACCP | `N` | NUM |
+| DATS, DATN | `D` | DATE |
+| TIMS, TIMN | `T` | TIME |
+| DEC, CURR, QUAN | `P` | BCD |
+| INT1 | `b` | INT1 |
+| INT2, **PREC** | `s` | INT2 |
+| INT4 | `I` | INT |
+| INT8 | `8` | INT8 |
+| FLTP | `F` | FLOAT |
+| RAW, LRAW | `X` | BYTE |
+| STRG, SSTR | `g` | STRING |
+| RSTR, **GGM1** | `y` | XSTRING |
+| D16D, D16R, D16N, **D16S** | `a` | DECF16 |
+| D34D, D34R, D34N, **D34S** | `e` | DECF34 |
+| UTCL | `p` | UTCLONG |
+| STRU | `u` / `v` | STRUCTURE |
+| TTYP | `h` | TABLE |
+
+PREC, GGM1 (geometry, EWKB), D16S and D34S (decfloat with a scale field) were added from a
+live echo: a function module taking `VERI_TYPES_CV`, which has a field of almost every data
+type, and `SADL_V_GEOM_EWKB` returned every value, and the XML saprfclib sent equals the
+reference client's apart from an untouched FLTP field written as its initial value
+(`tests/golden/serialization/ddic_types.json`, ABAP Platform 2025, 2026-11-27). PREC reports
+`s` and is a 2-byte integer; before, saprfclib sent it as RAW, which ABAP refused. Their
+alignments are the gcd of their field offsets across the system's structures: D16S 8, D34S
+16, GGM1 4. VARC has no field on that system and is not mapped.
 
 ---
 
@@ -771,6 +815,7 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 | INT8, UTCLONG | Live capture, purpose-built function module, 2026-11-12 (`int8_utclong.json`) |
 | STRUCTURE | Unicode layout from live `DDIF_FIELDINFO_GET` (see framing.md) |
 | UTCSECOND…CDAY (33–40) | **[ASSUMED]**, see [A1] |
+| DDIC PREC, GGM1, D16S, D34S | Live echo, 2026-11-27 (`ddic_types.json`) |
 
 ---
 
@@ -778,9 +823,9 @@ Examples marked **[synthetic]** are constructed; wire byte order confirmed but v
 
 ### Types 33–40
 
-No dictionary type on kernel 793 carries them, so no capture is possible there; widths and
-byte order are **[ASSUMED]** (see [A1]). A release that has them, and a function module using
-them, would settle it.
+No dictionary type on kernel 793 or 916 carries them, so no capture is possible there; type
+codes, widths and byte order are **[ASSUMED]** (see [A1]). A release that has them, and a
+function module using them, would settle it.
 
 ### A digit in a packed field's sign position
 

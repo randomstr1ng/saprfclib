@@ -125,6 +125,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Structures with a PREC, GGM1, D16S or D34S field could not be called.** GGM1 (geometry),
+  D16S and D34S were unknown DDIC types, so their fields were dropped from the layout and ABAP
+  refused the call (`CALL_FUNCTION_WRONG_VALUE_LENG`); PREC was sent as RAW, which ABAP refused
+  (`CONVT_NO_NUMBER`). They now travel as XSTRING, DECFLOAT16, DECFLOAT34 and INT2, with
+  their alignments, as the system reports them. Verified live with a module echoing
+  `VERI_TYPES_CV` and `SADL_V_GEOM_EWKB`.
+
 - **`RfcServer` decoded inbound TABLE parameters at the wrong row width.** It measured a table's
   rows without the row count `0x0302` declares, so rows sent at their used width (ABAP's
   `ARFC_DEST_SHIP` rows, 1917 bytes for a 1918-byte layout) were cut wrong or dropped. It now
@@ -252,6 +259,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   damaged-reply case and the reconnecting tRFC retry.
 
 ### Documentation
+
+- `docs/protocol/serialization.md` lists every RFC type (0–42) with its metadata type code,
+  the type codes that cannot travel over RFC, and how each DDIC data type is sent.
 
 - **Support boundary** (#91). The README has a "What works, and what doesn't" table that puts
   every capability in one group, Supported (verified live), Preview, Not implemented or
