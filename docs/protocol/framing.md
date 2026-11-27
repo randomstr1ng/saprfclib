@@ -1395,9 +1395,12 @@ type for each type the sample lacked — all of them except two holding object r
 |-----------|-----------------------------------------------------------------------------|
 | 1 | `DEC`, `CURR`, `QUAN`, `RAW`, `INT1`; `LRAW` **[ASSUMED]** (its fields sat at even offsets) |
 | 2 | `CHAR`, `CLNT`, `LANG`, `CUKY`, `UNIT`, `NUMC`, `DATS`, `TIMS`, `DATN`, `TIMN`, `LCHR`, `ACCP`, `INT2`, `PREC` |
-| 4 | `INT4`, and the string references `STRG`, `SSTR`, `RSTR` |
-| 8 | `FLTP`, `INT8`, `UTCL`, `D16D`, `D16R`, `D16N` |
-| 16 | `D34D`, `D34R`, `D34N` |
+| 4 | `INT4`, and the string references `STRG`, `SSTR`, `RSTR`, `GGM1` |
+| 8 | `FLTP`, `INT8`, `UTCL`, `D16D`, `D16R`, `D16N`, `D16S` |
+| 16 | `D34D`, `D34R`, `D34N`, `D34S` |
+
+`D16S`, `D34S` and `GGM1` were measured the same way on ABAP Platform 2025 (7, 9 and 21
+structures, 2026-11-27).
 
 The width matters when a row is
 **sent**: a TABLE's `0x0302` declares it and each `0x0303` row is that long. A reply's rows

@@ -1697,6 +1697,11 @@ _DATATYPE_ALIGNMENT: dict[str, int] = {
     **dict.fromkeys(("STRG", "SSTR", "RSTR"), 4),
     **dict.fromkeys(("DEC", "CURR", "QUAN", "RAW", "INT1"), 1),
     "LRAW": 1,  # [ASSUMED], see above
+    # The gcd of the field offsets DDIF_FIELDINFO_GET reports on ABAP Platform 2025,
+    # 2026-11-27: D16S 8 (7 structures), D34S 16 (9), GGM1 4 (21, 25 fields).
+    "D16S": 8,
+    "D34S": 16,
+    "GGM1": 4,
 }
 
 
