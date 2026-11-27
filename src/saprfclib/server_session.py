@@ -79,6 +79,28 @@ _REG_MARKER_REQUEST = b"\x00\x00\xff\xff"  # payload[76:80] request; ACK flips [
 _GW_TYPE_DONE_LOW = 0x04
 
 
+# The longest PROGRAM_ID a gateway registers (see build_registration_frame).
+_MAX_PROGRAM_ID = 63
+
+
+def check_program_id(program_id: str) -> None:
+    """Refuse a PROGRAM_ID the gateway would not register as given.
+
+    At most 63 characters and no ``*``: a live gateway served a registered 63-character
+    ID and none of 64 to 248 characters, nor one with ``*`` (probe, ABAP Platform 2025,
+    2026-11-27, docs/protocol/framing.md). Either way the registration itself raised no
+    error, so without this check the server would wait for calls that never come.
+    """
+    if not program_id:
+        raise ValueError("program_id (tpname) must be non-empty")
+    if len(program_id) > _MAX_PROGRAM_ID:
+        raise ValueError(
+            f"program_id (tpname) too long: {len(program_id)} > {_MAX_PROGRAM_ID} chars"
+        )
+    if "*" in program_id:
+        raise ValueError("program_id (tpname) must not contain '*'")
+
+
 class ServerSessionState(enum.Enum):
     """RFC server session lifecycle (RESEARCH Pattern 2)."""
 
@@ -146,16 +168,13 @@ class ServerSession:
         OS user, ``time()`` blob) are left zero — they are emitted by the live
         Transport facade and are annotated ``variable`` in the golden sidecar.
 
-        Input checks: PROGRAM_ID must be non-empty, at most 64 characters and free of
-        ``*``; gwserv must be non-empty. The 64-character and ``*`` limits are
-        [ASSUMED] (see docs/protocol/framing.md for the probe that did not settle them).
+        Input checks: PROGRAM_ID must be non-empty, at most 63 characters and free of
+        ``*``; gwserv must be non-empty. Both limits are the gateway's (live probe, ABAP
+        Platform 2025, 2026-11-27, docs/protocol/framing.md): a registered 63-character
+        ID was called, none of 64 to 248 characters was, and neither was one with ``*``.
+        The limit used to be 64, and a 64-character ID went out cut to 63 without a word.
         """
-        if not program_id:
-            raise ValueError("program_id (tpname) must be non-empty")
-        if len(program_id) > 0x40:
-            raise ValueError(f"program_id (tpname) too long: {len(program_id)} > 64 chars")
-        if "*" in program_id:
-            raise ValueError("program_id (tpname) must not contain '*'")
+        check_program_id(program_id)
         if not gwserv:
             raise ValueError("gwserv must be non-empty")
 

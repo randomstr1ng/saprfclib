@@ -324,5 +324,5 @@ hatch run lint:type                   # mypy strict over src/
 - Propose changes as PRs; don't push directly to `main`.
 - For known open gaps (DECFLOAT, wRFC E=163, bgRFC live gate, Kerberos suite `0x0008`,
   SNC protocol 1.0, SAP logon tickets `MYSAPSSO2`, RFC types 33–40, SAP LZ4 frames, the
-  inbound `0x5001` parameter block, the TID character set),
+  inbound `0x5001` parameter block),
   check the GitHub issues before starting — a capture requirement may be blocking.

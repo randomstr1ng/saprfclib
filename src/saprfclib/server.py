@@ -72,7 +72,7 @@ from saprfclib.invoke import (
     xml_parameter_records,
 )
 from saprfclib.metadata import FunctionDesc
-from saprfclib.server_session import ServerSession
+from saprfclib.server_session import _MAX_PROGRAM_ID, ServerSession, check_program_id
 from saprfclib.stores import (
     InMemoryTidStore,
     InMemoryUnitStore,
@@ -648,6 +648,10 @@ class RfcServer:
         # Registration params (program_id/gwhost/gwserv). Shape is discretion; the
         # ServerSession enforces the registration constraints when serve() registers.
         self._params = dict(params)
+        if "program_id" in self._params:
+            # Loudly here, not later in the serve thread: the gateway accepts the
+            # registration of an ID it will never route a call to.
+            check_program_id(self._params["program_id"])
         # FM_NAME.upper() -> (FunctionDesc | None, handler) — mirrors MetadataCache keying.
         # func_desc may be None for transactional handlers where dispatch short-circuits
         # before deserialization (no FunctionDesc needed at registration time).
@@ -1546,6 +1550,7 @@ class RfcServer:
         from saprfclib.transport import connect_tcp
 
         program_id = self._params["program_id"]
+        check_program_id(program_id)
         gwhost = self._params.get("gwhost", "localhost")
         gwserv = self._params["gwserv"]
 
@@ -1571,7 +1576,9 @@ class RfcServer:
             _lh = local_host.encode("ascii", "replace")[:127]
             frame_512[: len(_lh)] = _lh
             frame_512[len(_lh)] = 0
-            _pid = prog_id_enc[:63]
+            # Never cuts: build_registration_frame refuses an ID over 63 characters,
+            # the gateway's limit (server_session._MAX_PROGRAM_ID).
+            _pid = prog_id_enc[:_MAX_PROGRAM_ID]
             frame_512[128 : 128 + len(_pid)] = _pid
             frame_512[128 + len(_pid)] = 0
             transport.send_message(bytes(frame_512))

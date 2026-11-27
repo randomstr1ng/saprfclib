@@ -33,7 +33,7 @@ function name instead.
 | `ARFC_DEST_SHIP` | tRFC or qRFC submit |
 | `API_CLEAR_TID` | tRFC / qRFC confirm (what the reference client sends) |
 | `API_CREATE_TID` | a TID issued by the server (reference client, before the submit) |
-| `ARFC_DEST_CONFIRM` | inbound only: read by the RFC server's dispatch **[ASSUMED]** |
+| `ARFC_DEST_CONFIRM` | inbound only: ABAP confirming a TID to a registered server (Inbound tRFC) |
 | `BGRFC_DEST_SHIP` | bgRFC submit |
 | `BGRFC_DEST_CONFIRM` | bgRFC confirm |
 | `BGRFC_CHECK_UNIT_STATE_SERVER` | bgRFC state query |
@@ -143,8 +143,10 @@ the server (`API_CREATE_TID`, which the reference client calls before a submit) 
 
 `create_tid()` makes the TID locally: `uuid4().hex[:24].upper()`, 24 uppercase hex
 characters. A live server accepts such TIDs and runs the call under them (2026-11-12).
-saprfclib also accepts `ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-` **[ASSUMED]**: the
-characters beyond hex were not probed.
+saprfclib accepts `ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-`. A live server ran a tRFC under a
+TID made of any of these, and also under one with lowercase letters, a space or `#` (probe,
+ABAP Platform 2025, 2026-11-27: ten TIDs, each recorded as `FINISHED` in `ARFCRSTATE`). The set
+is saprfclib's own, narrower than what the server takes, because a TID keys the durable stores.
 
 ---
 
@@ -219,7 +221,21 @@ directly rather than through a structure:
 | `BGRFC_GET_UNIT_ID` | — | `UNIT_ID` BYTE(16) |
 
 Both are ordinary signatures the dictionary describes, so neither needs a bespoke
-TLV builder — the normal invoke path encodes them. `BGRFC_GET_UNIT_ID` works and
+TLV builder — the normal invoke path encodes them.
+
+`BGRFC_CHECK_UNIT_STATE_SERVER`'s `STATE` (INT4), read live from units saprfclib submitted,
+at each point of their life (ABAP Platform 2025, 2026-11-27, `tests/golden/trfc/bgrfc_states.json`):
+
+| STATE | The unit |
+|-------|----------|
+| 22206 | was never submitted |
+| 22201 | is running its call |
+| 22202 | ran and committed |
+| 22203 | was confirmed |
+| 22208 | failed in its call |
+
+`invoke.unit_state_from_wire` maps each to the `UnitState` of the same meaning; any other
+value is reported as unrecognised rather than given a name. `BGRFC_GET_UNIT_ID` works and
 returns a 16-byte ID; saprfclib does not use it (see below).
 
 ### The 32-character UnitID
@@ -388,26 +404,9 @@ It is a synchronous call to `ARFC_DEST_SHIP`, with the call to run serialized in
 declares none of them, and a server answers "Field TID did not have a value" (issue #36).
 
 ### 2. Wrong TID character set
-TIDs seen live are 24 uppercase hex characters. saprfclib also accepts
-`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-` **[ASSUMED]**; stay with hex to be safe.
-
-### 3. Confirming before success
-`confirm_tid()` removes the backend's duplicate protection. Calling it before you have verified
-the call landed defeats exactly-once. Submit and confirm are deliberately separate calls —
-keep them that way.
-
-### 4. Off-by-2× on TID / UnitID byte length
-TID = 24 characters × 2 bytes = 48 bytes UTF-16LE. The UnitID travels as its **16 raw
-bytes**, not as the 32-character hex text. All character length arithmetic is in code
-units, not Python `len()`.
-
-### 5. bgRFC unit type `'T'` vs `'Q'`
-The `UNIT_KIND` sent must match the queue list: the type `'T'` value when `queues=[]`, the
-`'Q'` value when queues are given. A mismatch is not reported; the unit reads as `NOT_FOUND`.
-
-### 6. Looking for a call-type byte
-The discriminator is the **function name string** in TLV `0x0102`, not a separate byte. Branch
-on the decoded function name before the normal handler lookup.
+TIDs SAP issues are 24 uppercase hex characters. The server accepts more (The 24-character
+TID, above); saprfclib accepts `ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-`, and `create_tid()`
+makes uppercase hex.
 
 ---
 

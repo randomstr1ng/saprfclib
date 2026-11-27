@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from saprfclib.codec import decode, encode
+from saprfclib.codec import _default_field_value, decode, encode
 from saprfclib.compress import DecompressError, sapcompress_compress_lzh, sapcompress_decompress
 from saprfclib.exceptions import (
     AbapApplicationError,
@@ -644,9 +644,22 @@ def build_invoke_request(
         if field.direction == RFC_EXPORT:
             continue  # server fills EXPORT params; we only declare, not supply data
         name_upper = field.name.upper()
-        if name_upper not in params_upper:
+        if name_upper in params_upper:
+            value = params_upper[name_upper]
+        elif (
+            field.direction == RFC_CHANGING
+            and not transactional
+            and field.rfctype != _RFCTYPE_TABLE
+            and not travels_as_xml(field)
+        ):
+            # An unsupplied flat CHANGING parameter is sent with its initial value, as
+            # the reference client sends it; a deep one is left out, as it leaves it out
+            # (live, ABAP Platform 2025, 2026-11-27, changing_unsupplied.json). ABAP
+            # treats a declared CHANGING parameter as supplied either way and starts it
+            # initial, so the result is the same; the request is now the reference's.
+            value = _default_field_value(field)
+        else:
             continue  # optional param not supplied by caller — skip
-        value = params_upper[name_upper]
 
         if travels_as_xml(field):
             # A deep structure, or a table-typed parameter outside TABLES: one XML
@@ -736,9 +749,11 @@ _TID_LN = 24  # every TID seen live has 24 characters (docs/protocol/trfc.md)
 # characters is the longest a live server accepted (probe 2026-11-12, trfc.md).
 _MAX_QUEUE_NAME = 24
 
-# TID character set [ASSUMED]. Every TID seen live was uppercase hex, a subset of this
-# set; a 24-character uppercase hex TID made by create_tid() is accepted by a live
-# server (2026-11-12). The other characters were not probed.
+# TID character set. A live server ran a tRFC under a TID made of any of these
+# characters, and also of lowercase letters, a space or '#' (probe, ABAP Platform 2025,
+# 2026-11-27: each recorded as FINISHED in ARFCRSTATE). The set is saprfclib's choice,
+# narrower than what the server takes: a TID keys the durable stores, and SAP's own
+# TIDs are uppercase hex (docs/protocol/trfc.md).
 _TID_ALPHABET: frozenset[str] = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_=@-")
 
 # tRFC system function modules (live captures above).
@@ -1282,16 +1297,16 @@ def bgrfc_unit_id_bytes(unit_id: str) -> bytes:
 # the 212xx block belongs to the scheduler's own execution states and is not
 # what BGRFC_CHECK_UNIT_STATE_SERVER returns to a client.
 #
-# 22206 is live-confirmed: querying a unit that was never submitted answers with
-# it, which is exactly "no record of this unit". The rest are [ASSUMED] -- their
-# numbering is contiguous with the confirmed one and their names describe the
-# lifecycle, but no capture has shown them yet. Submitting a unit and watching
-# the value move would settle them, which is blocked on the submit payload.
-_WIRE_STATE_NOT_IN_DB = 22206  # live-confirmed
-_WIRE_STATE_IN_EXECUTION = 22201  # [ASSUMED]
-_WIRE_STATE_FINISHED = 22202  # [ASSUMED]
-_WIRE_STATE_CONFIRMED = 22203  # [ASSUMED]
-_WIRE_STATE_WRONG_STATE = 22209  # [ASSUMED]
+# Each value seen live, querying units saprfclib submitted at each point of their
+# life (ABAP Platform 2025, 2026-11-27; tests/golden/trfc/bgrfc_states.json): a unit
+# never submitted, one running (a busy loop), one committed, one confirmed, and one
+# whose call failed. Any other value is reported as unrecognised, not given a name.
+_WIRE_STATE_NOT_IN_DB = 22206
+_WIRE_STATE_IN_EXECUTION = 22201
+_WIRE_STATE_FINISHED = 22202
+_WIRE_STATE_CONFIRMED = 22203
+# A unit whose call failed. 22209 was [ASSUMED] for this before; it has not been seen.
+_WIRE_STATE_FAILED = 22208
 
 
 def unit_state_from_wire(value: int) -> tuple[str, bool]:
@@ -1307,7 +1322,7 @@ def unit_state_from_wire(value: int) -> tuple[str, bool]:
         _WIRE_STATE_IN_EXECUTION: "IN_PROCESS",
         _WIRE_STATE_FINISHED: "COMMITTED",
         _WIRE_STATE_CONFIRMED: "CONFIRMED",
-        _WIRE_STATE_WRONG_STATE: "ROLLED_BACK",
+        _WIRE_STATE_FAILED: "ROLLED_BACK",
     }
     name = known.get(value)
     return (name, True) if name is not None else (str(value), False)
@@ -1316,15 +1331,14 @@ def unit_state_from_wire(value: int) -> tuple[str, bool]:
 def unit_state_to_wire(name: str) -> int:
     """The wire STATE integer for a UnitState name (the reverse of unit_state_from_wire).
 
-    Carries the same labels as the table it inverts: only NOT_FOUND (22206) was seen
-    live as a state answer; the others are [ASSUMED].
+    Every value is one a system answered with (see _WIRE_STATE_*).
     """
     for value, known in (
         (_WIRE_STATE_NOT_IN_DB, "NOT_FOUND"),
         (_WIRE_STATE_IN_EXECUTION, "IN_PROCESS"),
         (_WIRE_STATE_FINISHED, "COMMITTED"),
         (_WIRE_STATE_CONFIRMED, "CONFIRMED"),
-        (_WIRE_STATE_WRONG_STATE, "ROLLED_BACK"),
+        (_WIRE_STATE_FAILED, "ROLLED_BACK"),
     ):
         if known == name:
             return value

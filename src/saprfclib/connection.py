@@ -1684,8 +1684,9 @@ def _parse_ddif_dfies_rows(response: bytes) -> list[tuple[Any, ...]]:
 # plus up to 40 structures for each type below that the sample lacked (all matched
 # except two holding object references, REF, which are not flat). The alignment
 # of each type is its gcd of field offsets across those structures; D34* (16) and the
-# string references (4) were found that way, not assumed. LRAW is [ASSUMED] 1: its
-# fields always sat at even offsets after their INT2 length field, which fits 1 or 2.
+# string references (4) were found that way, not assumed. LRAW is 2 the same way (79
+# fields in 78 structures, ABAP Platform 2025, 2026-11-27); every one directly follows
+# its INT2 length field, so 1 and 2 give the same layout.
 _DATATYPE_ALIGNMENT: dict[str, int] = {
     **dict.fromkeys(
         ("CHAR", "CLNT", "LANG", "CUKY", "UNIT", "NUMC", "DATS", "TIMS", "DATN", "TIMN"), 2
@@ -1696,7 +1697,7 @@ _DATATYPE_ALIGNMENT: dict[str, int] = {
     **dict.fromkeys(("D34D", "D34R", "D34N"), 16),
     **dict.fromkeys(("STRG", "SSTR", "RSTR"), 4),
     **dict.fromkeys(("DEC", "CURR", "QUAN", "RAW", "INT1"), 1),
-    "LRAW": 1,  # [ASSUMED], see above
+    "LRAW": 2,
     # The gcd of the field offsets DDIF_FIELDINFO_GET reports on ABAP Platform 2025,
     # 2026-11-27: D16S 8 (7 structures), D34S 16 (9), GGM1 4 (21, 25 fields).
     "D16S": 8,
@@ -4338,8 +4339,8 @@ class Connection:
 
         The returned TID is ``uuid4().hex[:24].upper()``: 24 uppercase hex characters,
         the same length and character set as every TID seen live (the TIDs SAP itself
-        issues are uppercase hex fields, docs/protocol/trfc.md). Whether a server also
-        accepts the other characters of the accepted TID set is [ASSUMED].
+        issues are uppercase hex fields, docs/protocol/trfc.md). A server also runs calls
+        under TIDs of the other characters saprfclib accepts (live probe, 2026-11-27).
 
         Returns:
             A 24-character uppercase string suitable for use as a TID.
