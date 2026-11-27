@@ -136,14 +136,16 @@ Offset  Length  Notes
                           single-frame reply, and client requests)
  32      2      zero in all 85 frames observed
  34      1      0x00 in every GW-framed golden fixture. Meaning not established.
- 35      1      0x12 on exactly the two captured refusals — cpic_logon_error_response
-                  and signon_incomplete_752_response — and 0 on the other 83
-                  frames. [ASSUMED] that it marks a refused exchange: two frames
-                  is a correlation with an independently identified category, not
-                  an enumeration.
- 36      4      zero in every GW-framed golden fixture, including both refusals.
-                  [ASSUMED] a CPIC return code; a capture of a CPIC-level error
-                  that sets it would settle this.
+ 35      1      0x12 on every frame that ends a conversation by failure or
+                  cancel, 0 on all others. Seen on the two refusals in the golden
+                  fixtures (cpic_logon_error_response, signon_incomplete_752_response)
+                  and, over 3122 frames of live captures on 2026-11-26/27: a refused
+                  logon, ABAP reporting a short dump (0x0402), ABAP's answer to a
+                  client that reported a failing callback handler, and the gateway's
+                  cancel acknowledgement 0x06D6 (8 frames). An ABAP exception (0x0401),
+                  a normal reply, has 0.
+ 36      4      zero in every frame captured, the failures and cancels above
+                  included. Meaning not established.
  40      8      GW connection handle, 8 ASCII characters (session.py
                   _GW_HANDLE_OFFSET = 40; e.g. stfc_connection_response.bin). 8
                   blanks on the outbound 0x0601 connect.
@@ -303,7 +305,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0103    | capture     | 4 bytes: `00000e0b` in a logon, `00000e09` in a tRFC call header     |
 | 0x0106    | capture     | 11 bytes, codepage descriptor (logon_request.bin)                    |
 | 0x0130    | capture     | Program name: in replies UTF-16LE padded to 80 bytes (e.g. "SAPLSTFC"); in the logon frame 7-byte ASCII "python3" (logon_request.bin) |
-| 0x0131    | [ASSUMED]   | EPP (Extended Performance Profile)                                    |
+| 0x0131    | capture     | 230 bytes starting `*TH*`, in every call ABAP sends to a registered server (trfc_inbound.json, bgrfc_inbound.json). Its fields are not established; saprfclib does not read it |
 | 0x0160    | [ASSUMED]   | Int16 field                                                           |
 | 0x0201    | capture     | Parameter name (UTF-16LE, scalar IMPORTING/EXPORTING pair)           |
 | 0x0203    | capture     | Parameter value CHAR (UTF-16LE, fixed-width space-padded)            |
@@ -322,7 +324,7 @@ tRFC exchange in `tests/golden/trfc/trfc_reference.json`.
 | 0x0334    | capture     | The row of a preceding `0x0333` edit (table_delta.json) |
 | 0x0335    | capture     | Returned form of a table the client sent: 12 bytes, three BE uint32 `[10, dm_table_id, row_count]`, followed by `0x0302` and `0x0304` rows (basxml_et_data_response.bin: `[10, 1, 4]`) |
 | 0x0336    | capture     | 4-byte BE DM table id: closes the section `0x0331` opened (basxml_et_data_response.bin, table_delta.json) |
-| 0x0337    | [ASSUMED]   | Marker / empty record                                                 |
+| 0x0337    | capture     | Empty record, after `0x0130` in every call ABAP sends to a registered server (trfc_inbound.json, bgrfc_inbound.json). Its role is not established |
 | 0x0401    | capture     | ABAP exception key/name (kernel 793; e.g. "FU_NOT_FOUND")            |
 | 0x0402    | capture     | ABAP exception message text (kernel 752; e.g. "Logon data incomplete.") |
 | 0x0403    | capture     | ABAP exception key/name (kernel 752; alternative to 0x0401)          |
@@ -532,11 +534,24 @@ text.
 A large table is sent SAPCOMPRESS-compressed under tag `0x0305` instead of one
 `0x0303`/`0x0304` record per row. In the committed captures a `PARAMS` table of
 404 × 17 = 6868 bytes arrives uncompressed (`gfi_uncompressed_params_response.bin`) and
-one of 404 × 44 = 17776 bytes compressed (`gfi_compressed_params_response.bin`). The
-exact size at which the server switches is not established: [ASSUMED] somewhere between
-those two sizes, roughly 8 KB; captures of tables just either side of a candidate
-threshold would settle it. This is not a rare path: `RFC_GET_FUNCTION_INTERFACE`
-metadata for any function module with enough parameters arrives compressed.
+one of 404 × 44 = 17776 bytes compressed (`gfi_compressed_params_response.bin`).
+
+The server compresses a table by its size in bytes, rows × row width: a probe on ABAP Platform
+2025 (2026-11-27) read tables of three row widths either side of the switch.
+
+| Rows × width | Bytes | Sent as |
+|--------------|-------|---------|
+| 3 × 2000 (`STFC_PERFORMANCE` `ETAB1000`) | 6000 | rows |
+| 7 × 1024 (`RFC_READ_TABLE` `DATA`) | 7168 | rows |
+| 12 × 664 (`STFC_PERFORMANCE` `ETAB0332`) | 7968 | rows |
+| 4 × 2000 | 8000 | compressed |
+| 8 × 1024 | 8192 | compressed |
+| 13 × 664 | 8632 | compressed |
+
+So the switch is above 7968 bytes and at most 8000; the exact byte in between is not pinned and
+does not matter to a reader, which takes either form. This is not a rare path:
+`RFC_GET_FUNCTION_INTERFACE` metadata for any function module with enough parameters arrives
+compressed.
 
 Golden fixture: `tests/golden/framing/gfi_compressed_params_response.bin` — the GFI
 response for `BAPI_USER_GET_DETAIL` (44 parameters, 404 × 44 = 17776 bytes).
@@ -605,15 +620,26 @@ The exception NUMBER is the ABAP MESSAGE number (3-digit "000" when no explicit 
 Confirmed from live capture — golden fixture
 `tests/golden/framing/server_registration_request.bin` (457 bytes including the NI header).
 
-Parameter checks `saprfclib` applies before the frame is built (`server_session.py`):
-PROGRAM_ID must be non-empty, at most 64 characters, and must not contain `*`; the gateway
-host string is capped at 2048 characters; the gateway service must be non-empty. The 64-character
-and `*` limits are **[ASSUMED]**. A probe against A4H (2026-11-12) did not settle them: with
-program IDs of 13, 64 and 65 characters the registration socket stayed open and waiting, and
-with a `*` in the ID it ended at once without an error, but whether the gateway registered each
-one could not be read back (the gateway monitor function modules are not authorised for the
-test user). A registration check from SMGW, or calling the program through the gateway, would
-settle both limits.
+Parameter checks `saprfclib` applies when an `RfcServer` is created and before it registers
+(`server_session.check_program_id`): PROGRAM_ID must be non-empty, at most **63** characters
+and must not contain `*`; the gateway host string is capped at 2048 characters; the gateway
+service must be non-empty.
+
+Both PROGRAM_ID limits are the gateway's. A probe on ABAP Platform 2025 (2026-11-27)
+registered a server under each ID, with the full ID in the TPNAME frame, pointed a TCP/IP
+destination at it and called through it:
+
+| PROGRAM_ID | Called through the destination |
+|------------|--------------------------------|
+| 63 characters | yes |
+| 64, 65, 100, 200, 248 characters | no (`CPIC-CALL: 'ThSAPOCMINIT'`) |
+| 15 characters containing `*` | no |
+
+In none of the refused cases did the registration itself fail: the gateway accepted it and
+never routed a call there. A destination naming a registered 33-character ID with only its
+last character changed was not routed to it either. Before this,
+saprfclib allowed 64 characters and cut the ID to 63 in the TPNAME frame without a word, and
+the check did not run on the live registration path at all.
 
 **Registration request (server → gateway)** — the same `0x0601` GW_CONNECT frame a client
 emits, and independent of the PROGRAM_ID on the wire:
@@ -1393,14 +1419,15 @@ type for each type the sample lacked — all of them except two holding object r
 
 | Alignment | DDIC data types (each type's gcd of field offsets across those structures) |
 |-----------|-----------------------------------------------------------------------------|
-| 1 | `DEC`, `CURR`, `QUAN`, `RAW`, `INT1`; `LRAW` **[ASSUMED]** (its fields sat at even offsets) |
-| 2 | `CHAR`, `CLNT`, `LANG`, `CUKY`, `UNIT`, `NUMC`, `DATS`, `TIMS`, `DATN`, `TIMN`, `LCHR`, `ACCP`, `INT2`, `PREC` |
+| 1 | `DEC`, `CURR`, `QUAN`, `RAW`, `INT1` |
+| 2 | `CHAR`, `CLNT`, `LANG`, `CUKY`, `UNIT`, `NUMC`, `DATS`, `TIMS`, `DATN`, `TIMN`, `LCHR`, `ACCP`, `INT2`, `PREC`, `LRAW` |
 | 4 | `INT4`, and the string references `STRG`, `SSTR`, `RSTR`, `GGM1` |
 | 8 | `FLTP`, `INT8`, `UTCL`, `D16D`, `D16R`, `D16N`, `D16S` |
 | 16 | `D34D`, `D34R`, `D34N`, `D34S` |
 
-`D16S`, `D34S` and `GGM1` were measured the same way on ABAP Platform 2025 (7, 9 and 21
-structures, 2026-11-27).
+`D16S`, `D34S`, `GGM1` and `LRAW` were measured the same way on ABAP Platform 2025 (7, 9, 21 and
+78 structures, 2026-11-27). Every `LRAW` field directly follows its `INT2` length field, so an
+alignment of 1 would give the same layouts.
 
 The width matters when a row is
 **sent**: a TABLE's `0x0302` declares it and each `0x0303` row is that long. A reply's rows
@@ -1763,13 +1790,17 @@ reply each `0x0303` record is **402** bytes where the width says 404:
 table's byte count divided by the `0x0302` row count, which gives 402 for the first form
 and 404 for the second. The note is here because the obvious simplification is wrong.
 
-### Unsupplied optional CHANGING parameters [ASSUMED]
+### Unsupplied optional CHANGING parameters
 
 Supplied CHANGING parameters use `0x0201` + `0x0203`, same as IMPORTING (live,
-`stfc_changing_request.bin`). Not established: whether an *unsupplied* optional CHANGING parameter should be omitted from the
-request entirely or sent as a zero-value placeholder. `saprfclib` omits it, matching its policy
-for IMPORTING and EXPORTING. If a given function module expects an explicit placeholder, the
-call would fail at the ABAP layer rather than silently misbehave.
+`stfc_changing_request.bin`). An unsupplied optional one is still declared in `0x0205`, and the
+reference client then sends a flat one with its initial value (`0x0203` of blanks for a CHAR,
+zeros for an INT) and a deep one not at all (live, ABAP Platform 2025, 2026-11-27,
+`tests/golden/framing/changing_unsupplied.json`). saprfclib does the same, and its requests are
+byte-identical to the reference client's in all three captured cases. ABAP reported both flat
+parameters as supplied (`IS SUPPLIED`) whether a value came or not, started them initial, and
+returned them changed: the declaration is what makes a CHANGING parameter supplied. A tRFC
+call, which declares nothing, sends only what the caller gives.
 
 ---
 

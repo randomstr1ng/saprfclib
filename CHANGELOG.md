@@ -116,6 +116,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- An unsupplied optional flat CHANGING parameter is now sent with its initial value, and a
+  deep one left out, as the reference client does; requests are byte-identical to its. ABAP
+  treats a declared CHANGING parameter as supplied either way, so results do not change.
+
 - **A release is only published after it is verified** (#94). The publish workflow now checks
   that it runs for a `vX.Y.Z` tag pointing at the checked-out commit on `main`, runs the full CI
   workflow (every OS and Python version, docs build) on it, and checks that the wheel and sdist
@@ -124,6 +128,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md`.
 
 ### Fixed
+
+- **A failed bgRFC unit is reported as `ROLLED_BACK`.** `get_unit_state()` knew the failure
+  state as 22209, a value no system was seen to send; a live unit whose call failed answers
+  22208, which was reported as unrecognised. Every state is now one read live: 22201 running,
+  22202 committed, 22203 confirmed, 22206 unknown unit, 22208 failed.
+- **`RfcServer` refused no PROGRAM_ID on its real registration path, and allowed 64
+  characters.** The gateway routes calls to IDs of at most 63 characters and none with `*`,
+  but accepts the registration either way, so such a server waited for calls that never
+  came; a 64-character ID was also cut to 63 on the wire. Both limits are now checked when
+  the server is created.
 
 - **Structures with a PREC, GGM1, D16S or D34S field could not be called.** GGM1 (geometry),
   D16S and D34S were unknown DDIC types, so their fields were dropped from the layout and ABAP
@@ -262,6 +276,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `docs/protocol/serialization.md` lists every RFC type (0–42) with its metadata type code,
   the type codes that cannot travel over RFC, and how each DDIC data type is sent.
+- Settled by live probes, no longer `[ASSUMED]`: the TID character set (a server runs tRFCs
+  under far more characters than saprfclib accepts), the size at which a table reply is
+  compressed (above 7968 bytes, at most 8000), the alignment of LRAW (2), what gateway-header
+  byte 35 marks (`0x12` on a frame that ends a conversation by failure or cancel), and that
+  `0x0131` / `0x0337` occur in every call ABAP sends to a registered server.
 
 - **Support boundary** (#91). The README has a "What works, and what doesn't" table that puts
   every capability in one group, Supported (verified live), Preview, Not implemented or

@@ -356,3 +356,18 @@ def test_5001_extraction_is_linear_not_quadratic() -> None:
     # bound is loose so the test is not flaky on a slow machine, and still fails
     # by three orders of magnitude if the quadratic behaviour returns.
     assert elapsed < 1.0, f"extraction took {elapsed:.2f}s — quadratic scan is back"
+
+
+# --------------------------------------------------------------------------- #
+# PROGRAM_ID limits (live probe, 2026-11-27, docs/protocol/framing.md)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("program_id", ["A" * 64, "A" * 100, "ZSAPRFCLIB_ST*R", ""])
+def test_a_program_id_the_gateway_would_not_route_to_is_refused(program_id: str) -> None:
+    with pytest.raises(ValueError, match="program_id"):
+        RfcServer({"program_id": program_id, "gwhost": "gw.example", "gwserv": "sapgw00"})
+
+
+def test_a_63_character_program_id_is_accepted() -> None:
+    RfcServer({"program_id": "A" * 63, "gwhost": "gw.example", "gwserv": "sapgw00"})
