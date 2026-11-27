@@ -7,12 +7,10 @@
 # Coverage:
 #   - Registering an async def handler and dispatching one inbound frame
 #   - The awaited handler's dict is serialized back via dispatch_inbound core
-#   - TRFC-03: server returns RFC_EXECUTED for a known TID (async store check)
+#   - TRFC-03: a known TID is answered as done and not run again (async store check)
 #   - TRFC-07: bgRFC server callbacks fire in correct order with async handler
 
 from __future__ import annotations
-
-import struct
 
 import pytest
 
@@ -31,7 +29,7 @@ from saprfclib.invoke import build_invoke_request  # noqa: E402
 from saprfclib.types import RFC_EXPORT, RFC_IMPORT, FieldDesc, FunctionDesc  # noqa: E402
 from tests._bgrfc_fixture import descriptors  # noqa: E402
 from tests._bgrfc_inbound import live_calls, ship_frame, unit_frame  # noqa: E402
-from tests._trfc_fixture import forged_inbound_trfc  # noqa: E402
+from tests._trfc_fixture import forged_inbound_trfc, trfc_descriptors  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Module-level helpers
@@ -142,24 +140,24 @@ async def test_async_server_handler_is_async_def() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# TRFC-03: server returns RFC_EXECUTED for a known TID
+# TRFC-03: a known TID is not run again
 # --------------------------------------------------------------------------- #
 
 
 @_SKIP_SERVER
 async def test_async_server_duplicate_tid() -> None:
-    """TRFC-03: AsyncRfcServer returns RFC_EXECUTED for a duplicate inbound TID.
+    """TRFC-03: AsyncRfcServer does not run a duplicate inbound TID again.
 
-    When an inbound tRFC frame arrives with a TID already marked as executed,
-    the server must return the RFC_EXECUTED response (return code 16) without
-    calling the handler a second time.
+    When an inbound tRFC frame arrives with a TID already marked as executed, the
+    server answers it as a LUW that ran, without calling the handler a second time;
+    ABAP then confirms it (live probe, tests/golden/trfc/trfc_inbound.json).
 
     This prevents double-execution of non-idempotent ABAP logic.  The test
     drives two identical inbound tRFC frames through _async_dispatch.
 
     Asserts:
     - Handler called exactly once across two identical tRFC frames.
-    - Second dispatch response encodes return code 16 (RFC_EXECUTED).
+    - The second answer is the first one: success.
     """
     server = AsyncRfcServer({})
     call_count = 0
@@ -170,6 +168,7 @@ async def test_async_server_duplicate_tid() -> None:
         call_count += 1
         return {}
 
+    server.set_trfc_descriptors(*trfc_descriptors())
     tid = "ABCDEF1234567890ABCDEF12"  # 24 chars, valid RFC alphabet
     frame = forged_inbound_trfc(tid, "STFC_CONNECTION")
 
@@ -182,9 +181,8 @@ async def test_async_server_duplicate_tid() -> None:
     resp2 = await server._async_dispatch(frame)
     assert call_count == 1  # still 1 — not re-invoked
 
-    # RFC_EXECUTED return code (16 = 0x10) present in second response
-    rc_executed = struct.pack(">I", 16)
-    assert rc_executed in resp2
+    # Answered as a LUW that ran, which ABAP confirms (live probe, trfc_inbound.json).
+    assert resp2 == resp1
 
 
 # --------------------------------------------------------------------------- #

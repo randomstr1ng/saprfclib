@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`RfcServer` receives tRFC and qRFC LUWs from ABAP** (#122). ABAP sends a LUW to a
+  registered server as `ARFC_DEST_SHIP` with the `STATE` and `DATA` rows a client submits; the
+  server reads the TID and the calls from them, with the system's own row layouts given once
+  with the new `set_trfc_descriptors()`. The calls run in order, each decoded against its
+  handler's descriptor, deep parameters included; the LUW is answered as the NW RFC SDK's
+  server answers it, and `ARFC_DEST_CONFIRM` now confirms the TID (it was a placeholder). A
+  failing call stops the LUW and is reported as a failure. Live, with basXML on and off: one-
+  call, three-call and qRFC LUWs ran and ABAP removed their TIDs; a failing LUW stayed in ABAP
+  as `SYSFAIL` with its message; a TID the check callback reported as executed was confirmed
+  without running. The TID is no longer looked for in an `ARFCTID` parameter or a `0x5001`
+  block, neither of which these captures showed.
+
 - **`RfcServer` receives bgRFC units from ABAP** (#119). A unit that ABAP sends to a registered
   server through a bgRFC destination is read as it arrives: the unit from `SSTATE`, its calls
   from `SDATA` (the same layout the client writes, new `parse_bgrfc_sdata()`), each call decoded
@@ -112,6 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONTRIBUTING.md`.
 
 ### Fixed
+
+- **`RfcServer` decoded inbound TABLE parameters at the wrong row width.** It measured a table's
+  rows without the row count `0x0302` declares, so rows sent at their used width (ABAP's
+  `ARFC_DEST_SHIP` rows, 1917 bytes for a 1918-byte layout) were cut wrong or dropped. It now
+  passes the declared count, as the client does.
 
 - **`RfcServer` answered a call it could not run in an uncaptured form** (`0x0500`, an
   `[ASSUMED]` return code 3, `0x0402`). It now answers as the reference SDK's server does:

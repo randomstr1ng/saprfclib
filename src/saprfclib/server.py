@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import logging
 import struct
@@ -59,8 +60,10 @@ from saprfclib.connection import (
 from saprfclib.invoke import (
     _TID_ALPHABET,
     _TID_LN,
+    _TRFC_STATE_TID,
     _decode_utf16le,
     _extract_name_value_pairs,
+    _iter_tlv_records,
     _parse_tlv_stream,
     bgrfc_unit_type_from_kind,
     parse_bgrfc_sdata,
@@ -109,12 +112,12 @@ _TAG_ERROR_MESSAGE = 0x0402  # error message text (server-direction; from fixtur
 
 _logger = logging.getLogger(__name__)
 
-# Return codes in the reply's 0x0420 record. 0 = OK is seen in every successful reply.
-# 16 (TID already executed) is [ASSUMED]: no capture of a SAP system receiving a
-# duplicate inbound call from a registered server exists. A failure carries no 0x0420
-# at all (_build_system_failure).
+# Return codes. 0 = OK in the reply's 0x0420 record, as in every successful reply. A
+# failure carries no 0x0420 at all (_build_system_failure). 16 is what an on_check /
+# check callback returns for a TID or unit already executed, as in the SDK's API; it is
+# not sent: such a LUW is answered as one that ran (live probe, trfc_inbound.json).
 _RC_OK = 0
-_RC_EXECUTED = 16  # [ASSUMED], see above — TID already executed
+_RC_EXECUTED = 16
 
 # How the reference SDK's server answers a call it cannot run (live captures through a
 # registered destination, ABAP Platform 2025, 2026-11-26, tests/golden/framing/
@@ -136,9 +139,6 @@ _BGRFC_CHECK_UNIT_STATE_SERVER = "BGRFC_CHECK_UNIT_STATE_SERVER"  # bgRFC state 
 # reference server (live capture, ABAP Platform 2025, 2026-11-26,
 # tests/golden/trfc/bgrfc_inbound.json).
 _BGRFC_SERVER_STATE_DONE = 22202
-
-# TID parameter name as carried in the ARFC_DEST_SHIP frame (invoke.py: ARFCTID).
-_PARAM_ARFCTID = "ARFCTID"
 
 
 # Directions whose values the SERVER produces on the response (Pitfall 4 mirror of
@@ -360,80 +360,6 @@ def _extract_5001_params(data: bytes) -> dict[str, str]:
     return params
 
 
-_5001_HEX = frozenset(b"0123456789ABCDEF")
-_5001_FM = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
-
-
-def _scan_5001_char_values(data: bytes) -> list[tuple[int, int, bytes]]:
-    """Scan all 0x43 [len] 0x80 [len bytes] CHAR encodings in a 5001 block.
-
-    Returns [(offset, length, value_bytes), ...] in encounter order.
-    Jumps past each match so nested false-positives are avoided.
-    """
-    results: list[tuple[int, int, bytes]] = []
-    n = len(data)
-    i = 0
-    while i < n - 2:
-        if data[i] == 0x43 and data[i + 2] == 0x80:
-            vlen = data[i + 1]
-            vend = i + 3 + vlen
-            if vend <= n:
-                results.append((i, vlen, data[i + 3 : vend]))
-                i = vend
-                continue
-        i += 1
-    return results
-
-
-def _extract_trfc_params_from_5001(raw_5001: bytes) -> tuple[str, str]:
-    """Extract (tid_24, arfcfnam) from an ARFC_DEST_SHIP 0x5001 block.
-
-    confirmed ARFCSSTATE field order (getTidFields / getArfcDestShipFunctionDesc):
-      ARFCIPID(8) + ARFCPID(4) + ARFCTIME(8) + ARFCTIDCNT(4) consecutive CHAR values
-      → concatenated to form the 24-char TID (all uppercase hex from IP/PID/time/cnt).
-    ARFCFNAM (the wrapped function module name): first CHAR value after the TID group
-      that contains only uppercase ASCII + digits + underscore, with at least one '_'.
-
-    Returns ("", "") when the block cannot be parsed (defensive, T-06-D02).
-    """
-    values = _scan_5001_char_values(raw_5001)
-
-    # Find TID: 4 offset-consecutive CHAR values with exactly (8,4,8,4) hex bytes.
-    tid = ""
-    tid_end_idx = 0
-    for j in range(len(values) - 3):
-        o0, l0, v0 = values[j]
-        o1, l1, v1 = values[j + 1]
-        o2, l2, v2 = values[j + 2]
-        o3, l3, v3 = values[j + 3]
-        if (
-            l0 == 8
-            and l1 == 4
-            and l2 == 8
-            and l3 == 4
-            and all(b in _5001_HEX for b in v0)
-            and all(b in _5001_HEX for b in v1)
-            and all(b in _5001_HEX for b in v2)
-            and all(b in _5001_HEX for b in v3)
-            and o1 == o0 + 3 + l0
-            and o2 == o1 + 3 + l1
-            and o3 == o2 + 3 + l2
-        ):
-            tid = (v0 + v1 + v2 + v3).decode("ascii")
-            tid_end_idx = j + 4
-            break
-
-    # Find ARFCFNAM: first CHAR value after TID group that looks like a SAP FM name.
-    # SAP function module names are uppercase+digits+underscore and always have '_'.
-    arfcfnam = ""
-    for _, vlen, val in values[tid_end_idx:]:
-        if 1 <= vlen <= 30 and all(b in _5001_FM for b in val) and b"_" in val:
-            arfcfnam = val.decode("ascii")
-            break
-
-    return tid, arfcfnam
-
-
 # Gateway ports, per SAP's "TCP/IP Ports of All SAP Products":
 #   Gateway          sapgw<NN>    3300   range 3300-3399   33<NN>
 #   Gateway secured  sapgw<NN>s   4800   range 4800-4899   48<NN>
@@ -550,6 +476,114 @@ def _bgrfc_unit_of(tlv: bytes) -> tuple[str, str] | None:
     return raw_id.hex().upper(), unit_type
 
 
+# --------------------------------------------------------------------------- #
+# Inbound tRFC / qRFC (#122)
+# --------------------------------------------------------------------------- #
+#
+# ABAP sends a LUW to a registered server as ARFC_DEST_SHIP with the STATE and DATA
+# tables a client submits (docs/protocol/trfc.md, "Inbound tRFC"; live capture,
+# ABAP Platform 2025, 2026-11-27, tests/golden/trfc/trfc_inbound.json). The row
+# layouts are ARFC_DEST_SHIP's, from the system's metadata (set_trfc_descriptors).
+
+
+def _rows_present(raw: bytes, field: FieldDesc, count: int | None) -> list[dict[str, Any]]:
+    """A table's rows, decoded as far as each row reaches.
+
+    ABAP sends STATE's rows as 0x0304 records of 955 bytes where the layout is 972:
+    everything through ARFCRESERV, then 23 bytes of HASH, RAW(40) (live, same
+    capture). What the short record stands for is not established, so a field the
+    row does not reach in full is left out rather than read from a guess.
+    """
+    if field.type_desc is None:
+        raise ValueError(f"the descriptor has no row layout for {field.name}")
+    if not count:
+        return []
+    if len(raw) % count:
+        raise ValueError(f"{field.name}: {len(raw)} bytes do not divide into {count} rows")
+    width = len(raw) // count
+    fields = [
+        f
+        for f in field.type_desc.fields
+        if (f.uc_offset + f.uc_length if field.unicode_mode else f.nuc_offset + f.nuc_length)
+        <= width
+    ]
+    if not fields:
+        raise ValueError(f"{field.name}: a {width}-byte row holds none of its fields")
+    present = dataclasses.replace(
+        field, type_desc=dataclasses.replace(field.type_desc, fields=fields)
+    )
+    rows: list[dict[str, Any]] = decode(RFCTYPE_TABLE, raw, present, count)
+    return rows
+
+
+def _tid_of(row: dict[str, Any]) -> str:
+    """The TID from a row's four TID columns (STATE, DATA and CALLID alike)."""
+    tid = "".join(str(row.get(name, "")) for name in _TRFC_STATE_TID)
+    if len(tid) != _TID_LN or any(c not in _TID_ALPHABET for c in tid):
+        raise ValueError(f"TID {tid!r} is not {_TID_LN} characters of the TID alphabet")
+    return tid
+
+
+def _trfc_luw(tlv: bytes, ship: FunctionDesc) -> tuple[str, list[tuple[str, bytes]]]:
+    """(TID, [(function, serialized call)]) of an ARFC_DEST_SHIP from ABAP.
+
+    One STATE row per call, numbered by ARFCLUWCNT; the call itself is the DATA rows
+    with the same ARFCLUWCNT in ARFCBLCNT order, their ARFCDATAnn columns joined.
+    That is the client's layout (build_trfc_request), and it is what ABAP sent.
+    """
+    tables = {f.name: f for f in ship.parameters if f.type_desc is not None}
+    if "STATE" not in tables or "DATA" not in tables:
+        raise ValueError("the ARFC_DEST_SHIP descriptor has no STATE / DATA tables")
+    counts: dict[str, int] = {}
+    raw = {
+        name.upper(): value for name, value in _extract_name_value_pairs(tlv, row_counts_out=counts)
+    }
+    state = _rows_present(raw.get("STATE", b""), tables["STATE"], counts.get("STATE"))
+    data = _rows_present(raw.get("DATA", b""), tables["DATA"], counts.get("DATA"))
+    if not state:
+        raise ValueError("the LUW has no STATE rows")
+    tids = {_tid_of(row) for row in state} | {_tid_of(row) for row in data}
+    if len(tids) != 1:
+        raise ValueError(f"the rows carry {len(tids)} TIDs, not one")
+    data_layout = tables["DATA"].type_desc
+    assert data_layout is not None  # tables holds only fields with a layout
+    # The client builds DATA rows from the same ARFCDATAnn columns (build_trfc_request).
+    columns = [f.name for f in data_layout.fields if f.name.startswith("ARFCDATA")]
+    calls: list[tuple[str, bytes]] = []
+    for row in sorted(state, key=lambda r: str(r.get("ARFCLUWCNT", ""))):
+        luw = row.get("ARFCLUWCNT")
+        blocks = sorted(
+            (r for r in data if r.get("ARFCLUWCNT") == luw),
+            key=lambda r: bytes(r.get("ARFCBLCNT", b"")),
+        )
+        if not blocks:
+            raise ValueError(f"call {luw} ({row.get('ARFCFNAM', '').strip()}) has no DATA rows")
+        record = b"".join(bytes(block[c]) for block in blocks for c in columns if c in block)
+        calls.append((str(row.get("ARFCFNAM", "")).strip(), record))
+    return tids.pop(), calls
+
+
+def _trfc_ship_ok(request: bytes) -> bytes:
+    """ARFC_DEST_SHIP's answer for a LUW that ran.
+
+    The reference SDK's server answers with STATE and DATA at the widths the request
+    declared and no rows (live, trfc_inbound.json); this sends the same tables after
+    the return code saprfclib answers every successful call with.
+    """
+    parts = [
+        tlv_record(_TAG_RESPONSE_START),
+        tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_OK)),
+    ]
+    recs = list(_iter_tlv_records(request))
+    for i, (tag, value) in enumerate(recs[:-1]):
+        nxt_tag, nxt = recs[i + 1]
+        if tag == _TAG_TABLE_NAME and nxt_tag == _TAG_TABLE_INFO and len(nxt) >= 4:
+            parts.append(tlv_record(_TAG_TABLE_NAME, value))
+            parts.append(tlv_record(_TAG_TABLE_INFO, nxt[:4] + b"\0\0\0\0"))
+    parts.append(tlv_record(_TAG_TERMINATOR))
+    return b"".join(parts)
+
+
 def _response_tlv(func_desc: FunctionDesc | None, result: dict[str, Any]) -> bytes:
     """The reply to an inbound call (see RfcServer._build_response); shared with client callbacks."""
     result_upper = {k.upper(): v for k, v in result.items()}
@@ -640,6 +674,10 @@ class RfcServer:
         self._on_commit_transaction: Callable[[str], None] | None = None
         self._on_rollback_transaction: Callable[[str], None] | None = None
         self._on_confirm_transaction: Callable[[str], None] | None = None
+        # ARFC_DEST_SHIP / ARFC_DEST_CONFIRM as the system describes them: the layouts
+        # of the STATE / DATA rows and of CALLID that inbound tRFC is read with.
+        self._trfc_ship_desc: FunctionDesc | None = None
+        self._trfc_confirm_desc: FunctionDesc | None = None
         # bgRFC Unit store (TRFC-07 / D-03): default InMemoryUnitStore so a bare server works.
         # Replace with a custom durable store via set_unit_store().
         self._unit_store: UnitStore = InMemoryUnitStore()
@@ -716,6 +754,25 @@ class RfcServer:
         NEVER logged (T-04-CRED / T-05-C03).
         """
         self._auth_check = fn
+
+    def set_trfc_descriptors(self, ship: FunctionDesc, confirm: FunctionDesc) -> None:
+        """Give the server ARFC_DEST_SHIP's and ARFC_DEST_CONFIRM's descriptors.
+
+        ABAP sends a tRFC or qRFC LUW as rows of the system's ARFCRSTATE / ARFCRDATA
+        tables and confirms it with an ARFCCALLID structure; their layouts come from
+        the system, not from this library. Fetch both once with a client connection::
+
+            with saprfclib.connect(...) as conn:
+                server.set_trfc_descriptors(
+                    saprfclib.get_function_desc(conn, "ARFC_DEST_SHIP"),
+                    saprfclib.get_function_desc(conn, "ARFC_DEST_CONFIRM"),
+                )
+
+        Without them an inbound tRFC is answered with a failure naming this method,
+        and ABAP keeps the LUW to send again.
+        """
+        self._trfc_ship_desc = ship
+        self._trfc_confirm_desc = confirm
 
     def set_tid_store(self, store: TidStore) -> None:
         """Replace the default InMemoryTidStore with a custom durable store (TRFC-08).
@@ -870,22 +927,17 @@ class RfcServer:
         """
         tlv = _strip_gw_header(frame)
 
-        # Phase-6 Pitfall 6 seam: the function name is the call-type discriminator.
-        # [ASSUMED] for inbound calls: SAP is expected to send a tRFC to a registered
-        # server as a call of ARFC_DEST_SHIP, as a client sends it (A4H runs a client's
-        # ARFC_DEST_SHIP call as that function module, live 2026-11-12). No capture of SAP
-        # sending a tRFC to a registered server exists yet.
+        # The function name is the call-type discriminator: ABAP sends a tRFC LUW to a
+        # registered server as ARFC_DEST_SHIP and a bgRFC unit as BGRFC_DEST_SHIP
+        # (live captures, trfc_inbound.json and bgrfc_inbound.json).
         fname = self._read_func_name(tlv)
 
         if fname == _ARFC_DEST_SHIP:
             # Transactional tRFC/qRFC inbound dispatch (TRFC-03).
             return self._dispatch_transactional(tlv, fname)
 
-        # ARFC_DEST_CONFIRM is handled by the gateway-side SAP infra; if it somehow
-        # reaches our registered server, respond with SYSTEM_FAILURE until a full
-        # confirm path is implemented (placeholder; does not regress sync tests).
         if fname == _ARFC_DEST_CONFIRM:
-            return self._build_rfc_ok_response()
+            return self._dispatch_trfc_confirm(tlv)
 
         # bgRFC unit submit (TRFC-07): BGRFC_DEST_SHIP → _dispatch_bgrfc_unit
         if fname == _BGRFC_DEST_SHIP:
@@ -929,40 +981,30 @@ class RfcServer:
     def _dispatch_transactional(self, tlv: bytes, fname: str) -> bytes:
         """Transactional (tRFC/qRFC) inbound dispatch — TRFC-03 exactly-once gate.
 
-        Implements the server-side dedup state machine from RESEARCH Pattern 2
-        (docs/protocol/trfc.md §"Server-Side Dispatch"):
+        ABAP's ARFC_DEST_SHIP (docs/protocol/trfc.md §"Inbound tRFC"): the LUW in the
+        STATE and DATA tables, one STATE row per call, as a client submits it.
 
-          1. Extract TID from the ARFCTID param; validate (V5 — reject non-24-char
-             TIDs before any store call, T-06-D02).
-          2. check_transaction(tid): if is_executed → return RFC_EXECUTED (no handler).
-          3. mark_received(tid) BEFORE handler execute (crash-safety, T-06-D01).
-          4. Run the application handler inside the standard exception-isolation block
-             (reuse of lines 413-418 verbatim, T-06-D03 / T-05-C01).
-             a. Success → mark_executed(tid) + confirm(tid).
-             b. Exception → mark_rolled_back(tid) + SYSTEM_FAILURE(str(exc)) first-line only.
+          1. Read the TID and the calls from STATE / DATA.
+          2. on_check(tid), or the TID store: already executed → answer success.
+          3. mark_received(tid) BEFORE any call runs (crash-safety, T-06-D01).
+          4. Run the calls in order, stopping at the first failure (T-06-D03).
+          5. Success → mark_executed + on_commit; failure → mark_rolled_back +
+             on_rollback, and the failure is answered.
 
-        When ``install_transaction_handlers`` callbacks are set, they are invoked at
-        the corresponding points (step 2 → on_check; step 4a → on_commit + on_confirm;
-        step 4b → on_rollback). Store calls serve as fallback when callbacks are unset.
-
-        The synchronous dispatch path (other function names) is NOT touched.
+        on_confirm runs on ABAP's ARFC_DEST_CONFIRM.
         """
-        # --- TID extraction + validation (V5 / T-06-D02) ---
-        tid = self._extract_tid_from_frame(tlv)
-        if not tid:
+        if self._trfc_ship_desc is None:
             return self._build_system_failure(
-                "ARFC_DEST_SHIP: missing ARFCTID param in inbound frame"
+                "ARFC_DEST_SHIP: a tRFC call arrived, but the server has no descriptor for "
+                "ARFC_DEST_SHIP to read its STATE and DATA rows with; call "
+                "RfcServer.set_trfc_descriptors() with the system's ARFC_DEST_SHIP and "
+                "ARFC_DEST_CONFIRM"
             )
-        if len(tid) != _TID_LN:
-            return self._build_system_failure(
-                f"ARFC_DEST_SHIP: invalid TID length {len(tid)} (expected {_TID_LN})"
-            )
-        if any(c not in _TID_ALPHABET for c in tid):
-            return self._build_system_failure(
-                "ARFC_DEST_SHIP: TID contains characters outside RFC alphabet"
-            )
+        try:
+            tid, calls = _trfc_luw(tlv, self._trfc_ship_desc)
+        except ValueError as exc:
+            return self._build_system_failure(f"ARFC_DEST_SHIP: {exc}")
 
-        # --- check_transaction: is_executed? (TRFC-03 dedup short-circuit) ---
         store = self._tid_store
         if self._on_check_transaction is not None:
             rc = self._on_check_transaction(tid)
@@ -971,59 +1013,72 @@ class RfcServer:
             already_done = store.is_executed(tid)
 
         if already_done:
-            # Known TID — return RFC_EXECUTED; DO NOT call the application handler.
-            return self._build_rfc_executed_response()
+            # Answered as a LUW that ran, without running it: ABAP then confirmed it
+            # (live probe, trfc_inbound.json "saprfclib_already_executed").
+            return _trfc_ship_ok(tlv)
 
         # --- persist BEFORE execute (crash-safety — Pattern 2, T-06-D01) ---
         store.mark_received(tid)
 
-        # --- resolve handler from registry (wrapped FM name is in ARFCFNAM param) ---
-        wrapped_fn = self._extract_param_from_frame(tlv, "ARFCFNAM")
-        entry = None
-        if wrapped_fn:
-            entry = self._registry.get(wrapped_fn.upper())
-        if entry is None and self._generic is not None and wrapped_fn:
-            entry = self._generic(wrapped_fn)
-        # If no handler, run a no-op (consistent with exactly-once: we still mark TID).
-        # The handler must be present for a meaningful execution; if absent, the TID
-        # is persisted but SYSTEM_FAILURE is returned (deferred-handler path).
-        if entry is None:
+        # A LUW is one unit of work, and ABAP sends the whole of it again after a
+        # failure: stop at the first call that fails rather than run the rest twice.
+        error: str | None = None
+        for func_name, record in calls:
+            try:
+                error = self._execute_unit_call(func_name, record)
+            except Exception as exc:  # noqa: BLE001 — isolate ALL errors (T-06-D03)
+                error = str(exc).splitlines()[0][:512]
+            if error is not None:
+                break
+
+        if error is not None:
             store.mark_rolled_back(tid)
             if self._on_rollback_transaction is not None:
-                self._on_rollback_transaction(tid)
-            return self._build_system_failure(
-                f"ARFC_DEST_SHIP: no handler registered for {wrapped_fn!r}"
-            )
-        func_desc, handler = entry
+                try:
+                    self._on_rollback_transaction(tid)
+                except Exception:  # noqa: BLE001 — a bad callback must not kill the server
+                    _logger.exception(
+                        "tRFC: on_rollback raised for TID %s; the LUW was rolled back on "
+                        "the wire but the callback did not complete",
+                        tid,
+                    )
+            return self._build_system_failure(error)
 
-        # --- deserialize request (Pitfall 4 direction flip — same as sync path) ---
-        request = self._deserialize_request(tlv, func_desc) if func_desc is not None else {}
-
-        # --- handler dispatch, exception-isolated (T-06-D03 / T-05-C01) ---
-        try:
-            result = handler(request)
-        except Exception as exc:  # noqa: BLE001 — isolate ALL handler errors
-            store.mark_rolled_back(tid)
-            if self._on_rollback_transaction is not None:
-                self._on_rollback_transaction(tid)
-            # str(exc) only — no traceback, no credential leak (T-06-D03 / T-05-C02).
-            return self._build_system_failure(str(exc))
-
-        # --- commit (on_commit) — mark TID executed; keep in store for dedup ---
-        # NOTE: confirm() / on_confirm are NOT called here. The TID must remain
-        # in the store as "executed" so that retry deliveries see it as a dup
-        # and return RFC_EXECUTED (exactly-once guarantee). Confirmation (cleanup)
-        # happens only when the client sends ARFC_DEST_CONFIRM (a separate call),
-        # which maps to the on_confirm callback. Removing the TID here (calling
-        # store.confirm()) would break dedup on retry — Pitfall 3.
+        # The TID stays in the store as executed, so a resend is recognised; it is
+        # confirmed (removed) only on ABAP's ARFC_DEST_CONFIRM.
         store.mark_executed(tid)
         if self._on_commit_transaction is not None:
-            self._on_commit_transaction(tid)
+            try:
+                self._on_commit_transaction(tid)
+            except Exception:  # noqa: BLE001 — isolate callback errors
+                _logger.exception("tRFC: on_commit raised for TID %s", tid)
+        return _trfc_ship_ok(tlv)
 
-        if result is None:
-            result = {}
-        # tRFC has no EXPORTING params by design (CONTEXT Claude's discretion).
-        # Return a minimal success response (RFC_OK) without deserializing the desc.
+    def _dispatch_trfc_confirm(self, tlv: bytes) -> bytes:
+        """ARFC_DEST_CONFIRM: ABAP is done with a TID (live, trfc_inbound.json).
+
+        ABAP sends it after every LUW: in the same conversation after one that ran,
+        in a new one with ERRORSTATUS 1 after one that failed. Either way the TID is
+        released, as the reference SDK's server does.
+        """
+        if self._trfc_confirm_desc is None:
+            return self._build_system_failure(
+                "ARFC_DEST_CONFIRM: no descriptor for ARFC_DEST_CONFIRM; call "
+                "RfcServer.set_trfc_descriptors()"
+            )
+        callid = self._deserialize_request(tlv, self._trfc_confirm_desc).get("CALLID")
+        if not isinstance(callid, dict):
+            return self._build_system_failure("ARFC_DEST_CONFIRM: CALLID is missing")
+        try:
+            tid = _tid_of(callid)
+        except ValueError as exc:
+            return self._build_system_failure(f"ARFC_DEST_CONFIRM: {exc}")
+        self._tid_store.confirm(tid)
+        if self._on_confirm_transaction is not None:
+            try:
+                self._on_confirm_transaction(tid)
+            except Exception:  # noqa: BLE001 — cleanup must not fail the confirm
+                _logger.exception("tRFC: on_confirm raised for TID %s", tid)
         return self._build_rfc_ok_response()
 
     # --------------------------------------------------------------------- #
@@ -1289,7 +1344,12 @@ class RfcServer:
         name_to_field: dict[str, FieldDesc] = {f.name.upper(): f for f in func_desc.parameters}
         request: dict[str, object] = {}
         xml: dict[str, bytes] = {}
-        for name, raw in _extract_name_value_pairs(tlv, basxml_out=xml):
+        # A table's rows are read at the width they arrive in, which the codec takes as
+        # bytes / declared row count. Without the count it cannot cut them: ABAP sends
+        # ARFC_DEST_SHIP's rows at their used width, 1917 and 955 bytes where 0x0302
+        # declares 1918 and 972 (live capture, 2026-11-27, trfc_inbound.json).
+        row_counts: dict[str, int] = {}
+        for name, raw in _extract_name_value_pairs(tlv, basxml_out=xml, row_counts_out=row_counts):
             field = name_to_field.get(name.upper())
             if field is None:
                 continue
@@ -1299,7 +1359,7 @@ class RfcServer:
                     "but its type travels as XML; the registered descriptor may not match "
                     "the caller's interface"
                 )
-            request[field.name] = decode(field.rfctype, raw, field)
+            request[field.name] = decode(field.rfctype, raw, field, row_counts.get(name))
         # Deep parameters arrive as XML, exactly as a client sends them (live capture,
         # 2026-11-26: ABAP calling STFC_DEEP_TABLE through a registered destination,
         # docs/protocol/serialization.md).
@@ -1324,68 +1384,6 @@ class RfcServer:
     # --------------------------------------------------------------------- #
     # Transactional dispatch helpers (TRFC-03)
     # --------------------------------------------------------------------- #
-
-    @staticmethod
-    def _extract_tid_from_frame(tlv: bytes) -> str:
-        """Extract the ARFCTID parameter value from an ARFC_DEST_SHIP frame.
-
-        Tries 0x0201/0x0203 pairs first (offline fixtures / Python-built frames),
-        then falls back to the 0x5001 compact block ([ASSUMED] to be how SAP sends an
-        inbound tRFC to a registered server — see ``_extract_5001_params``).
-
-        Returns the TID string (stripped of padding), or ``""`` if absent.
-        """
-        for name, val in _extract_name_value_pairs(tlv):
-            if name.upper() == _PARAM_ARFCTID:
-                return _decode_utf16le(val)
-        # Fallback: live SAP sends params in 0x5001 compact block (ARFC_DEST_SHIP)
-        raw_5001 = _parse_tlv_stream(tlv).get(0x5001)
-        if raw_5001 is not None:
-            tid, _ = _extract_trfc_params_from_5001(raw_5001)
-            return tid
-        return ""
-
-    @staticmethod
-    def _extract_param_from_frame(tlv: bytes, param_name: str) -> str:
-        """Extract any named UTF-16LE CHAR param value from a TLV frame.
-
-        Tries 0x0201/0x0203 pairs first (offline fixtures / Python-built frames),
-        then falls back to the 0x5001 compact block (live SAP inbound tRFC frames).
-
-        Used for ARFCFNAM (the wrapped function module name) and other metadata
-        params in the ARFC_DEST_SHIP frame.  Returns ``""`` if absent.
-        """
-        key = param_name.upper()
-        for name, val in _extract_name_value_pairs(tlv):
-            if name.upper() == key:
-                return _decode_utf16le(val)
-        # Fallback: live SAP sends params in 0x5001 compact block (ARFC_DEST_SHIP)
-        raw_5001 = _parse_tlv_stream(tlv).get(0x5001)
-        if raw_5001 is not None:
-            tid, arfcfnam = _extract_trfc_params_from_5001(raw_5001)
-            if key == "ARFCFNAM":
-                return arfcfnam
-            if key == _PARAM_ARFCTID:
-                return tid
-        return ""
-
-    def _build_rfc_executed_response(self) -> bytes:
-        """Build the RFC_EXECUTED reply: return code 16 [ASSUMED, see _RC_EXECUTED].
-
-        The response return code is _RC_EXECUTED (16).  SAP's client interprets
-        this as "TID already executed" and does NOT raise an error; it is a
-        normal flow indicator for exactly-once dedup (TRFC-03).
-
-        0x0500, then 0x0420 carrying _RC_EXECUTED [ASSUMED], then the terminator. No
-        error-message TLV is emitted (not an error path).
-        """
-        return b"".join(
-            [
-                tlv_record(_TAG_RESPONSE_START),
-                tlv_record(_TAG_RETURN_CODE, struct.pack(">I", _RC_EXECUTED)),
-                tlv_record(_TAG_TERMINATOR),
-            ]
-        )
 
     def _build_rfc_ok_response(self) -> bytes:
         """Build a minimal RFC_OK (return-code 0) response with no output params.

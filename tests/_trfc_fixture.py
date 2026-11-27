@@ -18,7 +18,6 @@ from saprfclib.connection import (
     _join_response_frames,
     _parse_ddif_dfies_rows,
 )
-from saprfclib.invoke import tlv_record
 from saprfclib.types import RFC_IMPORT, RFC_TABLES, FieldDesc, FunctionDesc, TypeDesc
 
 FX = json.loads(
@@ -83,25 +82,45 @@ def use_fixture_metadata(monkeypatch, conn=None) -> None:
         monkeypatch.setattr(conn, "_desc_for", _desc_for)
 
 
-def forged_inbound_trfc(tid: str, func_name: str) -> bytes:
-    """An inbound ARFC_DEST_SHIP frame in the shape the RFC server's handler reads.
+def forged_inbound_trfc(tid: str, func_name: str, *more: str) -> bytes:
+    """An ARFC_DEST_SHIP LUW of calls with no values, in STATE / DATA rows.
 
-    The server reads the TID from a parameter named ARFCTID ([ASSUMED] in
-    server.py: no capture of a SAP system sending tRFC to a registered server
-    exists). This is not what a client sends -- see build_trfc_request -- and is
-    used only to drive the server's inbound path.
+    The rows ABAP sends to a registered server have the layout a client submits
+    (tests/golden/trfc/trfc_inbound.json), so the client's own builder makes them.
     """
-    u = lambda s: s.encode("utf-16-le")  # noqa: E731
-    return b"".join(
-        [
-            tlv_record(0x0502),
-            tlv_record(0x000B, u("754")),
-            tlv_record(0x0102, u("ARFC_DEST_SHIP")),
-            tlv_record(0x0512),
-            tlv_record(0x0201, u("ARFCTID")),
-            tlv_record(0x0203, u(tid)),
-            tlv_record(0x0201, u("ARFCFNAM")),
-            tlv_record(0x0203, u(func_name)),
-            tlv_record(0xFFFF),
-        ]
+    from saprfclib.invoke import TrfcOrigin, build_trfc_call, build_trfc_request
+
+    origin = TrfcOrigin(session_token=bytes(16), **FX["origin"])
+    calls = [
+        (name, build_trfc_call(name, FunctionDesc(name, []), {}, origin))
+        for name in (func_name, *more)
+    ]
+    return build_trfc_request(tid, calls, SHIP, origin)
+
+
+def _inbound() -> dict:
+    return json.loads(
+        (pathlib.Path(__file__).parent / "golden" / "trfc" / "trfc_inbound.json").read_text(
+            encoding="utf-8"
+        )
     )
+
+
+def confirm_desc() -> FunctionDesc:
+    """ARFC_DEST_CONFIRM's CALLID, laid out from the captured DDIF_FIELDINFO_GET reply."""
+    frames = iter(bytes.fromhex(h) for h in _inbound()["ddif_arfccallid"])
+    reply = _join_response_frames(lambda: next(frames), "DDIF_FIELDINFO_GET")
+    callid = _build_type_desc_from_ddif("ARFCCALLID", _parse_ddif_dfies_rows(reply))
+    return FunctionDesc(
+        name="ARFC_DEST_CONFIRM",
+        parameters=[
+            # CALLID is a structure (RFCTYPE 17) of 64 characters in the system's
+            # interface for ARFC_DEST_CONFIRM, read live 2026-11-27.
+            FieldDesc("CALLID", 17, 64, 0, 128, 0, 0, type_desc=callid, direction=RFC_IMPORT)
+        ],
+    )
+
+
+def trfc_descriptors() -> tuple[FunctionDesc, FunctionDesc]:
+    """What RfcServer.set_trfc_descriptors() takes: ARFC_DEST_SHIP, ARFC_DEST_CONFIRM."""
+    return SHIP, confirm_desc()
